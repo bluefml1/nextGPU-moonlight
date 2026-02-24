@@ -1,1 +1,1 @@
-VERSION:testing
+VERSION:Beta1.0
