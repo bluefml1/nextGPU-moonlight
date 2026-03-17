@@ -1,4 +1,3 @@
-
 # Moonlight Web
 An unofficial [Moonlight Client](https://moonlight-stream.org/) allowing you to stream your pc to the Web.
 It hosts a Web Server which will forward [Sunshine](https://docs.lizardbyte.dev/projects/sunshine/latest/) traffic to a Browser using the [WebRTC Api](https://webrtc.org/).
@@ -18,6 +17,7 @@ It hosts a Web Server which will forward [Sunshine](https://docs.lizardbyte.dev/
   - [Authentication with a Reverse Proxy](#authentication-using-a-reverse-proxy)
 - [Config](#config)
 - [Migrating to v2](#migrating-to-v2)
+- [Known Issues & Bug Fixes](#known-issues--bug-fixes)
 - [Contributors](#contributors)
 - [Building](#building)
 
@@ -481,6 +481,80 @@ Other changes:
 - Proxy path changed:
   - change all instances of `ProxyPass ${MOONLIGHT_SUBPATH}/ http://${MOONLIGHT_STREAMER}/`<br> to `ProxyPass ${MOONLIGHT_SUBPATH}/ http://${MOONLIGHT_STREAMER}${MOONLIGHT_SUBPATH}/`
   - [Proxying via Apache 2](https://github.com/MrCreativ3001/moonlight-web-stream/tree/v2?tab=readme-ov-file#proxying-via-apache-2)
+
+---
+
+## Known Issues & Bug Fixes
+
+### Chrome Drops TURN Relay Connection Mid-Stream (Safari Works Fine)
+
+**Symptom:** Streaming over the internet through a TURN server works in Safari but fails or drops unexpectedly in Chrome.
+
+**Root Cause:**
+
+Both Chrome and Safari successfully establish a TURN relay connection and gather ICE candidates of all types (`host`, `srflx`, `relay`). The difference is in how each browser handles candidate selection:
+
+- **Safari** is conservative — once a `relay` candidate is working, it sticks with it.
+- **Chrome** is aggressive — it continuously re-evaluates all available candidates and will switch away from `relay` to a faster `host` or `srflx` candidate the moment one appears viable. In networks that require TURN (e.g. symmetric NAT, strict corporate firewall), those faster candidates are not actually routable, so Chrome silently breaks the stream by switching to a path that cannot complete.
+
+Neither the client nor the host side were enforcing `relay`-only candidate usage, so Chrome's dynamic switching behavior was unconstrained.
+
+**Fix: Force `relay`-only ICE transport on both client and host**
+
+The fix sacrifices the marginal latency advantage of `host`/`srflx` paths in favour of a stable, always-working TURN relay connection. This only matters when streaming over the internet through a TURN server — LAN connections are unaffected.
+
+#### Client Side (Browser)
+
+When creating the `RTCPeerConnection`, set `iceTransportPolicy` to `"relay"`. This instructs the browser to only gather and use `relay`-type candidates, preventing Chrome from ever attempting to switch to a non-relay path:
+
+```js
+// Before
+const peerConnection = new RTCPeerConnection({
+    iceServers: iceServers,
+});
+
+// After
+const peerConnection = new RTCPeerConnection({
+    iceServers: iceServers,
+    iceTransportPolicy: "relay",  // Only use TURN relay candidates
+});
+```
+
+#### Host Side (Rust)
+
+On the server side, set `RTCIceTransportPolicy::Relay` when building the `RTCConfiguration` so the host peer also restricts itself to relay candidates:
+
+```rust
+use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::ice_transport::ice_transport_policy::RTCIceTransportPolicy;
+
+// Before
+let config = RTCConfiguration {
+    ice_servers: ice_servers,
+    ..Default::default()
+};
+
+// After
+let config = RTCConfiguration {
+    ice_servers: ice_servers,
+    ice_transport_policy: RTCIceTransportPolicy::Relay,  // Only use TURN relay candidates
+    ..Default::default()
+};
+```
+
+> **Why both sides?** Fixing only the client prevents Chrome from switching away from relay, but the host could still offer non-relay candidates during ICE negotiation, potentially causing asymmetric routing. Fixing both sides ensures the full negotiation is relay-constrained end-to-end.
+
+**Trade-offs**
+
+| | Before fix | After fix |
+|---|---|---|
+| Safari (TURN) | ✅ Works | ✅ Works |
+| Chrome (TURN) | ❌ Drops mid-stream | ✅ Works |
+| LAN (no TURN) | ✅ Works | ✅ Works (unaffected) |
+| Latency | Lower (uses fastest path) | Slightly higher (~10–30ms added by TURN relay) |
+| TURN server load | Partial (only when direct fails) | Full (all internet traffic relays through TURN) |
+
+---
 
 ## Contributors
 - Thanks to [@Argon2000](https://github.com/Argon2000) for implementing a canvas renderer, which makes this run in the Tesla browser.
