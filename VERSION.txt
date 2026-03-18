@@ -1,4 +1,4 @@
-VERSION:Beta2.1
+VERSION:Beta2.2
 Fix:
 Sacrifice faster solution like "srflx" or "host" to permanently/always use "relay" as streaming method on both side.
 Improve user experience:
