@@ -2,4 +2,5 @@ VERSION:Beta2.1
 Fix:
 Sacrifice faster solution like "srflx" or "host" to permanently/always use "relay" as streaming method on both side.
 Improve user experience:
--Modify settings panel, adding waiting overlay, require gesture to fullscreen overlay, discard fullscreen notification
+-Modify settings panel, adding waiting overlay, require gesture to fullscreen overlay
+032126:Apply file transfer 
