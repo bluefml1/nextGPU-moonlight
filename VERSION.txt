@@ -4,3 +4,4 @@ Sacrifice faster solution like "srflx" or "host" to permanently/always use "rela
 Improve user experience:
 -Modify settings panel, adding waiting overlay, require gesture to fullscreen overlay
 032126:Apply file transfer 
+032226:Apply Clipboardsync
