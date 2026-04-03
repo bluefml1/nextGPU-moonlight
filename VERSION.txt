@@ -6,3 +6,4 @@ Improve user experience:
 032126:Apply file transfer 
 032226:Apply Clipboardsync
 032626:Fix fileTransfer path
+040326:Improve UI
