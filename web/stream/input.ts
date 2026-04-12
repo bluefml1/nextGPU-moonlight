@@ -1,4 +1,4 @@
-import { StreamCapabilities, StreamControllerCapabilities, StreamKeys, StreamMouseButton, TransportChannelId } from "../api_bindings.js"
+import { StreamCapabilities, StreamControllerCapabilities, StreamMouseButton, TransportChannelId } from "../api_bindings.js"
 import { ByteBuffer, I16_MAX, U16_MAX, U8_MAX } from "./buffer.js"
 import { ControllerConfig, emptyGamepadState, extractGamepadState, GamepadState, SUPPORTED_BUTTONS } from "./gamepad.js"
 import { convertToKey, convertToModifiers } from "./keyboard.js"
@@ -157,19 +157,11 @@ export class StreamInput {
         this.capabilities = capabilities
         this.streamerSize = streamerSize
         this.registerBufferedControllers()
-        this.inferredHostCapsLockState = false
-        this.sendReleaseAllKeys()
     }
 
     // -- Keyboard
-    private pressedByCode: Map<string, { vk: number, modifiers: number, isModifier: boolean }> = new Map()
-    private recentModifierState: { shift: boolean, ctrl: boolean, alt: boolean, meta: boolean, capsLock: boolean } | null = null
+    private pressedKeys: Set<number> = new Set()
     private lastKeyboardEventAtMs = 0
-    private expectedCapsLockState: boolean | null = null
-    private inferredHostCapsLockState: boolean | null = null
-    private lastCapsLockSyncAtMs = 0
-    private static readonly CAPS_LOCK_SYNC_COOLDOWN_MS = 400
-    private static readonly WATCHDOG_STALE_MODIFIER_GRACE_MS = 350
     private static readonly WATCHDOG_STUCK_KEY_MS = 5000
 
     onKeyDown(event: KeyboardEvent) {
@@ -205,45 +197,25 @@ export class StreamInput {
     }
 
     private sendKeyEvent(isDown: boolean, event: KeyboardEvent) {
-        this.updateExpectedCapsLockState(event)
-        this.updateRecentModifierState(event)
+        this.lastKeyboardEventAtMs = Date.now()
 
         const key = convertToKey(event)
         if (key == null) {
             return
         }
 
-        // Keep lock-state aligned before forwarding regular key events.
-        if (key !== StreamKeys.VK_CAPITAL) {
-            this.maybeSyncCapsLockState()
-        }
-
-        const code = event.code || `__vk_${key}`
-
         if (isDown) {
-            if (event.repeat) {
-                console.debug("[Keyboard]: Ignoring repeated keydown", code, key)
+            if (this.pressedKeys.has(key)) {
                 return
             }
 
-            if (this.pressedByCode.has(code)) {
-                return
-            }
-
-            this.pressedByCode.set(code, {
-                vk: key,
-                modifiers: convertToModifiers(event),
-                isModifier: this.isModifierCode(code),
-            })
+            this.pressedKeys.add(key)
         } else {
-            const pressedState = this.pressedByCode.get(code)
-            if (!pressedState) {
+            if (!this.pressedKeys.has(key)) {
                 return
             }
 
-            this.pressedByCode.delete(code)
-            this.sendKey(false, pressedState.vk, pressedState.modifiers)
-            return
+            this.pressedKeys.delete(key)
         }
 
         const modifiers = convertToModifiers(event)
@@ -257,22 +229,13 @@ export class StreamInput {
             )
         }
         this.sendKey(isDown, key, modifiers)
-
-        // Keep a best-effort host-side lock state model for lock-key toggles.
-        if (key === StreamKeys.VK_CAPITAL && isDown) {
-            if (this.inferredHostCapsLockState == null) {
-                this.inferredHostCapsLockState = this.expectedCapsLockState ?? null
-            } else {
-                this.inferredHostCapsLockState = !this.inferredHostCapsLockState
-            }
-        }
     }
 
     raiseAllKeys() {
-        for (const value of this.pressedByCode.values()) {
-            this.sendKey(false, value.vk, value.modifiers)
+        for (const key of this.pressedKeys) {
+            this.sendKey(false, key, 0)
         }
-        this.pressedByCode.clear()
+        this.pressedKeys.clear()
     }
 
     sendReleaseAllKeys() {
@@ -288,9 +251,6 @@ export class StreamInput {
 
     onInputContextLost() {
         this.resetAllKeys()
-        // Host lock state may have changed while unfocused; force re-learning.
-        this.inferredHostCapsLockState = null
-        this.lastCapsLockSyncAtMs = 0
     }
 
     watchdogTick(shouldForceRelease: boolean) {
@@ -298,103 +258,16 @@ export class StreamInput {
             this.resetAllKeys()
             return
         }
-        if (this.pressedByCode.size == 0) {
+        if (this.pressedKeys.size == 0) {
             return
         }
 
         const now = Date.now()
         const staleMs = now - this.lastKeyboardEventAtMs
 
-        // Reconcile modifier keys against the last known browser modifier state.
-        if (this.recentModifierState && staleMs >= StreamInput.WATCHDOG_STALE_MODIFIER_GRACE_MS) {
-            for (const [code, pressed] of this.pressedByCode.entries()) {
-                if (!pressed.isModifier) {
-                    continue
-                }
-                const isStillPressed = this.getModifierStateByCode(code, this.recentModifierState)
-                if (!isStillPressed) {
-                    this.sendKey(false, pressed.vk, pressed.modifiers)
-                    this.pressedByCode.delete(code)
-                }
-            }
-        }
-
-        // If a key has been held a long time without fresh keyboard activity, release it defensively.
         if (staleMs >= StreamInput.WATCHDOG_STUCK_KEY_MS) {
             this.resetAllKeys()
         }
-    }
-
-    private isModifierCode(code: string): boolean {
-        return code.startsWith("Shift")
-            || code.startsWith("Control")
-            || code.startsWith("Alt")
-            || code.startsWith("Meta")
-            || code === "CapsLock"
-    }
-
-    private getModifierStateByCode(
-        code: string,
-        state: { shift: boolean, ctrl: boolean, alt: boolean, meta: boolean, capsLock: boolean }
-    ): boolean {
-        if (code.startsWith("Shift")) {
-            return state.shift
-        }
-        if (code.startsWith("Control")) {
-            return state.ctrl
-        }
-        if (code.startsWith("Alt")) {
-            return state.alt
-        }
-        if (code.startsWith("Meta")) {
-            return state.meta
-        }
-        if (code === "CapsLock") {
-            return state.capsLock
-        }
-        return true
-    }
-
-    private updateRecentModifierState(event: KeyboardEvent) {
-        this.lastKeyboardEventAtMs = Date.now()
-        if (typeof event.getModifierState !== "function") {
-            return
-        }
-        this.recentModifierState = {
-            shift: event.getModifierState("Shift"),
-            ctrl: event.getModifierState("Control"),
-            alt: event.getModifierState("Alt"),
-            meta: event.getModifierState("Meta"),
-            capsLock: event.getModifierState("CapsLock"),
-        }
-    }
-
-    private updateExpectedCapsLockState(event: KeyboardEvent) {
-        if (typeof event.getModifierState !== "function") {
-            return
-        }
-        this.expectedCapsLockState = event.getModifierState("CapsLock")
-        if (this.inferredHostCapsLockState == null) {
-            this.inferredHostCapsLockState = this.expectedCapsLockState
-        }
-    }
-
-    private maybeSyncCapsLockState() {
-        if (this.expectedCapsLockState == null || this.inferredHostCapsLockState == null) {
-            return
-        }
-        if (this.expectedCapsLockState === this.inferredHostCapsLockState) {
-            return
-        }
-        const now = Date.now()
-        if (now - this.lastCapsLockSyncAtMs < StreamInput.CAPS_LOCK_SYNC_COOLDOWN_MS) {
-            return
-        }
-
-        this.sendKey(true, StreamKeys.VK_CAPITAL, 0)
-        this.sendKey(false, StreamKeys.VK_CAPITAL, 0)
-        this.inferredHostCapsLockState = this.expectedCapsLockState
-        this.lastCapsLockSyncAtMs = now
     }
 
     // Note: key = StreamKeys.VK_, modifiers = StreamKeyModifiers.
