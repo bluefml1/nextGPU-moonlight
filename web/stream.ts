@@ -264,12 +264,19 @@ class ViewerApp implements Component {
     /** Avoid sending matching keyup to host after we skipped keydown (Ctrl/Cmd+Shift+V paste / copy-progress). */
     private skipNextHostKeyUpCodes: Set<string> = new Set()
     private keyWatchdogInterval: ReturnType<typeof setInterval> | null = null
+    private adaptivePointerLockArmed = false
+    private adaptivePointerLockActive = false
+    private adaptivePointerLockReleaseTimer: ReturnType<typeof setTimeout> | null = null
 
     private devConnectionLog: DevStreamConnectionLog | null = null
     private devConnectionLogPoll: ReturnType<typeof setInterval> | null = null
     private lastSidebarAnchorKey = ""
 
     private readonly streamConnectionConsoleLogger = new StreamConnectionInfoConsoleLogger()
+
+    private adaptiveLog(message: string) {
+        console.info(`[AdaptiveMouse] ${message}`)
+    }
 
     constructor(api: Api, hostId: number, appId: number) {
         this.api = api
@@ -424,6 +431,13 @@ class ViewerApp implements Component {
         const stream = this.stream
         if (stream) {
             this.releaseAllKeys("before stream restart")
+            this.adaptivePointerLockArmed = false
+            this.adaptivePointerLockActive = false
+            if (this.adaptivePointerLockReleaseTimer != null) {
+                clearTimeout(this.adaptivePointerLockReleaseTimer)
+                this.adaptivePointerLockReleaseTimer = null
+            }
+            this.adaptiveLog("reset adaptive mouse state (stream restart)")
             const success = await stream.stop()
             if (!success) {
                 console.debug("Restart: stream stop reported failure, continuing anyway")
@@ -447,6 +461,39 @@ class ViewerApp implements Component {
         } else if (data.type == "connectionComplete") {
             this.sidebar.onCapabilitiesChange(data.capabilities)
             MoonlightLoadingScreen.hide()
+        } else if (data.type == "hostCursorHidden") {
+            if (data.hidden) {
+                if (this.adaptivePointerLockReleaseTimer != null) {
+                    clearTimeout(this.adaptivePointerLockReleaseTimer)
+                    this.adaptivePointerLockReleaseTimer = null
+                    this.adaptiveLog("cancel debounced pointer lock release (host cursor hidden again)")
+                }
+                this.adaptivePointerLockArmed = true
+                this.adaptiveLog("host cursor hidden -> arm pointer lock on next click")
+            } else {
+                this.adaptivePointerLockArmed = false
+                this.adaptiveLog("host cursor visible -> disarm pointer lock auto-capture")
+
+                if (this.adaptivePointerLockActive && document.pointerLockElement) {
+                    if (this.adaptivePointerLockReleaseTimer != null) {
+                        clearTimeout(this.adaptivePointerLockReleaseTimer)
+                    }
+                    this.adaptiveLog("schedule debounced pointer lock release (250ms)")
+                    this.adaptivePointerLockReleaseTimer = setTimeout(() => {
+                        this.adaptivePointerLockReleaseTimer = null
+                        if (!this.adaptivePointerLockActive) {
+                            this.adaptiveLog("debounced release skipped (auto pointer lock no longer active)")
+                            return
+                        }
+                        this.adaptiveLog("debounced release firing -> exitPointerLock()")
+                        void this.exitPointerLock()
+                        this.adaptivePointerLockActive = false
+                    }, 250)
+                } else {
+                    this.adaptivePointerLockActive = false
+                    this.adaptiveLog("visible host cursor, no auto pointer lock active")
+                }
+            }
         } else if (data.type == "addDebugLine") {
             const message = data.line.trim()
             if (
@@ -681,6 +728,25 @@ class ViewerApp implements Component {
     // Mouse
     onMouseButtonDown(event: MouseEvent) {
         this.onUserInteraction()
+
+        if (
+            this.adaptivePointerLockArmed &&
+            this.getInputConfig().mouseMode !== "relative" &&
+            this.getInputConfig().mouseMode !== "pointAndDrag" &&
+            !document.pointerLockElement
+        ) {
+            this.adaptiveLog(`click with armed auto-lock -> requestPointerLock() (mouseMode=${this.getInputConfig().mouseMode})`)
+            void this.requestPointerLock()
+                .then(() => {
+                    this.adaptivePointerLockArmed = false
+                    this.adaptivePointerLockActive = true
+                    this.adaptiveLog("pointer lock acquired via auto-lock path")
+                })
+                .catch((error) => {
+                    console.debug("failed to auto-request pointer lock for hidden host cursor", error)
+                    this.adaptiveLog(`pointer lock request failed in auto-lock path: ${String(error)}`)
+                })
+        }
 
         event.preventDefault()
         this.stream?.getInput().onMouseDown(event, this.getStreamRect());
@@ -1209,6 +1275,15 @@ class ViewerApp implements Component {
         if (!document.pointerLockElement) {
             this.inputConfig.mouseMode = this.previousMouseMode
             this.setInputConfig(this.inputConfig)
+            this.adaptivePointerLockActive = false
+            if (this.adaptivePointerLockReleaseTimer != null) {
+                clearTimeout(this.adaptivePointerLockReleaseTimer)
+                this.adaptivePointerLockReleaseTimer = null
+                this.adaptiveLog("cleared debounced pointer lock release timer (pointer lock exited)")
+            }
+            this.adaptiveLog(`pointer lock exited -> restored mouseMode=${this.inputConfig.mouseMode}`)
+        } else {
+            this.adaptiveLog("pointer lock entered")
         }
     }
 
@@ -1232,6 +1307,13 @@ class ViewerApp implements Component {
             clearInterval(this.keyWatchdogInterval)
             this.keyWatchdogInterval = null
         }
+        this.adaptivePointerLockArmed = false
+        this.adaptivePointerLockActive = false
+        if (this.adaptivePointerLockReleaseTimer != null) {
+            clearTimeout(this.adaptivePointerLockReleaseTimer)
+            this.adaptivePointerLockReleaseTimer = null
+        }
+        this.adaptiveLog("reset adaptive mouse state (viewer app unmount)")
         this.releaseAllKeys("viewer app unmount")
         parent.removeChild(this.div)
     }

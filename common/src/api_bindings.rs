@@ -417,6 +417,21 @@ pub struct StreamCapabilities {
     pub touch: bool,
 }
 
+#[derive(Serialize, Deserialize, Debug, TS, Clone)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub struct HostCursorShape {
+    pub visible: bool,
+    pub width: u16,
+    pub height: u16,
+    pub hotspot_x: u16,
+    pub hotspot_y: u16,
+    pub rgba: Vec<u8>,
+    #[serde(default)]
+    pub cursor_type: Option<u8>,
+    #[serde(default)]
+    pub flags: Option<u8>,
+}
+
 #[derive(Serialize, Deserialize, Debug, TS)]
 #[ts(export, export_to = EXPORT_PATH)]
 #[serde(rename_all = "camelCase")]
@@ -443,6 +458,9 @@ pub enum StreamServerMessage {
     DebugLog {
         message: String,
         ty: Option<LogMessageType>,
+    },
+    CursorShape {
+        cursor: HostCursorShape,
     },
     ConnectionComplete {
         capabilities: StreamCapabilities,

@@ -53,7 +53,7 @@ use tokio::{
 use tracing::{Level, level_filters::LevelFilter, span};
 use tracing::{debug, error, info, trace, warn};
 
-use common::api_bindings::{StreamCapabilities, StreamServerMessage};
+use common::api_bindings::{HostCursorShape, StreamCapabilities, StreamServerMessage};
 use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
@@ -1094,6 +1094,41 @@ impl ConnectionListener for StreamConnectionListener {
 
     fn controller_set_led(&mut self, _controller_number: u16, _r: u8, _g: u8, _b: u8) {
         // unsupported
+    }
+
+    fn set_cursor_shape(
+        &mut self,
+        visible: bool,
+        width: u16,
+        height: u16,
+        hotspot_x: u16,
+        hotspot_y: u16,
+        rgba_data: &[u8],
+    ) {
+        let Some(stream) = self.stream.upgrade() else {
+            warn!("Failed to get stream because it is already deallocated");
+            return;
+        };
+
+        let cursor = HostCursorShape {
+            visible,
+            width,
+            height,
+            hotspot_x,
+            hotspot_y,
+            rgba: rgba_data.to_vec(),
+            cursor_type: None,
+            flags: None,
+        };
+
+        stream.runtime.clone().block_on(async move {
+            let mut ipc_sender = stream.ipc_sender.clone();
+            ipc_sender
+                .send(StreamerIpcMessage::WebSocket(StreamServerMessage::CursorShape {
+                    cursor,
+                }))
+                .await;
+        });
     }
 }
 
