@@ -319,6 +319,7 @@ ts_consts!(
     pub const CONTROLLER14: u8 = 24;
     pub const CONTROLLER15: u8 = 25;
     pub const RTT: u8 = 26;
+    pub const CURSOR: u8 = 27;
 );
 
 #[derive(Serialize, Deserialize, Debug, TS, Clone, Copy, PartialEq, Eq)]

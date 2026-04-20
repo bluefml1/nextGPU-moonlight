@@ -46,7 +46,10 @@ use tokio::{
     io::{stdin, stdout},
     runtime::Handle,
     spawn,
-    sync::{Mutex, Notify, RwLock},
+    sync::{
+        Mutex, Notify, RwLock,
+        mpsc::{self, error::TrySendError},
+    },
     task::spawn_blocking,
     time::sleep,
 };
@@ -259,6 +262,7 @@ struct StreamConnection {
     pub active_gamepads: RwLock<ActiveGamepads>,
     pub pressed_keys: Mutex<HashSet<u16>>,
     pub transport_sender: Mutex<Option<Box<dyn TransportSender + Send + Sync + 'static>>>,
+    pub cursor_shape_tx: mpsc::Sender<HostCursorShape>,
     // Timeout / Terminate
     pub timeout_terminate_request: Mutex<Option<Instant>>,
     pub terminate: Notify,
@@ -275,6 +279,8 @@ impl StreamConnection {
         video_frame_queue_size: usize,
         audio_sample_queue_size: usize,
     ) -> Result<Arc<Self>, anyhow::Error> {
+        let (cursor_shape_tx, mut cursor_shape_rx) = mpsc::channel::<HostCursorShape>(64);
+
         let this = Arc::new(Self {
             runtime: Handle::current(),
             moonlight,
@@ -291,9 +297,31 @@ impl StreamConnection {
             active_gamepads: RwLock::new(ActiveGamepads::empty()),
             pressed_keys: Mutex::new(HashSet::new()),
             transport_sender: Mutex::new(None),
+            cursor_shape_tx,
             timeout_terminate_request: Default::default(),
             terminate: Notify::default(),
             is_terminating: AtomicBool::new(false),
+        });
+
+        spawn({
+            let this = Arc::downgrade(&this);
+            async move {
+                while let Some(cursor) = cursor_shape_rx.recv().await {
+                    let Some(this) = this.upgrade() else {
+                        debug!("Dropping cursor update because stream connection is already deallocated");
+                        return;
+                    };
+
+                    this.try_send_packet(
+                        OutboundPacket::CursorShape {
+                            cursor,
+                        },
+                        "cursor shape",
+                        false,
+                    )
+                    .await;
+                }
+            }
         });
 
         spawn({
@@ -1121,14 +1149,15 @@ impl ConnectionListener for StreamConnectionListener {
             flags: None,
         };
 
-        stream.runtime.clone().block_on(async move {
-            let mut ipc_sender = stream.ipc_sender.clone();
-            ipc_sender
-                .send(StreamerIpcMessage::WebSocket(StreamServerMessage::CursorShape {
-                    cursor,
-                }))
-                .await;
-        });
+        match stream.cursor_shape_tx.try_send(cursor) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                debug!("Dropping cursor update because cursor queue is full");
+            }
+            Err(TrySendError::Closed(_)) => {
+                warn!("Dropping cursor update because cursor queue is closed");
+            }
+        }
     }
 }
 

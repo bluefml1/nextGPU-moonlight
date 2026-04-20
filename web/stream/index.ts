@@ -329,9 +329,6 @@ export class Stream implements Component {
             })
 
             this.eventTarget.dispatchEvent(event)
-        } else if ("CursorShape" in message) {
-            // Keep cursor updates off the decode path.
-            queueMicrotask(() => this.applyHostCursorShape(message.CursorShape.cursor))
         } else if ("ConnectionComplete" in message) {
             const capabilities = message.ConnectionComplete.capabilities
             const formatRaw = message.ConnectionComplete.format
@@ -728,6 +725,17 @@ export class Stream implements Component {
         } else {
             this.debugLog(`[GENERAL] Cannot register listener, channel type is not 'data'`)
         }
+
+        const cursorChannel = this.transport.getChannel(TransportChannelId.CURSOR)
+        this.debugLog(`[Cursor] Setting up CURSOR channel listener, type=${cursorChannel.type}`)
+        if (cursorChannel.type === "data") {
+            cursorChannel.addReceiveListener((data: ArrayBuffer) => {
+                this.onCursorChannelMessage(data)
+            })
+            this.debugLog(`[Cursor] CURSOR channel listener registered`)
+        } else {
+            this.debugLog(`[Cursor] Cannot register listener, channel type is not 'data'`)
+        }
     }
 
     private onGeneralChannelMessage(data: ArrayBuffer) {
@@ -772,6 +780,53 @@ export class Stream implements Component {
                 this.eventTarget.dispatchEvent(event)
             }
         }
+    }
+
+    private onCursorChannelMessage(data: ArrayBuffer) {
+        const raw = new Uint8Array(data)
+        if (raw.length < 14) {
+            this.debugLog(`[Cursor] Message too short: ${raw.length} bytes`)
+            return
+        }
+
+        const view = new DataView(data)
+        const ty = view.getUint8(0)
+        if (ty !== 0) {
+            this.debugLog(`[Cursor] Unknown cursor message type: ${ty}`)
+            return
+        }
+
+        const visible = view.getUint8(1) !== 0
+        const width = view.getUint16(2, false)
+        const height = view.getUint16(4, false)
+        const hotspot_x = view.getUint16(6, false)
+        const hotspot_y = view.getUint16(8, false)
+        const rgbaLength = view.getUint32(10, false)
+
+        if (raw.length < 14 + rgbaLength) {
+            this.debugLog(`[Cursor] Message incomplete: expected ${14 + rgbaLength} bytes, got ${raw.length}`)
+            return
+        }
+
+        if (visible) {
+            const expectedLength = width * height * 4
+            if (expectedLength !== rgbaLength) {
+                this.debugLog(`[Cursor] Invalid payload size: expected ${expectedLength} got ${rgbaLength}`)
+                return
+            }
+        }
+
+        const rgba = Array.from(raw.slice(14, 14 + rgbaLength))
+        queueMicrotask(() =>
+            this.applyHostCursorShape({
+                visible,
+                width,
+                height,
+                hotspot_x,
+                hotspot_y,
+                rgba,
+            })
+        )
     }
 
     private setHdrMode(enabled: boolean) {
