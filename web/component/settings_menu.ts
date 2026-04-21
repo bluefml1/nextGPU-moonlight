@@ -25,6 +25,7 @@ export type Settings = {
     mouseScrollMode: MouseScrollMode
     controllerConfig: ControllerConfig
     dataTransport: TransportType
+    webrtcIceTransportPolicy: WebRtcIceTransportPolicy
     toggleFullscreenWithKeybind: boolean
     pageStyle: PageStyle
     hdr: boolean
@@ -38,6 +39,7 @@ export type Settings = {
 
 export type StreamCodec = "h264" | "auto" | "h265" | "av1"
 export type TransportType = "auto" | "webrtc" | "websocket"
+export type WebRtcIceTransportPolicy = "relay" | "all"
 
 export type VideoPresetId = "720p" | "1080p" | "1440p" | "4k" | "native" | "custom"
 
@@ -150,6 +152,7 @@ export class StreamSettingsComponent implements Component {
 
     private otherHeader: HTMLHeadingElement = document.createElement("h2")
     private dataTransport: SelectComponent
+    private webrtcIceTransportPolicy: SelectComponent
     private toggleFullscreenWithKeybind: InputComponent
 
     private pageStyle: SelectComponent
@@ -426,6 +429,19 @@ export class StreamSettingsComponent implements Component {
         this.dataTransport.addChangeListener(this.onSettingsChange.bind(this))
         this.dataTransport.mount(this.otherSection)
 
+        this.webrtcIceTransportPolicy = new SelectComponent("webrtcIceTransportPolicy", [
+            { value: "all", name: "All candidates (P2P preferred, default)" },
+            { value: "relay", name: "Relay only (TURN fallback)" },
+        ], {
+            displayName: "WebRTC ICE policy",
+            preSelectedOption:
+                settings?.webrtcIceTransportPolicy ?? defaultSettings_.webrtcIceTransportPolicy,
+            forcePolyfill: true,
+            listClass: "sidebar-stream-select-list",
+        })
+        this.webrtcIceTransportPolicy.addChangeListener(this.onSettingsChange.bind(this))
+        this.webrtcIceTransportPolicy.mount(this.otherSection)
+
         this.toggleFullscreenWithKeybind = new InputComponent("toggleFullscreenWithKeybind", "checkbox", "Toggle Fullscreen and Mouse Lock with Ctrl + Shift + I", {
             checked: settings?.toggleFullscreenWithKeybind
         })
@@ -542,6 +558,7 @@ export class StreamSettingsComponent implements Component {
         }
 
         settings.dataTransport = this.dataTransport.getValue() as any
+        settings.webrtcIceTransportPolicy = this.webrtcIceTransportPolicy.getValue() as any
 
         settings.toggleFullscreenWithKeybind = this.toggleFullscreenWithKeybind.isChecked()
 

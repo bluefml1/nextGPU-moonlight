@@ -1,13 +1,17 @@
 import { StreamSignalingMessage, TransportChannelId } from "../../api_bindings.js";
+import type { WebRtcIceTransportPolicy } from "../../component/settings_menu.js";
 import { Logger } from "../log.js";
 import { StatValue } from "../stats.js";
 import { allVideoCodecs, CAPABILITIES_CODECS, emptyVideoCodecs, maybeVideoCodecs, VideoCodecSupport } from "../video.js";
 import { DataTransportChannel, Transport, TRANSPORT_CHANNEL_OPTIONS, TransportAudioSetup, TransportChannel, TransportChannelIdKey, TransportChannelIdValue, TransportVideoSetup, AudioTrackTransportChannel, VideoTrackTransportChannel, TrackTransportChannel, TransportShutdown } from "./index.js";
 
+type TransportChannelName = Extract<TransportChannelIdKey, string>
+
 export class WebRTCTransport implements Transport {
     implementationName: string = "webrtc"
 
     private logger: Logger | null
+    private readonly icePolicy: WebRtcIceTransportPolicy
 
     private peer: RTCPeerConnection | null = null
     private fileTransferChannel: RTCDataChannel | null = null
@@ -17,9 +21,14 @@ export class WebRTCTransport implements Transport {
 
     // Prevent renegotiation spam: track whether a negotiation is already in progress
     private isNegotiating: boolean = false
+    private lastStateLogAt = 0
+    private lastIceProgressAt = 0
+    private localCandidateCount = 0
+    private remoteCandidateCount = 0
 
-    constructor(logger?: Logger) {
+    constructor(logger?: Logger, icePolicy: WebRtcIceTransportPolicy = "all") {
         this.logger = logger ?? null
+        this.icePolicy = icePolicy
     }
 
     async initPeer(configuration?: RTCConfiguration) {
@@ -30,11 +39,10 @@ export class WebRTCTransport implements Transport {
             return
         }
 
-        // Configure WebRTC, forcing relay-only before any channels are created
+        // Configure WebRTC ICE policy before channels are created.
         const baseConfig: RTCConfiguration = configuration ? { ...configuration } : {}
 
-        // Filter ICE servers to TURN-only so no host/srflx candidates are discovered
-        if (baseConfig.iceServers) {
+        if (this.icePolicy == "relay" && baseConfig.iceServers) {
             const before = baseConfig.iceServers.length
             baseConfig.iceServers = baseConfig.iceServers.filter(server => {
                 const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
@@ -43,8 +51,10 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug(`Filtered ICE servers for relay-only: ${before} -> ${baseConfig.iceServers.length}`)
         }
 
-        // Enforce relay at the ICE policy level
-        baseConfig.iceTransportPolicy = "relay"
+        baseConfig.iceTransportPolicy = this.icePolicy
+        this.logger?.debug(
+            `Initializing RTCPeerConnection with policy=${this.icePolicy}, servers=${baseConfig.iceServers?.length ?? 0}, poolSize=${baseConfig.iceCandidatePoolSize ?? 0}`
+        )
 
         this.peer = new RTCPeerConnection(baseConfig)
         this.peer.addEventListener("error", this.onError.bind(this))
@@ -251,14 +261,13 @@ export class WebRTCTransport implements Transport {
                 return
             }
 
-            // Enforce relay-only candidates and prioritize relay at SDP level
-            const mungedSdp = this.enforceRelayInSdp(localDescription.sdp ?? "")
+            const localSdp = this.filterSdpByIcePolicy(localDescription.sdp ?? "")
 
-            this.logger?.debug(`OnNegotiationNeeded: Sending local description (relay-only): ${localDescription.type}`)
+            this.logger?.debug(`OnNegotiationNeeded: Sending local description (${this.icePolicy}): ${localDescription.type}`)
             this.sendMessage({
                 Description: {
                     ty: localDescription.type,
-                    sdp: mungedSdp
+                    sdp: localSdp
                 }
             })
         } catch (err) {
@@ -295,14 +304,13 @@ export class WebRTCTransport implements Transport {
                         return
                     }
 
-                    // Enforce relay-only candidates and prioritize relay at SDP level for the answer
-                    const mungedSdp = this.enforceRelayInSdp(localDescription.sdp ?? "")
+                    const localSdp = this.filterSdpByIcePolicy(localDescription.sdp ?? "")
 
-                    this.logger?.debug(`Responding to offer description (relay-only): ${localDescription.type}`)
+                    this.logger?.debug(`Responding to offer description (${this.icePolicy}): ${localDescription.type}`)
                     this.sendMessage({
                         Description: {
                             ty: localDescription.type,
-                            sdp: mungedSdp
+                            sdp: localSdp
                         }
                     })
                 }
@@ -316,16 +324,24 @@ export class WebRTCTransport implements Transport {
 
     private onIceCandidate(event: RTCPeerConnectionIceEvent) {
         if (event.candidate) {
+            this.localCandidateCount += 1
+            this.lastIceProgressAt = Date.now()
             const candidate = event.candidate.toJSON()
+            const candidateText = candidate.candidate ?? ""
+            const candidateType = candidateText.includes(" typ ")
+                ? candidateText.split(" typ ")[1]?.split(" ")[0] ?? "unknown"
+                : "unknown"
 
-            // Enforce relay: drop non-relay candidates at the trickle ICE level
-            if (candidate.candidate && !candidate.candidate.includes(" typ relay")) {
-                this.logger?.debug(`Dropping non-relay ICE candidate: ${candidate.candidate}`)
+            if (
+                this.icePolicy == "relay" &&
+                candidate.candidate &&
+                !candidate.candidate.includes(" typ relay")
+            ) {
+                this.logger?.debug(`Dropping non-relay ICE candidate (type=${candidateType}): ${candidate.candidate}`)
                 return
             }
 
-            // Optionally, bump relay candidate priority to be highest
-            if (candidate.candidate) {
+            if (this.icePolicy == "relay" && candidate.candidate) {
                 const tokens = candidate.candidate.split(" ")
                 // candidate:<id> <component> <protocol> <priority> ...
                 if (tokens.length > 3) {
@@ -335,7 +351,7 @@ export class WebRTCTransport implements Transport {
                 }
             }
 
-            this.logger?.debug(`Sending relay ICE candidate: ${candidate.candidate}`)
+            this.logger?.debug(`Sending ${this.icePolicy} ICE candidate (type=${candidateType}): ${candidate.candidate}`)
 
             this.sendMessage({
                 AddIceCandidate: {
@@ -350,8 +366,11 @@ export class WebRTCTransport implements Transport {
         }
     }
 
-    // SDP munging helper: keep only relay candidates and ensure relay-first priority
-    private enforceRelayInSdp(sdp: string): string {
+    private filterSdpByIcePolicy(sdp: string): string {
+        if (this.icePolicy != "relay") {
+            return sdp
+        }
+
         if (!sdp) {
             return sdp
         }
@@ -384,7 +403,13 @@ export class WebRTCTransport implements Transport {
 
     private iceCandidates: Array<RTCIceCandidateInit> = []
     private async addIceCandidate(candidate: RTCIceCandidateInit) {
-        this.logger?.debug(`Received ice candidate: ${candidate.candidate}`)
+        this.remoteCandidateCount += 1
+        this.lastIceProgressAt = Date.now()
+        const candidateText = candidate.candidate ?? ""
+        const candidateType = candidateText.includes(" typ ")
+            ? candidateText.split(" typ ")[1]?.split(" ")[0] ?? "unknown"
+            : "unknown"
+        this.logger?.debug(`Received remote ICE candidate (type=${candidateType}): ${candidate.candidate}`)
 
         if (!this.peer) {
             this.logger?.debug("Buffering ice candidate")
@@ -409,6 +434,20 @@ export class WebRTCTransport implements Transport {
     }
 
     private wasConnected = false
+    private logPeerStateSnapshot(reason: string) {
+        if (!this.peer) {
+            return
+        }
+        const now = Date.now()
+        // Avoid log spam from rapid state transitions.
+        if (now - this.lastStateLogAt < 250) {
+            return
+        }
+        this.lastStateLogAt = now
+        this.logger?.debug(
+            `[WebRTC][${reason}] signaling=${this.peer.signalingState} ice=${this.peer.iceConnectionState} gather=${this.peer.iceGatheringState} connection=${this.peer.connectionState}`
+        )
+    }
     private onConnectionStateChange() {
         if (!this.peer) {
             this.logger?.debug("OnConnectionStateChange without a peer")
@@ -446,6 +485,7 @@ export class WebRTCTransport implements Transport {
         this.logger?.debug(`Changing Peer State to ${this.peer.connectionState}`, {
             type: type ?? undefined
         })
+        this.logPeerStateSnapshot("connectionstatechange")
     }
 
     // Log detailed information about the selected ICE candidate pair
@@ -524,6 +564,7 @@ export class WebRTCTransport implements Transport {
             return
         }
         this.logger?.debug(`Changing Peer Signaling State to ${this.peer.signalingState}`)
+        this.logPeerStateSnapshot("signalingstatechange")
 
         // Once we return to a stable signaling state, allow new negotiations
         if (this.peer.signalingState === "stable") {
@@ -535,7 +576,9 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug("OnIceConnectionStateChange without a peer")
             return
         }
+        this.lastIceProgressAt = Date.now()
         this.logger?.debug(`Changing Peer Ice State to ${this.peer.iceConnectionState}`)
+        this.logPeerStateSnapshot("iceconnectionstatechange")
     }
     private onIceGatheringStateChange() {
         if (!this.peer) {
@@ -543,13 +586,46 @@ export class WebRTCTransport implements Transport {
             return
         }
         this.logger?.debug(`Changing Peer Ice Gathering State to ${this.peer.iceGatheringState}`)
+        this.logPeerStateSnapshot("icegatheringstatechange")
 
         if (this.peer.iceConnectionState == "new" && this.peer.iceGatheringState == "complete") {
+            this.logIceCandidateSummary("ice-gathering-complete-no-connect").catch(err => {
+                this.logger?.debug(`Failed to gather ICE failure summary: ${err}`)
+            })
             // we failed without connection
             if (this.onclose) {
                 this.onclose("failednoconnect")
             }
         }
+    }
+
+    private async logIceCandidateSummary(reason: string) {
+        if (!this.peer) {
+            return
+        }
+        const stats = await this.peer.getStats()
+        const localTypes = new Set<string>()
+        const remoteTypes = new Set<string>()
+        let inProgressPairs = 0
+        let succeededPairs = 0
+        let nominatedPairs = 0
+
+        for (const [, value] of stats.entries()) {
+            const v = value as any
+            if (v.type === "local-candidate" && v.candidateType) {
+                localTypes.add(String(v.candidateType))
+            } else if (v.type === "remote-candidate" && v.candidateType) {
+                remoteTypes.add(String(v.candidateType))
+            } else if (v.type === "candidate-pair") {
+                if (v.state === "in-progress") inProgressPairs += 1
+                if (v.state === "succeeded") succeededPairs += 1
+                if (v.nominated) nominatedPairs += 1
+            }
+        }
+
+        this.logger?.debug(
+            `[WebRTC][${reason}] ICE summary: localTypes=${Array.from(localTypes).sort().join(",") || "none"} remoteTypes=${Array.from(remoteTypes).sort().join(",") || "none"} inProgressPairs=${inProgressPairs} succeededPairs=${succeededPairs} nominatedPairs=${nominatedPairs}`
+        )
     }
 
     private channels: Array<TransportChannel | null> = []
@@ -563,8 +639,7 @@ export class WebRTCTransport implements Transport {
             return
         }
 
-        for (const channelRaw in TRANSPORT_CHANNEL_OPTIONS) {
-            const channel = channelRaw as TransportChannelIdKey
+        for (const channel of Object.keys(TRANSPORT_CHANNEL_OPTIONS) as Array<TransportChannelName>) {
             const options = TRANSPORT_CHANNEL_OPTIONS[channel]
 
             // Channel not configured in our minimal set
@@ -792,6 +867,24 @@ export class WebRTCTransport implements Transport {
         }
 
         return statsData
+    }
+
+    /**
+     * Lightweight signal for caller-side retry timing decisions.
+     */
+    getRecentIceProgress(windowMs: number = 3000): boolean {
+        if (this.lastIceProgressAt == 0) {
+            return false
+        }
+        return (Date.now() - this.lastIceProgressAt) <= windowMs
+    }
+
+    getIceProgressSnapshot(): { localCandidates: number, remoteCandidates: number, lastProgressAgeMs: number | null } {
+        return {
+            localCandidates: this.localCandidateCount,
+            remoteCandidates: this.remoteCandidateCount,
+            lastProgressAgeMs: this.lastIceProgressAt == 0 ? null : Date.now() - this.lastIceProgressAt,
+        }
     }
 }
 

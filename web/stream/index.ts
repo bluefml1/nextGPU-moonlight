@@ -357,7 +357,7 @@ export class Stream implements Component {
 
             this.input.onStreamStart(capabilities, [width, height])
 
-            this.stats.setVideoInfo(format ?? "Unknown", width, height, fps)
+            this.stats.setVideoInfo(String(format ?? "Unknown"), width, height, fps)
             // HDR state will be set when server sends HdrModeUpdate message
             // Don't initialize from settings.hdr because that's just the user's preference,
             // not the actual HDR state (which depends on host support, display, and codec)
@@ -403,7 +403,12 @@ export class Stream implements Component {
 
             this.debugLog(`window.isSecureContext: ${window.isSecureContext}`)
             this.debugLog(`Using WebRTC Ice Servers: ${createPrettyList(
-                iceServers.map(server => server.urls).reduce((list, url) => list.concat(url), [])
+                iceServers
+                    .map((server: RTCIceServer) => {
+                        const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
+                        return urls.filter((url): url is string => typeof url == "string")
+                    })
+                    .reduce((list: Array<string>, urls: Array<string>) => list.concat(urls), [])
             )}`)
 
             await this.startConnection()
@@ -648,19 +653,84 @@ export class Stream implements Component {
         this.resetKeyboardState("before connection start")
 
         if (this.settings.dataTransport == "auto") {
-            let shutdownReason = await this.tryWebRTCTransport()
+            const shutdownReason = await this.tryWebRTCTransportWithRetry()
 
             if (shutdownReason == "failednoconnect") {
                 this.debugLog("Failed to establish WebRTC connection. Falling back to Web Socket transport.", { type: "ifErrorDescription" })
                 await this.tryWebSocketTransport()
             }
         } else if (this.settings.dataTransport == "webrtc") {
-            await this.tryWebRTCTransport()
+            await this.tryWebRTCTransportWithRetry()
         } else if (this.settings.dataTransport == "websocket") {
             await this.tryWebSocketTransport()
         }
 
         this.debugLog("Tried all configured transport options but no connection was possible", { type: "fatal" })
+    }
+
+    private async tryWebRTCTransportWithRetry(): Promise<TransportShutdown> {
+        const directIceGraceMs = 8000
+        const directIceMaxGraceMs = 12000
+        const initialPolicy = this.settings.webrtcIceTransportPolicy
+        const firstAttemptStartAt = Date.now()
+        const firstAttempt = await this.tryWebRTCTransportDetailed(initialPolicy)
+        const firstResult = firstAttempt.result
+
+        // Bounded adaptive retry:
+        // - keep direct ICE ("all") alive for a grace window
+        // - retry "all" once before deterministic relay fallback
+        if (initialPolicy == "all" && firstResult == "failednoconnect") {
+            const firstAttemptDurationMs = Date.now() - firstAttemptStartAt
+            let targetGraceMs = directIceGraceMs
+
+            // If ICE was still making progress near failure, extend grace once.
+            if (firstAttempt.hadRecentIceProgress) {
+                targetGraceMs = directIceMaxGraceMs
+            }
+
+            if (firstAttemptDurationMs < targetGraceMs) {
+                const remainingGraceMs = targetGraceMs - firstAttemptDurationMs
+                this.debugLog(
+                    `WebRTC all-candidate attempt ended early (${firstAttemptDurationMs}ms). Waiting ${remainingGraceMs}ms direct-ICE grace before re-attempt (recentProgress=${firstAttempt.hadRecentIceProgress}).`,
+                    { type: "ifErrorDescription" }
+                )
+                await new Promise(resolve => setTimeout(resolve, remainingGraceMs))
+            }
+
+            const secondAttempt = await this.tryWebRTCTransportDetailed("all")
+            if (secondAttempt.result != "failednoconnect") {
+                return secondAttempt.result
+            }
+
+            this.debugLog(
+                "WebRTC all-candidate attempts exhausted. Retrying once with relay-only policy.",
+                { type: "ifErrorDescription" }
+            )
+            return this.tryWebRTCTransport("relay")
+        }
+
+        return firstResult
+    }
+
+    private async tryWebRTCTransportDetailed(policy: "all" | "relay"): Promise<{ result: TransportShutdown, hadRecentIceProgress: boolean }> {
+        const result = await this.tryWebRTCTransport(policy)
+        const activeTransport = this.transport
+        const hadRecentIceProgress = (
+            policy == "all" &&
+            result == "failednoconnect" &&
+            activeTransport instanceof WebRTCTransport &&
+            activeTransport.getRecentIceProgress(3000)
+        )
+
+        if (activeTransport instanceof WebRTCTransport && policy == "all" && result == "failednoconnect") {
+            const snapshot = activeTransport.getIceProgressSnapshot()
+            this.debugLog(
+                `Direct ICE attempt summary: localCandidates=${snapshot.localCandidates}, remoteCandidates=${snapshot.remoteCandidates}, lastProgressAgeMs=${snapshot.lastProgressAgeMs}`,
+                { type: "ifErrorDescription" }
+            )
+        }
+
+        return { result, hadRecentIceProgress }
     }
 
     private transport: Transport | null = null
@@ -858,8 +928,8 @@ export class Stream implements Component {
         return true
     }
 
-    private async tryWebRTCTransport(): Promise<TransportShutdown> {
-        this.debugLog("Trying WebRTC transport")
+    private async tryWebRTCTransport(policy: "all" | "relay" = this.settings.webrtcIceTransportPolicy): Promise<TransportShutdown> {
+        this.debugLog(`Trying WebRTC transport (policy=${policy})`)
 
         this.sendWsMessage({
             SetTransport: "WebRTC"
@@ -870,12 +940,13 @@ export class Stream implements Component {
             return "failednoconnect"
         }
 
-        const transport = new WebRTCTransport(this.logger)
+        const transport = new WebRTCTransport(this.logger, policy)
         transport.onsendmessage = (message) => this.sendWsMessage({ WebRtc: message })
 
         transport.initPeer({
             iceServers: this.iceServers,
-            iceTransportPolicy: "relay",
+            iceTransportPolicy: policy,
+            iceCandidatePoolSize: policy == "all" ? 8 : 0,
         })
         this.setTransport(transport)
 

@@ -36,6 +36,8 @@ const trueDefaultSettings: Settings =
     },
     // possible values: "auto", "webrtc", "websocket"
     "dataTransport": "webrtc",
+    // possible values: "relay", "all"
+    "webrtcIceTransportPolicy": "all",
     "toggleFullscreenWithKeybind": false,
     // possible values: "standard", "old"
     "pageStyle": "standard",
