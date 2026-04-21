@@ -46,6 +46,7 @@ use webrtc::{
         RTCPeerConnection,
         configuration::RTCConfiguration,
         peer_connection_state::RTCPeerConnectionState,
+        signaling_state::RTCSignalingState,
         sdp::{sdp_type::RTCSdpType, session_description::RTCSessionDescription},
     },
 };
@@ -78,6 +79,7 @@ struct WebRtcInner {
     cursor_channel: Mutex<Option<Arc<RTCDataChannel>>>,
     video: Mutex<WebRtcVideo>,
     audio: Mutex<WebRtcAudio>,
+    signaling_offer_lock: Mutex<()>,
     // Timeout / Terminate
     pub timeout_terminate_request: Mutex<Option<Instant>>,
 }
@@ -170,6 +172,7 @@ pub async fn new(
             Arc::downgrade(&peer),
             audio_sample_queue_size,
         )),
+        signaling_offer_lock: Mutex::new(()),
         timeout_terminate_request: Mutex::new(None),
     });
 
@@ -381,6 +384,19 @@ impl WebRtcInner {
         };
 
         true
+    }
+
+    pub async fn send_offer_serialized(&self, reason: &str) -> bool {
+        let _offer_guard = self.signaling_offer_lock.lock().await;
+        let signaling_state = self.peer.signaling_state();
+        if signaling_state != RTCSignalingState::Stable {
+            debug!(
+                "[Signaling] Skipping offer for {reason}: signaling state is {:?}",
+                signaling_state
+            );
+            return true;
+        }
+        self.send_offer().await
     }
 
     async fn on_ws_message(&self, message: StreamClientMessage) {

@@ -18,6 +18,12 @@ const LEGACY_PER_APP_KEY = "mlAppSettings";
 const SETTINGS_FILE_PATH = "/app_settings.json";
 
 export type AppSettingsMap = Record<string, Settings>;
+export type SettingsSource =
+    | "default_settings"
+    | "app_settings.json"
+    | "legacy.mlAppSettings"
+    | "localStorage.mlSettings";
+export type SettingsWithMeta = { settings: Settings, source: SettingsSource };
 
 let staticFileCache: AppSettingsMap | null = null;
 
@@ -71,13 +77,19 @@ export async function loadStaticAppSettingsFile(): Promise<AppSettingsMap | null
  * static app_settings.json (per-app) > defaults.
  */
 export function getSettingsForApp(appId: number): Settings {
+    return getSettingsForAppWithMeta(appId).settings;
+}
+
+export function getSettingsForAppWithMeta(appId: number): SettingsWithMeta {
     const key = String(appId);
     const base = defaultSettings();
+    let source: SettingsSource = "default_settings";
 
     if (staticFileCache != null) {
         const fileSettings = staticFileCache[key];
         if (fileSettings != null) {
             Object.assign(base, fileSettings);
+            source = "app_settings.json";
         }
     }
 
@@ -85,17 +97,21 @@ export function getSettingsForApp(appId: number): Settings {
     if (global != null) {
         Object.assign(base, global);
         migratePageStyle(base);
-        return base;
+        return {
+            settings: base,
+            source: "localStorage.mlSettings",
+        };
     }
 
     const legacyMap = loadLegacyPerAppMap();
     const legacy = legacyMap[key];
     if (legacy != null) {
         Object.assign(base, legacy);
+        source = "legacy.mlAppSettings";
     }
 
     migratePageStyle(base);
-    return base;
+    return { settings: base, source };
 }
 
 /**

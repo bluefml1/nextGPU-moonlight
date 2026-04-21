@@ -9,6 +9,7 @@ import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, Str
 import {
     exportAppSettingsToFile,
     getSettingsForApp,
+    getSettingsForAppWithMeta,
     importAppSettingsFromJson,
     loadStaticAppSettingsFile,
     setSettingsForApp,
@@ -482,7 +483,10 @@ class ViewerApp implements Component {
         }
 
         // Configure stream (per-app: from localStorage or app_settings.json)
-        const settings = getSettingsForApp(appId)
+        const { settings, source: settingsSource } = getSettingsForAppWithMeta(appId)
+        console.info(
+            `[WebRTC] effective iceTransportPolicy=${settings.webrtcIceTransportPolicy} (source=${settingsSource})`
+        )
 
         let browserWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
         let browserHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)

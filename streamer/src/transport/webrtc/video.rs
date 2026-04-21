@@ -212,7 +212,7 @@ impl WebRtcVideo {
         };
 
         // Renegotiate
-        if !inner.send_offer().await {
+        if !inner.send_offer_serialized("video-track-added").await {
             warn!("Failed to renegotiate. Video was added!");
         }
 

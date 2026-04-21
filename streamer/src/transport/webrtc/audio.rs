@@ -90,7 +90,7 @@ impl WebRtcAudio {
         self.config = Some(stream_config);
 
         // Renegotiate
-        if !inner.send_offer().await {
+        if !inner.send_offer_serialized("audio-track-added").await {
             warn!("Failed to renegotiate. Audio was added!");
         }
 

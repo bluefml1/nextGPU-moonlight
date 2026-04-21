@@ -592,10 +592,8 @@ export class WebRTCTransport implements Transport {
             this.logIceCandidateSummary("ice-gathering-complete-no-connect").catch(err => {
                 this.logger?.debug(`Failed to gather ICE failure summary: ${err}`)
             })
-            // we failed without connection
-            if (this.onclose) {
-                this.onclose("failednoconnect")
-            }
+            // Do not fail here: remote trickle candidates can still arrive after local gathering completes.
+            this.logger?.debug("ICE gathering completed while state is 'new'; waiting for remote trickle candidates")
         }
     }
 

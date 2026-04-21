@@ -87,6 +87,14 @@ export function getLocalStreamSettings(): Settings | null {
         }
 
         const settingsLoaded = JSON.parse(settingsLoadedJson)
+        const migrationFlagKey = "mlSettingsIcePolicyMigratedV1"
+        const migrationDone = localStorage.getItem(migrationFlagKey) == "1"
+
+        if (!migrationDone && settingsLoaded?.webrtcIceTransportPolicy == "relay") {
+            settingsLoaded.webrtcIceTransportPolicy = "all"
+            localStorage.setItem("mlSettings", JSON.stringify(settingsLoaded))
+            localStorage.setItem(migrationFlagKey, "1")
+        }
 
         settings = defaultSettings()
         Object.assign(settings, settingsLoaded)
