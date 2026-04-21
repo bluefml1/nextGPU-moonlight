@@ -20,7 +20,7 @@ import { LogMessageType, StreamCapabilities, StreamKeys, StreamKeyModifiers } fr
 import { ScreenKeyboard, TextEvent } from "./screen_keyboard.js";
 import { FormModal } from "./component/modal/form.js";
 import { streamStatsToText } from "./stream/stats.js";
-import { MoonlightFullscreenOverlay, MoonlightLoadingScreen } from "./stream_overlays.js";
+import { MoonlightFullscreenOverlay, MoonlightLoadingScreen, MoonlightPointerLockOverlay } from "./stream_overlays.js";
 
 /** Local dev hostnames — connection log panel is available here when DevTools is open. */
 function isLocalDevHostname(): boolean {
@@ -264,6 +264,16 @@ class ViewerApp implements Component {
     /** Avoid sending matching keyup to host after we skipped keydown (Ctrl/Cmd+Shift+V paste / copy-progress). */
     private skipNextHostKeyUpCodes: Set<string> = new Set()
     private keyWatchdogInterval: ReturnType<typeof setInterval> | null = null
+    private adaptivePointerLockArmed = false
+    private adaptivePointerLockActive = false
+    private adaptivePointerLockReleaseTimer: ReturnType<typeof setTimeout> | null = null
+    private latestHostCursorHidden = false
+    private pendingEscRelockPrompt = false
+    private fullscreenIntroSuppressed = false
+    private pointerRelockNoticeEl: HTMLDivElement | null = null
+    private waitingForFullscreenGesture = false
+    private loadingShownForCurrentStart = false
+    private startupConnectionResolved = false
 
     private devConnectionLog: DevStreamConnectionLog | null = null
     private devConnectionLogPoll: ReturnType<typeof setInterval> | null = null
@@ -271,14 +281,171 @@ class ViewerApp implements Component {
 
     private readonly streamConnectionConsoleLogger = new StreamConnectionInfoConsoleLogger()
 
+    private adaptiveLog(message: string) {
+        console.info(`[AdaptiveMouse] ${message}`)
+    }
+
+    private canAttemptFullscreen(): boolean {
+        const body = document.body
+        const hasRequestFullscreen = !!(
+            body &&
+            "requestFullscreen" in body &&
+            typeof body.requestFullscreen == "function"
+        )
+        const fullscreenEnabled = !("fullscreenEnabled" in document) || !!document.fullscreenEnabled
+        return hasRequestFullscreen && fullscreenEnabled
+    }
+
+    private canAttemptPointerLock(): boolean {
+        const inputElement = document.getElementById("input") as HTMLDivElement | null
+        return !!(
+            inputElement &&
+            "requestPointerLock" in inputElement &&
+            typeof inputElement.requestPointerLock == "function"
+        )
+    }
+
+    private canUseAdaptivePointerRelockOverlay(): boolean {
+        return this.canAttemptPointerLock()
+    }
+
+    private activateLoadingOverlayOnce() {
+        if (this.loadingShownForCurrentStart || this.startupConnectionResolved) return
+        // Keep startup overlays mutually exclusive; loading starts only after fullscreen intro is gone.
+        if (MoonlightFullscreenOverlay.isVisible()) {
+            window.setTimeout(() => this.activateLoadingOverlayOnce(), 0)
+            return
+        }
+        MoonlightLoadingScreen.show()
+        this.loadingShownForCurrentStart = true
+    }
+
+    private beginStartupOverlays() {
+        this.waitingForFullscreenGesture = false
+        this.loadingShownForCurrentStart = false
+        this.startupConnectionResolved = false
+
+        if (this.canAttemptFullscreen() && !this.fullscreenIntroSuppressed) {
+            this.waitingForFullscreenGesture = true
+            MoonlightFullscreenOverlay.show(() => {
+                this.waitingForFullscreenGesture = false
+                this.activateLoadingOverlayOnce()
+                void this.requestFullscreen().catch((error) => {
+                    console.debug("startup fullscreen request failed", error)
+                })
+            })
+            return
+        }
+
+        this.activateLoadingOverlayOnce()
+    }
+
+    private cleanupStartupOverlaysOnAbortOrUnmount() {
+        this.waitingForFullscreenGesture = false
+        this.loadingShownForCurrentStart = false
+        this.startupConnectionResolved = true
+        MoonlightFullscreenOverlay.hide()
+        MoonlightLoadingScreen.hide()
+    }
+
+    private ensurePointerRelockNotice() {
+        if (this.pointerRelockNoticeEl) return this.pointerRelockNoticeEl
+        const el = document.createElement("div")
+        el.id = "ml-pointer-relock-notice"
+        el.textContent = "Click to lock mouse"
+        el.style.position = "fixed"
+        el.style.top = "50%"
+        el.style.left = "50%"
+        el.style.transform = "translate(-50%, 42px)"
+        el.style.zIndex = "100001"
+        el.style.padding = "8px 11px"
+        el.style.borderRadius = "9px"
+        el.style.background = "linear-gradient(135deg, rgba(74, 111, 255, 0.2), rgba(0, 200, 255, 0.14)), rgba(12, 12, 16, 0.84)"
+        el.style.border = "1px solid rgba(255, 255, 255, 0.14)"
+        el.style.color = "rgba(255, 255, 255, 0.94)"
+        el.style.fontSize = "11px"
+        el.style.fontWeight = "600"
+        el.style.letterSpacing = "0.03em"
+        el.style.textTransform = "uppercase"
+        el.style.pointerEvents = "none"
+        el.style.boxShadow = "0 2px 12px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.05)"
+        el.style.display = "none"
+        document.body.appendChild(el)
+        this.pointerRelockNoticeEl = el
+        return el
+    }
+
+    private showPointerRelockNotice() {
+        if (MoonlightPointerLockOverlay.isVisible()) {
+            this.hidePointerRelockNotice()
+            return
+        }
+        this.ensurePointerRelockNotice().style.display = "block"
+    }
+
+    private hidePointerRelockNotice() {
+        if (this.pointerRelockNoticeEl) this.pointerRelockNoticeEl.style.display = "none"
+    }
+
+    private showAdaptivePointerRelockOverlay() {
+        if (!this.canUseAdaptivePointerRelockOverlay()) {
+            this.adaptiveLog("skip esc relock overlay: pointer lock unsupported")
+            return
+        }
+        if (!this.pendingEscRelockPrompt || !this.latestHostCursorHidden) {
+            this.adaptiveLog(
+                `skip esc relock overlay: pendingEscRelockPrompt=${this.pendingEscRelockPrompt} latestHostCursorHidden=${this.latestHostCursorHidden}`
+            )
+            return
+        }
+        if (MoonlightFullscreenOverlay.isVisible()) {
+            this.adaptiveLog("esc relock overlay takes priority -> hide fullscreen intro")
+            MoonlightFullscreenOverlay.hide()
+            this.fullscreenIntroSuppressed = true
+        }
+        getSidebarRoot()?.classList.add("sidebar-esc-relock-priority")
+        this.adaptiveLog("show esc relock overlay")
+        MoonlightPointerLockOverlay.show(() => {
+            void this.attemptAdaptivePointerRelock("overlay-esc", false)
+        })
+    }
+
+    private hideAdaptivePointerRelockOverlay() {
+        this.adaptiveLog("hide esc relock overlay")
+        getSidebarRoot()?.classList.remove("sidebar-esc-relock-priority")
+        MoonlightPointerLockOverlay.hide()
+    }
+
+    private async attemptAdaptivePointerRelock(
+        trigger: "overlay-esc" | "click",
+        withFullscreen = false
+    ) {
+        this.adaptiveLog(`attempt pointer relock from ${trigger}`)
+        try {
+            if (withFullscreen && !this.isFullscreen()) {
+                await this.requestFullscreen()
+            }
+            await this.requestPointerLock()
+            this.adaptivePointerLockArmed = false
+            this.adaptivePointerLockActive = true
+            this.pendingEscRelockPrompt = false
+            this.hideAdaptivePointerRelockOverlay()
+            this.hidePointerRelockNotice()
+            this.adaptiveLog("pointer lock acquired via adaptive relock path")
+        } catch (error) {
+            console.debug("failed to request pointer lock in adaptive relock path", error)
+            this.adaptivePointerLockArmed = this.latestHostCursorHidden
+            if (this.adaptivePointerLockArmed && this.pendingEscRelockPrompt) {
+                this.showAdaptivePointerRelockOverlay()
+            }
+            this.adaptiveLog(`pointer lock request failed in adaptive relock path: ${String(error)}`)
+        }
+    }
+
     constructor(api: Api, hostId: number, appId: number) {
         this.api = api
         this.hostId = hostId
         this.appId = appId
-
-        MoonlightFullscreenOverlay.show(() => {
-            void this.requestFullscreen()
-        })
 
         // Configure sidebar
         this.sidebar = new ViewerSidebar(this)
@@ -391,7 +558,7 @@ class ViewerApp implements Component {
             edge: "left",
         })
 
-        MoonlightLoadingScreen.show()
+        this.beginStartupOverlays()
 
         this.stream = new Stream(this.api, hostId, appId, settings, browserSize)
 
@@ -424,6 +591,19 @@ class ViewerApp implements Component {
         const stream = this.stream
         if (stream) {
             this.releaseAllKeys("before stream restart")
+            this.adaptivePointerLockArmed = false
+            this.adaptivePointerLockActive = false
+            this.latestHostCursorHidden = false
+            this.pendingEscRelockPrompt = false
+            this.fullscreenIntroSuppressed = false
+            this.cleanupStartupOverlaysOnAbortOrUnmount()
+            this.hideAdaptivePointerRelockOverlay()
+            this.hidePointerRelockNotice()
+            if (this.adaptivePointerLockReleaseTimer != null) {
+                clearTimeout(this.adaptivePointerLockReleaseTimer)
+                this.adaptivePointerLockReleaseTimer = null
+            }
+            this.adaptiveLog("reset adaptive mouse state (stream restart)")
             const success = await stream.stop()
             if (!success) {
                 console.debug("Restart: stream stop reported failure, continuing anyway")
@@ -445,8 +625,50 @@ class ViewerApp implements Component {
 
             document.title = `Stream: ${app.title}`
         } else if (data.type == "connectionComplete") {
+            this.startupConnectionResolved = true
+            this.waitingForFullscreenGesture = false
             this.sidebar.onCapabilitiesChange(data.capabilities)
             MoonlightLoadingScreen.hide()
+        } else if (data.type == "hostCursorHidden") {
+            this.latestHostCursorHidden = data.hidden
+            if (data.hidden) {
+                if (this.adaptivePointerLockReleaseTimer != null) {
+                    clearTimeout(this.adaptivePointerLockReleaseTimer)
+                    this.adaptivePointerLockReleaseTimer = null
+                    this.adaptiveLog("cancel debounced pointer lock release (host cursor hidden again)")
+                }
+                this.adaptivePointerLockArmed = true
+                if (!document.pointerLockElement) {
+                    this.showPointerRelockNotice()
+                }
+                this.adaptiveLog("host cursor hidden -> arm pointer lock on next click")
+            } else {
+                this.adaptivePointerLockArmed = false
+                this.pendingEscRelockPrompt = false
+                this.hideAdaptivePointerRelockOverlay()
+                this.hidePointerRelockNotice()
+                this.adaptiveLog("host cursor visible -> disarm pointer lock auto-capture")
+
+                if (this.adaptivePointerLockActive && document.pointerLockElement) {
+                    if (this.adaptivePointerLockReleaseTimer != null) {
+                        clearTimeout(this.adaptivePointerLockReleaseTimer)
+                    }
+                    this.adaptiveLog("schedule debounced pointer lock release (250ms)")
+                    this.adaptivePointerLockReleaseTimer = setTimeout(() => {
+                        this.adaptivePointerLockReleaseTimer = null
+                        if (!this.adaptivePointerLockActive) {
+                            this.adaptiveLog("debounced release skipped (auto pointer lock no longer active)")
+                            return
+                        }
+                        this.adaptiveLog("debounced release firing -> exitPointerLock()")
+                        void this.exitPointerLock()
+                        this.adaptivePointerLockActive = false
+                    }, 250)
+                } else {
+                    this.adaptivePointerLockActive = false
+                    this.adaptiveLog("visible host cursor, no auto pointer lock active")
+                }
+            }
         } else if (data.type == "addDebugLine") {
             const message = data.line.trim()
             if (
@@ -454,7 +676,10 @@ class ViewerApp implements Component {
                 data.additional &&
                 (data.additional.type === "fatal" || data.additional.type === "fatalDescription")
             ) {
+                this.startupConnectionResolved = true
+                this.waitingForFullscreenGesture = false
                 showErrorPopup(message)
+                MoonlightFullscreenOverlay.hide()
                 MoonlightLoadingScreen.hide()
             } else if (data.additional?.type === "informError") {
                 showErrorPopup(data.line)
@@ -550,6 +775,10 @@ class ViewerApp implements Component {
         this.notifyStreamInteraction()
 
         console.debug(event)
+        if (event.code === "Escape" && !!document.pointerLockElement) {
+            this.pendingEscRelockPrompt = true
+            this.adaptiveLog("esc down while pointer locked -> arm esc relock prompt")
+        }
         if (event.code === "Escape" && this.isFullscreen()) {
             this.startFullscreenExitEscHold()
         }
@@ -681,6 +910,16 @@ class ViewerApp implements Component {
     // Mouse
     onMouseButtonDown(event: MouseEvent) {
         this.onUserInteraction()
+
+        if (
+            this.adaptivePointerLockArmed &&
+            this.getInputConfig().mouseMode !== "relative" &&
+            this.getInputConfig().mouseMode !== "pointAndDrag" &&
+            !document.pointerLockElement
+        ) {
+            this.adaptiveLog(`click with armed auto-lock -> requestPointerLock() (mouseMode=${this.getInputConfig().mouseMode})`)
+            void this.attemptAdaptivePointerRelock("click")
+        }
 
         event.preventDefault()
         this.stream?.getInput().onMouseDown(event, this.getStreamRect());
@@ -1084,7 +1323,7 @@ class ViewerApp implements Component {
     async requestFullscreen() {
         const body = document.body
         if (body) {
-            if (!("requestFullscreen" in body && typeof body.requestFullscreen == "function")) {
+            if (!this.canAttemptFullscreen()) {
                 await showMessage("Fullscreen is not supported by your browser!")
 
                 return
@@ -1144,6 +1383,10 @@ class ViewerApp implements Component {
             this.releaseAllKeys("fullscreen exited")
         } else {
             MoonlightFullscreenOverlay.hide()
+            if (this.waitingForFullscreenGesture) {
+                this.waitingForFullscreenGesture = false
+                this.activateLoadingOverlayOnce()
+            }
             this.releaseAllKeys("fullscreen entered")
         }
     }
@@ -1203,12 +1446,50 @@ class ViewerApp implements Component {
         }
     }
     private onPointerLockChange() {
+        this.adaptiveLog(
+            `pointerlockchange: locked=${!!document.pointerLockElement} pendingEscRelockPrompt=${this.pendingEscRelockPrompt} latestHostCursorHidden=${this.latestHostCursorHidden} mouseMode=${this.getInputConfig().mouseMode}`
+        )
         this.checkFullyImmersed()
         this.releaseAllKeys(document.pointerLockElement ? "pointer lock entered" : "pointer lock exited")
 
         if (!document.pointerLockElement) {
+            // Some browsers/platforms can exit pointer lock on ESC without reliably
+            // delivering the key event to our handlers. If host cursor is still hidden,
+            // treat this as an ESC-like relock prompt trigger.
+            if (!this.pendingEscRelockPrompt && this.latestHostCursorHidden) {
+                this.pendingEscRelockPrompt = true
+                this.adaptiveLog("pointer lock exited while host cursor hidden -> fallback arm esc relock prompt")
+            }
             this.inputConfig.mouseMode = this.previousMouseMode
             this.setInputConfig(this.inputConfig)
+            this.adaptivePointerLockActive = false
+            if (this.adaptivePointerLockReleaseTimer != null) {
+                clearTimeout(this.adaptivePointerLockReleaseTimer)
+                this.adaptivePointerLockReleaseTimer = null
+                this.adaptiveLog("cleared debounced pointer lock release timer (pointer lock exited)")
+            }
+            if (
+                this.pendingEscRelockPrompt &&
+                this.latestHostCursorHidden &&
+                this.getInputConfig().mouseMode !== "relative" &&
+                this.getInputConfig().mouseMode !== "pointAndDrag"
+            ) {
+                this.adaptivePointerLockArmed = true
+                this.fullscreenIntroSuppressed = true
+                this.showAdaptivePointerRelockOverlay()
+                this.showPointerRelockNotice()
+                this.adaptiveLog("pointer lock exited while host cursor hidden -> rearm and prompt relock")
+            } else {
+                this.pendingEscRelockPrompt = false
+                this.hideAdaptivePointerRelockOverlay()
+                this.hidePointerRelockNotice()
+            }
+            this.adaptiveLog(`pointer lock exited -> restored mouseMode=${this.inputConfig.mouseMode}`)
+        } else {
+            this.pendingEscRelockPrompt = false
+            this.hideAdaptivePointerRelockOverlay()
+            this.hidePointerRelockNotice()
+            this.adaptiveLog("pointer lock entered")
         }
     }
 
@@ -1232,6 +1513,19 @@ class ViewerApp implements Component {
             clearInterval(this.keyWatchdogInterval)
             this.keyWatchdogInterval = null
         }
+        this.cleanupStartupOverlaysOnAbortOrUnmount()
+        this.adaptivePointerLockArmed = false
+        this.adaptivePointerLockActive = false
+        this.latestHostCursorHidden = false
+        this.pendingEscRelockPrompt = false
+        this.fullscreenIntroSuppressed = false
+        this.hideAdaptivePointerRelockOverlay()
+        this.hidePointerRelockNotice()
+        if (this.adaptivePointerLockReleaseTimer != null) {
+            clearTimeout(this.adaptivePointerLockReleaseTimer)
+            this.adaptivePointerLockReleaseTimer = null
+        }
+        this.adaptiveLog("reset adaptive mouse state (viewer app unmount)")
         this.releaseAllKeys("viewer app unmount")
         parent.removeChild(this.div)
     }

@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use common::{
     StreamSettings,
     api_bindings::{
-        GeneralClientMessage, GeneralServerMessage, StreamerStatsUpdate, TransportChannelId,
+        GeneralClientMessage, GeneralServerMessage, HostCursorShape, StreamerStatsUpdate,
+        TransportChannelId,
     },
     ipc::{ServerIpcMessage, StreamerIpcMessage},
 };
@@ -491,6 +492,10 @@ impl InboundPacket {
                     None
                 }
             }
+            TransportChannel(TransportChannelId::CURSOR) => {
+                warn!("[InboundPacket]: tried to deserialize cursor packet, this shouldn't happen");
+                None
+            }
             _ => None,
         }
     }
@@ -515,10 +520,14 @@ pub enum OutboundPacket {
     Rtt {
         sequence_number: u16,
     },
+    CursorShape {
+        cursor: HostCursorShape,
+    },
 }
 
 impl OutboundPacket {
     pub fn serialize(&self, raw_buffer: &mut Vec<u8>) -> Option<(TransportChannel, Range<usize>)> {
+        const MAX_CURSOR_RGBA_BYTES: usize = 128 * 128 * 4;
         match self {
             Self::General { message } => {
                 let Ok(text) = serde_json::to_string(&message) else {
@@ -603,6 +612,44 @@ impl OutboundPacket {
 
                 Some((
                     TransportChannel(TransportChannelId::RTT),
+                    buffer.into_raw().1,
+                ))
+            }
+            Self::CursorShape { cursor } => {
+                if cursor.rgba.len() > MAX_CURSOR_RGBA_BYTES {
+                    warn!(
+                        "Failed to send cursor shape because rgba payload is too large: {} bytes",
+                        cursor.rgba.len()
+                    );
+                    return None;
+                }
+                if cursor.visible {
+                    let expected = cursor.width as usize * cursor.height as usize * 4;
+                    if expected != cursor.rgba.len() {
+                        warn!(
+                            "Failed to send cursor shape because payload size mismatch: expected={} actual={}",
+                            expected,
+                            cursor.rgba.len()
+                        );
+                        return None;
+                    }
+                }
+
+                raw_buffer.resize(14 + cursor.rgba.len(), 0);
+                let mut buffer = ByteBuffer::new(raw_buffer as &mut [u8]);
+
+                buffer.put_u8(0);
+                buffer.put_u8(if cursor.visible { 1 } else { 0 });
+                buffer.put_u16(cursor.width);
+                buffer.put_u16(cursor.height);
+                buffer.put_u16(cursor.hotspot_x);
+                buffer.put_u16(cursor.hotspot_y);
+                buffer.put_u32(cursor.rgba.len() as u32);
+                buffer.put_u8_array(cursor.rgba.as_slice());
+
+                buffer.flip();
+                Some((
+                    TransportChannel(TransportChannelId::CURSOR),
                     buffer.into_raw().1,
                 ))
             }

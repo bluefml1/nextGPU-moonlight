@@ -28,6 +28,7 @@ export type InfoEvent = CustomEvent<
     { type: "connectionComplete", capabilities: StreamCapabilities } |
     { type: "connectionStatus", status: ConnectionStatus } |
     { type: "addDebugLine", line: string, additional?: LogMessageInfo } |
+    { type: "hostCursorHidden", hidden: boolean } |
     { type: "fileTransferProgress", percent: number, loaded?: number, total?: number, source?: "file" | "clipboard" } |
     { type: "fileTransferProgressEnd", source?: "file" | "clipboard" }
 >
@@ -113,6 +114,8 @@ export class Stream implements Component {
     private readonly adaptiveInitialBitrate: number
     private readonly adaptiveInitialFps: number
     private readonly adaptiveFpsSteps = [60, 45, 30]
+    private lastCursorSignature: string | null = null
+    private lastEmittedHostCursorHidden: boolean | null = null
 
     private streamerSize: [number, number]
     private dragOverHandler = (event: DragEvent) => this.onDragOver(event)
@@ -416,6 +419,89 @@ export class Stream implements Component {
         }
     }
 
+    private applyHostCursorShape(cursor: {
+        visible: boolean
+        width: number
+        height: number
+        hotspot_x: number
+        hotspot_y: number
+        rgba: Array<number>
+    }) {
+        const hostCursorHidden = !cursor.visible || cursor.width <= 0 || cursor.height <= 0 || cursor.rgba.length == 0
+        if (hostCursorHidden != this.lastEmittedHostCursorHidden) {
+            this.lastEmittedHostCursorHidden = hostCursorHidden
+            const event: InfoEvent = new CustomEvent("stream-info", {
+                detail: { type: "hostCursorHidden", hidden: hostCursorHidden },
+            })
+            this.eventTarget.dispatchEvent(event)
+        }
+
+        if (hostCursorHidden) {
+            this.divElement.style.cursor = "none"
+            this.lastCursorSignature = "hidden"
+            this.debugLog("[CursorShape] applied hidden cursor")
+            return
+        }
+
+        // Most browsers cap custom cursor bitmaps around 128x128 px.
+        const maxCursorSize = 128
+        const renderWidth = Math.min(cursor.width, maxCursorSize)
+        const renderHeight = Math.min(cursor.height, maxCursorSize)
+
+        // Compact checksum for update dedupe.
+        let checksum = 2166136261 >>> 0
+        for (let i = 0; i < cursor.rgba.length; i++) {
+            checksum ^= (cursor.rgba[i] ?? 0) & 0xff
+            checksum = Math.imul(checksum, 16777619) >>> 0
+        }
+        const signature = `${cursor.width}x${cursor.height}:${cursor.hotspot_x},${cursor.hotspot_y}:${cursor.rgba.length}:${checksum}`
+        if (signature === this.lastCursorSignature) {
+            return
+        }
+
+        const canvas = document.createElement("canvas")
+        canvas.width = cursor.width
+        canvas.height = cursor.height
+        const ctx = canvas.getContext("2d")
+        if (!ctx) {
+            return
+        }
+
+        const imageData = ctx.createImageData(cursor.width, cursor.height)
+        const rgba = cursor.rgba
+        const maxLen = Math.min(imageData.data.length, rgba.length)
+        for (let i = 0; i < maxLen; i++) {
+            imageData.data[i] = rgba[i]
+        }
+        ctx.putImageData(imageData, 0, 0)
+
+        let outputDataUrl = canvas.toDataURL("image/png")
+        let hotspotX = cursor.hotspot_x
+        let hotspotY = cursor.hotspot_y
+
+        if (renderWidth != cursor.width || renderHeight != cursor.height) {
+            const scaled = document.createElement("canvas")
+            scaled.width = renderWidth
+            scaled.height = renderHeight
+            const scaledCtx = scaled.getContext("2d")
+            if (scaledCtx) {
+                scaledCtx.drawImage(canvas, 0, 0, renderWidth, renderHeight)
+                outputDataUrl = scaled.toDataURL("image/png")
+                hotspotX = Math.round((cursor.hotspot_x * renderWidth) / cursor.width)
+                hotspotY = Math.round((cursor.hotspot_y * renderHeight) / cursor.height)
+            }
+        }
+
+        hotspotX = Math.max(0, Math.min(hotspotX, renderWidth - 1))
+        hotspotY = Math.max(0, Math.min(hotspotY, renderHeight - 1))
+
+        this.divElement.style.cursor = `url('${outputDataUrl}') ${hotspotX} ${hotspotY}, auto`
+        this.lastCursorSignature = signature
+        this.debugLog(
+            `[CursorShape] applied ${cursor.width}x${cursor.height} -> ${renderWidth}x${renderHeight} hotspot(${hotspotX},${hotspotY}) checksum=${checksum}`
+        )
+    }
+
     private startAdaptiveStabilityController() {
         if (this.adaptiveIntervalId != null) {
             clearInterval(this.adaptiveIntervalId)
@@ -639,6 +725,17 @@ export class Stream implements Component {
         } else {
             this.debugLog(`[GENERAL] Cannot register listener, channel type is not 'data'`)
         }
+
+        const cursorChannel = this.transport.getChannel(TransportChannelId.CURSOR)
+        this.debugLog(`[Cursor] Setting up CURSOR channel listener, type=${cursorChannel.type}`)
+        if (cursorChannel.type === "data") {
+            cursorChannel.addReceiveListener((data: ArrayBuffer) => {
+                this.onCursorChannelMessage(data)
+            })
+            this.debugLog(`[Cursor] CURSOR channel listener registered`)
+        } else {
+            this.debugLog(`[Cursor] Cannot register listener, channel type is not 'data'`)
+        }
     }
 
     private onGeneralChannelMessage(data: ArrayBuffer) {
@@ -683,6 +780,53 @@ export class Stream implements Component {
                 this.eventTarget.dispatchEvent(event)
             }
         }
+    }
+
+    private onCursorChannelMessage(data: ArrayBuffer) {
+        const raw = new Uint8Array(data)
+        if (raw.length < 14) {
+            this.debugLog(`[Cursor] Message too short: ${raw.length} bytes`)
+            return
+        }
+
+        const view = new DataView(data)
+        const ty = view.getUint8(0)
+        if (ty !== 0) {
+            this.debugLog(`[Cursor] Unknown cursor message type: ${ty}`)
+            return
+        }
+
+        const visible = view.getUint8(1) !== 0
+        const width = view.getUint16(2, false)
+        const height = view.getUint16(4, false)
+        const hotspot_x = view.getUint16(6, false)
+        const hotspot_y = view.getUint16(8, false)
+        const rgbaLength = view.getUint32(10, false)
+
+        if (raw.length < 14 + rgbaLength) {
+            this.debugLog(`[Cursor] Message incomplete: expected ${14 + rgbaLength} bytes, got ${raw.length}`)
+            return
+        }
+
+        if (visible) {
+            const expectedLength = width * height * 4
+            if (expectedLength !== rgbaLength) {
+                this.debugLog(`[Cursor] Invalid payload size: expected ${expectedLength} got ${rgbaLength}`)
+                return
+            }
+        }
+
+        const rgba = Array.from(raw.slice(14, 14 + rgbaLength))
+        queueMicrotask(() =>
+            this.applyHostCursorShape({
+                visible,
+                width,
+                height,
+                hotspot_x,
+                hotspot_y,
+                rgba,
+            })
+        )
     }
 
     private setHdrMode(enabled: boolean) {
