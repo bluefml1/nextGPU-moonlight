@@ -28,6 +28,7 @@ export type InfoEvent = CustomEvent<
     { type: "connectionComplete", capabilities: StreamCapabilities } |
     { type: "connectionStatus", status: ConnectionStatus } |
     { type: "addDebugLine", line: string, additional?: LogMessageInfo } |
+    { type: "hostCursorHidden", hidden: boolean } |
     { type: "fileTransferProgress", percent: number, loaded?: number, total?: number, source?: "file" | "clipboard" } |
     { type: "fileTransferProgressEnd", source?: "file" | "clipboard" }
 >
@@ -103,16 +104,8 @@ export class Stream implements Component {
 
     private input: StreamInput
     private stats: StreamStats
-    private activeVideoCodecSupport: VideoCodecSupport | null = null
-    private adaptiveIntervalId: number | null = null
-    private adaptiveHighDelaySamples = 0
-    private adaptiveLowDelaySamples = 0
-    private adaptiveLastApplyAt = 0
-    private adaptiveBitrate: number
-    private adaptiveFps: number
-    private readonly adaptiveInitialBitrate: number
-    private readonly adaptiveInitialFps: number
-    private readonly adaptiveFpsSteps = [60, 45, 30]
+    private lastCursorSignature: string | null = null
+    private lastEmittedHostCursorHidden: boolean | null = null
 
     private streamerSize: [number, number]
     private dragOverHandler = (event: DragEvent) => this.onDragOver(event)
@@ -133,10 +126,6 @@ export class Stream implements Component {
             typeof settings.hostUploadRelativeDir === "string" ? settings.hostUploadRelativeDir : ""
 
         this.streamerSize = getStreamerSize(settings, viewerScreenSize)
-        this.adaptiveInitialBitrate = settings.bitrate
-        this.adaptiveInitialFps = settings.fps
-        this.adaptiveBitrate = settings.bitrate
-        this.adaptiveFps = settings.fps
 
         // Configure web socket
         const wsApiHost = api.host_url.replace(/^http(s)?:/, "ws$1:")
@@ -165,7 +154,6 @@ export class Stream implements Component {
 
         // Stream Stats
         this.stats = new StreamStats()
-        this.startAdaptiveStabilityController()
 
         this.setupFileDropUpload()
     }
@@ -416,145 +404,87 @@ export class Stream implements Component {
         }
     }
 
-    private startAdaptiveStabilityController() {
-        if (this.adaptiveIntervalId != null) {
-            clearInterval(this.adaptiveIntervalId)
+    private applyHostCursorShape(cursor: {
+        visible: boolean
+        width: number
+        height: number
+        hotspot_x: number
+        hotspot_y: number
+        rgba: Array<number>
+    }) {
+        const hostCursorHidden = !cursor.visible || cursor.width <= 0 || cursor.height <= 0 || cursor.rgba.length == 0
+        if (hostCursorHidden != this.lastEmittedHostCursorHidden) {
+            this.lastEmittedHostCursorHidden = hostCursorHidden
+            const event: InfoEvent = new CustomEvent("stream-info", {
+                detail: { type: "hostCursorHidden", hidden: hostCursorHidden },
+            })
+            this.eventTarget.dispatchEvent(event)
         }
-        this.adaptiveIntervalId = window.setInterval(() => {
-            void this.tickAdaptiveStabilityController()
-        }, 2000)
-    }
 
-    private stopAdaptiveStabilityController() {
-        if (this.adaptiveIntervalId != null) {
-            clearInterval(this.adaptiveIntervalId)
-            this.adaptiveIntervalId = null
-        }
-    }
-
-    private getAdaptiveDelayMs(): number | null {
-        const stats = this.stats.getCurrentStats().transport
-        const raw = stats.webrtcJitterBufferDelayMs
-        if (typeof raw != "number" || !Number.isFinite(raw)) {
-            return null
-        }
-        // Browser stats can expose seconds for this value; normalize into ms.
-        return raw <= 10 ? raw * 1000 : raw
-    }
-
-    private getNextLowerFps(current: number): number {
-        const normalized = this.adaptiveFpsSteps.indexOf(current) != -1 ? current : this.adaptiveFpsSteps[0]
-        const idx = this.adaptiveFpsSteps.indexOf(normalized)
-        if (idx == -1 || idx >= this.adaptiveFpsSteps.length - 1) {
-            return this.adaptiveFpsSteps[this.adaptiveFpsSteps.length - 1]
-        }
-        return this.adaptiveFpsSteps[idx + 1]
-    }
-
-    private getNextHigherFps(current: number, max: number): number {
-        const normalized = this.adaptiveFpsSteps.indexOf(current) != -1 ? current : this.adaptiveFpsSteps[this.adaptiveFpsSteps.length - 1]
-        const idx = this.adaptiveFpsSteps.indexOf(normalized)
-        if (idx <= 0) {
-            return Math.min(max, this.adaptiveFpsSteps[0])
-        }
-        return Math.min(max, this.adaptiveFpsSteps[idx - 1])
-    }
-
-    private async tickAdaptiveStabilityController() {
-        if (!this.activeVideoCodecSupport) {
+        if (hostCursorHidden) {
+            this.divElement.style.cursor = "none"
+            this.lastCursorSignature = "hidden"
+            this.debugLog("[CursorShape] applied hidden cursor")
             return
         }
 
-        const delayMs = this.getAdaptiveDelayMs()
-        if (delayMs == null) {
+        // Most browsers cap custom cursor bitmaps around 128x128 px.
+        const maxCursorSize = 128
+        const renderWidth = Math.min(cursor.width, maxCursorSize)
+        const renderHeight = Math.min(cursor.height, maxCursorSize)
+
+        // Compact checksum for update dedupe.
+        let checksum = 2166136261 >>> 0
+        for (let i = 0; i < cursor.rgba.length; i++) {
+            checksum ^= (cursor.rgba[i] ?? 0) & 0xff
+            checksum = Math.imul(checksum, 16777619) >>> 0
+        }
+        const signature = `${cursor.width}x${cursor.height}:${cursor.hotspot_x},${cursor.hotspot_y}:${cursor.rgba.length}:${checksum}`
+        if (signature === this.lastCursorSignature) {
             return
         }
 
-        const HIGH_DELAY_MS = 30
-        const LOW_DELAY_MS = 10
-        const APPLY_COOLDOWN_MS = 12000
-
-        if (delayMs >= HIGH_DELAY_MS) {
-            this.adaptiveHighDelaySamples += 1
-            this.adaptiveLowDelaySamples = 0
-        } else if (delayMs <= LOW_DELAY_MS) {
-            this.adaptiveLowDelaySamples += 1
-            this.adaptiveHighDelaySamples = 0
-        } else {
-            this.adaptiveHighDelaySamples = 0
-            this.adaptiveLowDelaySamples = 0
-        }
-
-        const now = Date.now()
-        if (now - this.adaptiveLastApplyAt < APPLY_COOLDOWN_MS) {
+        const canvas = document.createElement("canvas")
+        canvas.width = cursor.width
+        canvas.height = cursor.height
+        const ctx = canvas.getContext("2d")
+        if (!ctx) {
             return
         }
 
-        if (this.adaptiveHighDelaySamples >= 2) {
-            const minBitrate = 2000
-            const reducedBitrate = Math.max(minBitrate, Math.floor(this.adaptiveBitrate * 0.85))
-
-            let nextBitrate = this.adaptiveBitrate
-            let nextFps = this.adaptiveFps
-
-            if (reducedBitrate < this.adaptiveBitrate) {
-                nextBitrate = reducedBitrate
-            } else {
-                const loweredFps = this.getNextLowerFps(this.adaptiveFps)
-                if (loweredFps < this.adaptiveFps) {
-                    nextFps = loweredFps
-                } else {
-                    return
-                }
-            }
-
-            await this.applyAdaptiveStreamSettings(nextBitrate, nextFps, `high jitter buffer delay ${Math.round(delayMs)}ms`)
-            this.adaptiveHighDelaySamples = 0
-            return
+        const imageData = ctx.createImageData(cursor.width, cursor.height)
+        const rgba = cursor.rgba
+        const maxLen = Math.min(imageData.data.length, rgba.length)
+        for (let i = 0; i < maxLen; i++) {
+            imageData.data[i] = rgba[i]
         }
+        ctx.putImageData(imageData, 0, 0)
 
-        if (this.adaptiveLowDelaySamples >= 6) {
-            const targetBitrate = this.adaptiveInitialBitrate
-            const increasedBitrate = Math.min(targetBitrate, Math.floor(this.adaptiveBitrate * 1.08))
-            const increasedFps = this.getNextHigherFps(this.adaptiveFps, this.adaptiveInitialFps)
+        let outputDataUrl = canvas.toDataURL("image/png")
+        let hotspotX = cursor.hotspot_x
+        let hotspotY = cursor.hotspot_y
 
-            if (increasedBitrate == this.adaptiveBitrate && increasedFps == this.adaptiveFps) {
-                return
-            }
-
-            await this.applyAdaptiveStreamSettings(increasedBitrate, increasedFps, `stable jitter buffer delay ${Math.round(delayMs)}ms`)
-            this.adaptiveLowDelaySamples = 0
-        }
-    }
-
-    private async applyAdaptiveStreamSettings(nextBitrate: number, nextFps: number, reason: string) {
-        if (!this.activeVideoCodecSupport) {
-            return
-        }
-
-        this.adaptiveBitrate = nextBitrate
-        this.adaptiveFps = nextFps
-        this.adaptiveLastApplyAt = Date.now()
-
-        const message: StreamClientMessage = {
-            StartStream: {
-                bitrate: this.adaptiveBitrate,
-                packet_size: this.settings.packetSize,
-                fps: this.adaptiveFps,
-                width: this.streamerSize[0],
-                height: this.streamerSize[1],
-                play_audio_local: this.settings.playAudioLocal,
-                video_supported_formats: createSupportedVideoFormatsBits(this.activeVideoCodecSupport),
-                video_colorspace: "Rec709",
-                video_color_range_full: false,
-                hdr: this.settings.hdr ?? false,
+        if (renderWidth != cursor.width || renderHeight != cursor.height) {
+            const scaled = document.createElement("canvas")
+            scaled.width = renderWidth
+            scaled.height = renderHeight
+            const scaledCtx = scaled.getContext("2d")
+            if (scaledCtx) {
+                scaledCtx.drawImage(canvas, 0, 0, renderWidth, renderHeight)
+                outputDataUrl = scaled.toDataURL("image/png")
+                hotspotX = Math.round((cursor.hotspot_x * renderWidth) / cursor.width)
+                hotspotY = Math.round((cursor.hotspot_y * renderHeight) / cursor.height)
             }
         }
 
+        hotspotX = Math.max(0, Math.min(hotspotX, renderWidth - 1))
+        hotspotY = Math.max(0, Math.min(hotspotY, renderHeight - 1))
+
+        this.divElement.style.cursor = `url('${outputDataUrl}') ${hotspotX} ${hotspotY}, auto`
+        this.lastCursorSignature = signature
         this.debugLog(
-            `[Adaptive] Applying stream profile (reason: ${reason}) -> bitrate=${this.adaptiveBitrate}, fps=${this.adaptiveFps}`
+            `[CursorShape] applied ${cursor.width}x${cursor.height} -> ${renderWidth}x${renderHeight} hotspot(${hotspotX},${hotspotY}) checksum=${checksum}`
         )
-        this.sendWsMessage(message)
     }
 
     async startConnection() {
@@ -639,6 +569,17 @@ export class Stream implements Component {
         } else {
             this.debugLog(`[GENERAL] Cannot register listener, channel type is not 'data'`)
         }
+
+        const cursorChannel = this.transport.getChannel(TransportChannelId.CURSOR)
+        this.debugLog(`[Cursor] Setting up CURSOR channel listener, type=${cursorChannel.type}`)
+        if (cursorChannel.type === "data") {
+            cursorChannel.addReceiveListener((data: ArrayBuffer) => {
+                this.onCursorChannelMessage(data)
+            })
+            this.debugLog(`[Cursor] CURSOR channel listener registered`)
+        } else {
+            this.debugLog(`[Cursor] Cannot register listener, channel type is not 'data'`)
+        }
     }
 
     private onGeneralChannelMessage(data: ArrayBuffer) {
@@ -683,6 +624,53 @@ export class Stream implements Component {
                 this.eventTarget.dispatchEvent(event)
             }
         }
+    }
+
+    private onCursorChannelMessage(data: ArrayBuffer) {
+        const raw = new Uint8Array(data)
+        if (raw.length < 14) {
+            this.debugLog(`[Cursor] Message too short: ${raw.length} bytes`)
+            return
+        }
+
+        const view = new DataView(data)
+        const ty = view.getUint8(0)
+        if (ty !== 0) {
+            this.debugLog(`[Cursor] Unknown cursor message type: ${ty}`)
+            return
+        }
+
+        const visible = view.getUint8(1) !== 0
+        const width = view.getUint16(2, false)
+        const height = view.getUint16(4, false)
+        const hotspot_x = view.getUint16(6, false)
+        const hotspot_y = view.getUint16(8, false)
+        const rgbaLength = view.getUint32(10, false)
+
+        if (raw.length < 14 + rgbaLength) {
+            this.debugLog(`[Cursor] Message incomplete: expected ${14 + rgbaLength} bytes, got ${raw.length}`)
+            return
+        }
+
+        if (visible) {
+            const expectedLength = width * height * 4
+            if (expectedLength !== rgbaLength) {
+                this.debugLog(`[Cursor] Invalid payload size: expected ${expectedLength} got ${rgbaLength}`)
+                return
+            }
+        }
+
+        const rgba = Array.from(raw.slice(14, 14 + rgbaLength))
+        queueMicrotask(() =>
+            this.applyHostCursorShape({
+                visible,
+                width,
+                height,
+                hotspot_x,
+                hotspot_y,
+                rgba,
+            })
+        )
     }
 
     private setHdrMode(enabled: boolean) {
@@ -965,13 +953,12 @@ export class Stream implements Component {
         return true
     }
     private async startStream(videoCodecSupport: VideoCodecSupport): Promise<void> {
-        this.activeVideoCodecSupport = videoCodecSupport
         this.resetKeyboardState("before stream start")
         const message: StreamClientMessage = {
             StartStream: {
-                bitrate: this.adaptiveBitrate,
+                bitrate: this.settings.bitrate,
                 packet_size: this.settings.packetSize,
-                fps: this.adaptiveFps,
+                fps: this.settings.fps,
                 width: this.streamerSize[0],
                 height: this.streamerSize[1],
                 play_audio_local: this.settings.playAudioLocal,
@@ -1001,7 +988,6 @@ export class Stream implements Component {
         parent.appendChild(this.divElement)
     }
     unmount(parent: HTMLElement): void {
-        this.stopAdaptiveStabilityController()
         this.resetKeyboardState("stream unmount")
         this.divElement.removeEventListener("dragover", this.dragOverHandler)
         this.divElement.removeEventListener("drop", this.dropHandler)

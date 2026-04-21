@@ -75,6 +75,7 @@ struct WebRtcInner {
     event_sender: Sender<TransportEvent>,
     general_channel: Arc<RTCDataChannel>,
     stats_channel: Mutex<Option<Arc<RTCDataChannel>>>,
+    cursor_channel: Mutex<Option<Arc<RTCDataChannel>>>,
     video: Mutex<WebRtcVideo>,
     audio: Mutex<WebRtcAudio>,
     // Timeout / Terminate
@@ -150,6 +151,7 @@ pub async fn new(
     let peer = Arc::new(api.new_peer_connection(rtc_config).await?);
 
     let general_channel = peer.create_data_channel("general", None).await?;
+    let cursor_channel = peer.create_data_channel("cursor", None).await?;
 
     let runtime = Handle::current();
     let this_owned = Arc::new(WebRtcInner {
@@ -157,6 +159,7 @@ pub async fn new(
         event_sender,
         general_channel: general_channel.clone(),
         stats_channel: Mutex::new(None),
+        cursor_channel: Mutex::new(None),
         video: Mutex::new(WebRtcVideo::new(
             runtime.clone(),
             Arc::downgrade(&peer),
@@ -173,7 +176,8 @@ pub async fn new(
     // don't forget to register the general channel created by us
     {
         let this = this_owned.clone();
-        this.on_data_channel(general_channel).await;
+        this.clone().on_data_channel(general_channel).await;
+        this.on_data_channel(cursor_channel).await;
     }
 
     let this = Arc::downgrade(&this_owned);
@@ -547,6 +551,34 @@ impl WebRtcInner {
 
                 *stats = Some(channel);
             }
+            "cursor" => {
+                let mut cursor = self.cursor_channel.lock().await;
+
+                channel.on_open(Box::new(move || {
+                    Box::pin(async move {
+                        debug!("cursor data channel open");
+                    })
+                }));
+
+                channel.on_close({
+                    let this = Arc::downgrade(&self);
+
+                    Box::new(move || {
+                        let this = this.clone();
+
+                        Box::pin(async move {
+                            let Some(this) = this.upgrade() else {
+                                warn!("Failed to close cursor channel because the main type is already deallocated");
+                                return;
+                            };
+
+                            this.close_cursor().await;
+                        })
+                    })
+                });
+
+                *cursor = Some(channel);
+            }
             "mouse_reliable" | "mouse_absolute" | "mouse_relative" => {
                 channel.on_message(create_channel_message_handler(
                     inner,
@@ -589,6 +621,12 @@ impl WebRtcInner {
         let mut stats = self.stats_channel.lock().await;
 
         *stats = None;
+    }
+    async fn close_cursor(&self) {
+        let mut cursor = self.cursor_channel.lock().await;
+
+        debug!("cursor data channel closed");
+        *cursor = None;
     }
 
     // -- Termination
@@ -697,6 +735,20 @@ impl TransportSender for WebRTCTransportSender {
                 let stats = self.inner.stats_channel.lock().await;
                 if let Some(stats) = stats.as_ref() {
                     match stats.send(&bytes).await {
+                        Ok(_) => {}
+                        Err(webrtc::Error::ErrDataChannelNotOpen) => {
+                            return Err(TransportError::ChannelClosed);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    return Err(TransportError::ChannelClosed);
+                }
+            }
+            TransportChannelId::CURSOR => {
+                let cursor = self.inner.cursor_channel.lock().await;
+                if let Some(cursor) = cursor.as_ref() {
+                    match cursor.send(&bytes).await {
                         Ok(_) => {}
                         Err(webrtc::Error::ErrDataChannelNotOpen) => {
                             return Err(TransportError::ChannelClosed);

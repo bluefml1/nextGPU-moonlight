@@ -57,7 +57,8 @@ export const TRANSPORT_CHANNEL_OPTIONS: Record<keyof typeof TransportChannelId, 
     CONTROLLER13: { reliable: false, ordered: false },
     CONTROLLER14: { reliable: false, ordered: false },
     CONTROLLER15: { reliable: false, ordered: false },
-    RTT: { reliable: true, ordered: true }
+    RTT: { reliable: true, ordered: true },
+    CURSOR: { reliable: true, ordered: true, serverCreated: true }
 }
 
 // failednoconnect => a connection failed without firstly being established

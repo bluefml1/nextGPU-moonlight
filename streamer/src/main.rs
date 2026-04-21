@@ -46,14 +46,17 @@ use tokio::{
     io::{stdin, stdout},
     runtime::Handle,
     spawn,
-    sync::{Mutex, Notify, RwLock},
+    sync::{
+        Mutex, Notify, RwLock,
+        mpsc::{self, error::TrySendError},
+    },
     task::spawn_blocking,
     time::sleep,
 };
 use tracing::{Level, level_filters::LevelFilter, span};
 use tracing::{debug, error, info, trace, warn};
 
-use common::api_bindings::{StreamCapabilities, StreamServerMessage};
+use common::api_bindings::{HostCursorShape, StreamCapabilities, StreamServerMessage};
 use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
@@ -259,6 +262,7 @@ struct StreamConnection {
     pub active_gamepads: RwLock<ActiveGamepads>,
     pub pressed_keys: Mutex<HashSet<u16>>,
     pub transport_sender: Mutex<Option<Box<dyn TransportSender + Send + Sync + 'static>>>,
+    pub cursor_shape_tx: mpsc::Sender<HostCursorShape>,
     // Timeout / Terminate
     pub timeout_terminate_request: Mutex<Option<Instant>>,
     pub terminate: Notify,
@@ -275,6 +279,8 @@ impl StreamConnection {
         video_frame_queue_size: usize,
         audio_sample_queue_size: usize,
     ) -> Result<Arc<Self>, anyhow::Error> {
+        let (cursor_shape_tx, mut cursor_shape_rx) = mpsc::channel::<HostCursorShape>(64);
+
         let this = Arc::new(Self {
             runtime: Handle::current(),
             moonlight,
@@ -291,9 +297,31 @@ impl StreamConnection {
             active_gamepads: RwLock::new(ActiveGamepads::empty()),
             pressed_keys: Mutex::new(HashSet::new()),
             transport_sender: Mutex::new(None),
+            cursor_shape_tx,
             timeout_terminate_request: Default::default(),
             terminate: Notify::default(),
             is_terminating: AtomicBool::new(false),
+        });
+
+        spawn({
+            let this = Arc::downgrade(&this);
+            async move {
+                while let Some(cursor) = cursor_shape_rx.recv().await {
+                    let Some(this) = this.upgrade() else {
+                        debug!("Dropping cursor update because stream connection is already deallocated");
+                        return;
+                    };
+
+                    this.try_send_packet(
+                        OutboundPacket::CursorShape {
+                            cursor,
+                        },
+                        "cursor shape",
+                        false,
+                    )
+                    .await;
+                }
+            }
         });
 
         spawn({
@@ -1094,6 +1122,42 @@ impl ConnectionListener for StreamConnectionListener {
 
     fn controller_set_led(&mut self, _controller_number: u16, _r: u8, _g: u8, _b: u8) {
         // unsupported
+    }
+
+    fn set_cursor_shape(
+        &mut self,
+        visible: bool,
+        width: u16,
+        height: u16,
+        hotspot_x: u16,
+        hotspot_y: u16,
+        rgba_data: &[u8],
+    ) {
+        let Some(stream) = self.stream.upgrade() else {
+            warn!("Failed to get stream because it is already deallocated");
+            return;
+        };
+
+        let cursor = HostCursorShape {
+            visible,
+            width,
+            height,
+            hotspot_x,
+            hotspot_y,
+            rgba: rgba_data.to_vec(),
+            cursor_type: None,
+            flags: None,
+        };
+
+        match stream.cursor_shape_tx.try_send(cursor) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                debug!("Dropping cursor update because cursor queue is full");
+            }
+            Err(TrySendError::Closed(_)) => {
+                warn!("Dropping cursor update because cursor queue is closed");
+            }
+        }
     }
 }
 

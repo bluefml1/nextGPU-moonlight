@@ -37,7 +37,7 @@ export const MoonlightLoadingScreen = (() => {
         #ml-loading-screen {
             position: fixed;
             inset: 0;
-            z-index: 99999;
+            z-index: 100000;
             background: #0c0c10;
             display: flex;
             flex-direction: column;
@@ -322,12 +322,14 @@ export const MoonlightLoadingScreen = (() => {
     return {
         show(title?: string, subtitle?: string) {
             if (el) return
+            console.info("[Overlay:Loading] show", { title, subtitle })
             injectStyles()
             el = build(title, subtitle)
             document.body.appendChild(el)
         },
         hide(fadeMs = 300) {
             if (!el) return
+            console.info("[Overlay:Loading] hide", { fadeMs })
             el.style.transition = `opacity ${fadeMs}ms ease`
             el.style.opacity = "0"
             setTimeout(() => {
@@ -363,7 +365,7 @@ const MoonlightFullscreenOverlayImpl = (() => {
         #mlfso-overlay {
             position: fixed;
             inset: 0;
-            z-index: 99998;
+            z-index: 100001;
             background: rgba(18, 18, 20, 0.82);
             backdrop-filter: blur(10px);
             -webkit-backdrop-filter: blur(10px);
@@ -420,6 +422,7 @@ const MoonlightFullscreenOverlayImpl = (() => {
             letter-spacing: 0.06em;
             text-transform: uppercase;
         }
+
     `
 
     let overlayEl: HTMLDivElement | null = null
@@ -477,9 +480,11 @@ const MoonlightFullscreenOverlayImpl = (() => {
     const api = {
         show(onFullscreen?: () => void) {
             if (overlayEl) return
+            console.info("[Overlay:Fullscreen] show")
             injectStyles()
             overlayEl = buildOverlay()
             const go = () => {
+                console.info("[Overlay:Fullscreen] user gesture -> request fullscreen")
                 api.hide()
                 onFullscreen?.()
             }
@@ -490,6 +495,7 @@ const MoonlightFullscreenOverlayImpl = (() => {
         },
         hide(fadeMs = 280) {
             if (!overlayEl) return
+            console.info("[Overlay:Fullscreen] hide", { fadeMs })
             if (keyHandler) {
                 document.removeEventListener("keydown", keyHandler)
                 keyHandler = null
@@ -511,3 +517,115 @@ const MoonlightFullscreenOverlayImpl = (() => {
 })()
 
 export const MoonlightFullscreenOverlay = MoonlightFullscreenOverlayImpl
+
+/** Overlay that asks for a user gesture before re-acquiring pointer lock. */
+const MoonlightPointerLockOverlayImpl = (() => {
+    const CSS = `
+        @keyframes mlplo-pulse {
+            0%,100% { opacity: .55; transform: scale(1); }
+            50%      { opacity: 1;   transform: scale(1.1); }
+        }
+        @keyframes mlplo-fadein {
+            from { opacity: 0; }
+            to   { opacity: 1; }
+        }
+
+        #mlplo-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 99999;
+            background: transparent;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+            animation: mlplo-fadein .3s ease both;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            pointer-events: auto;
+            cursor: auto;
+        }
+
+        #mlplo-notice {
+            padding: 8px 11px;
+            border-radius: 9px;
+            background:
+                linear-gradient(135deg, rgba(74, 111, 255, 0.2), rgba(0, 200, 255, 0.14)),
+                rgba(12, 12, 16, 0.84);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            color: rgba(255, 255, 255, 0.94);
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            cursor: pointer;
+            pointer-events: auto;
+            box-shadow:
+                0 2px 12px rgba(0, 0, 0, 0.45),
+                inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+            text-align: center;
+        }
+    `
+
+    let overlayEl: HTMLDivElement | null = null
+    let keyHandler: (() => void) | null = null
+
+    function injectStyles() {
+        if (document.getElementById("mlplo-styles")) return
+        const s = document.createElement("style")
+        s.id = "mlplo-styles"
+        s.textContent = CSS
+        document.head.appendChild(s)
+    }
+
+    function buildOverlay() {
+        const root = document.createElement("div")
+        root.id = "mlplo-overlay"
+        const notice = document.createElement("div")
+        notice.id = "mlplo-notice"
+        notice.textContent = "Click to lock mouse"
+        root.appendChild(notice)
+        return root
+    }
+
+    const api = {
+        show(onRelock?: () => void) {
+            if (overlayEl) return
+            console.info("[Overlay:EscRelock] show")
+            injectStyles()
+            overlayEl = buildOverlay()
+            const go = () => {
+                console.info("[Overlay:EscRelock] user gesture -> relock")
+                api.hide()
+                onRelock?.()
+            }
+            const notice = overlayEl.querySelector("#mlplo-notice")
+            notice?.addEventListener("click", go, { once: true })
+            keyHandler = go
+            document.addEventListener("keydown", keyHandler, { once: true })
+            document.body.appendChild(overlayEl)
+            notice?.setAttribute("aria-live", "polite")
+        },
+        hide(fadeMs = 220) {
+            if (!overlayEl) return
+            console.info("[Overlay:EscRelock] hide", { fadeMs })
+            if (keyHandler) {
+                document.removeEventListener("keydown", keyHandler)
+                keyHandler = null
+            }
+            overlayEl.style.transition = `opacity ${fadeMs}ms ease`
+            overlayEl.style.opacity = "0"
+            const target = overlayEl
+            overlayEl = null
+            setTimeout(() => {
+                if (target.parentNode) target.parentNode.removeChild(target)
+            }, fadeMs)
+        },
+        isVisible() {
+            return overlayEl !== null
+        },
+    }
+
+    return api
+})()
+
+export const MoonlightPointerLockOverlay = MoonlightPointerLockOverlayImpl

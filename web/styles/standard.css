@@ -1229,6 +1229,11 @@ input[type=number] {
     pointer-events: none;
 }
 
+/* Keep settings/sidebar clickable above ESC relock overlay when needed. */
+.sidebar-overlay.sidebar-esc-relock-priority {
+    z-index: 100000 !important;
+}
+
 /* Hide sidebar icon/panel while Settings modal is open. */
 .sidebar-overlay.sidebar-settings-hidden {
     visibility: hidden !important;

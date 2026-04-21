@@ -7,10 +7,10 @@ const trueDefaultSettings: Settings =
 {
     // possible values: "left", "right", "up", "down"
     "sidebarEdge": "left",
-    "bitrate": 6000,
-    "packetSize": 256,
+    "bitrate": 10000,
+    "packetSize": 100,
     "fps": 60,
-    "videoFrameQueueSize": 2,
+    "videoFrameQueueSize": 4,
     // possible values: "720p", "1080p", "1440p", "4k", "native", "custom"
     "videoSize": "custom",
     // only works if videoSize=custom
