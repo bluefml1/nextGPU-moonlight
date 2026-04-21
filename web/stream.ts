@@ -1586,6 +1586,10 @@ class ViewerApp implements Component {
         }
         return text
     }
+    private unavailableText(value: unknown): string {
+        const text = this.safeText(value)
+        return text === "N/A" || text.toLowerCase() === "unknown" ? "Unavailable" : text
+    }
     private computeBitrateMbps(statsData: StreamStatsData): number | null {
         const bytesReceivedRaw = statsData.transport.iceBytesReceived
         const bytesReceived = typeof bytesReceivedRaw === "number" && Number.isFinite(bytesReceivedRaw) ? bytesReceivedRaw : null
@@ -1609,6 +1613,15 @@ class ViewerApp implements Component {
         this.lastBitrateMbps = Number.isFinite(mbps) ? mbps : this.lastBitrateMbps
         return this.lastBitrateMbps
     }
+    private endpoint(address: string, port: string): string {
+        if (address === "N/A") {
+            return "N/A"
+        }
+        if (port === "N/A") {
+            return address
+        }
+        return `${address}:${port}`
+    }
     private qualityLabel(statsData: StreamStatsData): { label: string, cls: string } {
         const latency = statsData.streamerRttMs ?? statsData.browserRtt
         const packetLoss = typeof statsData.transport.webrtcPacketsLost === "number" ? statsData.transport.webrtcPacketsLost : null
@@ -1627,12 +1640,16 @@ class ViewerApp implements Component {
         const fps = typeof statsData.transport.webrtcFps === "number" ? statsData.transport.webrtcFps : statsData.videoFps
         const bitrateMbps = this.computeBitrateMbps(statsData)
         const packetLoss = typeof statsData.transport.webrtcPacketsLost === "number" ? statsData.transport.webrtcPacketsLost : null
+        const packetsReceived = typeof statsData.transport.webrtcPacketsReceived === "number" ? statsData.transport.webrtcPacketsReceived : null
+        const packetLossPercent = packetLoss != null && packetsReceived != null && (packetLoss + packetsReceived) > 0
+            ? (packetLoss * 100) / (packetLoss + packetsReceived)
+            : null
         const jitter = typeof statsData.transport.webrtcJitterMs === "number" ? statsData.transport.webrtcJitterMs : null
         const icePairState = this.safeText(statsData.transport.icePairState)
         const iceProtocol = this.safeText(statsData.transport.iceLocalProtocol)
         const iceLocalType = this.safeText(statsData.transport.iceLocalCandidateType)
         const iceRemoteType = this.safeText(statsData.transport.iceRemoteCandidateType)
-        const iceLocalNetworkType = this.safeText(statsData.transport.iceLocalNetworkType)
+        const iceLocalNetworkType = this.unavailableText(statsData.transport.iceLocalNetworkType)
         const iceLocalAddress = this.safeText(statsData.transport.iceLocalAddress)
         const iceLocalPort = this.safeText(statsData.transport.iceLocalPort)
         const iceRemoteAddress = this.safeText(statsData.transport.iceRemoteAddress)
@@ -1660,11 +1677,11 @@ class ViewerApp implements Component {
                 <h4>Connection (Most Important)</h4>
                 <div class="video-stats-grid">
                     <div title="Round-trip latency between client and host."><span class="video-stats-label">RTT:</span> ${this.formatWithUnit(statsData.streamerRttMs, "ms", 0)}</div>
-                    <div title="How much latency fluctuates over time. Lower is more stable."><span class="video-stats-label">Variance:</span> ${this.formatWithUnit(statsData.streamerRttVarianceMs, "ms", 0)}</div>
+                    <div title="How much latency fluctuates over time. Lower is more stable."><span class="video-stats-label">Variance:</span> ${this.formatWithUnit(statsData.streamerRttVarianceMs, "ms", 2)}</div>
                     <div title="Estimated incoming video bitrate from transport stats."><span class="video-stats-label">Bitrate:</span> ${this.formatWithUnit(bitrateMbps, "Mbps", 1)}</div>
                     <div title="Actual rendered frame rate."><span class="video-stats-label">FPS:</span> ${this.formatWithUnit(fps, "fps", 0)}</div>
-                    <div title="Received packet loss count from WebRTC inbound stream."><span class="video-stats-label">Packet Loss:</span> ${this.safeText(packetLoss)}</div>
-                    <div title="Current jitter value from WebRTC inbound stream."><span class="video-stats-label">Jitter:</span> ${this.safeText(jitter)}</div>
+                    <div title="Packet loss ratio based on packets lost vs total packets."><span class="video-stats-label">Packet Loss:</span> ${packetLossPercent != null ? `${packetLossPercent.toFixed(2)}% (${this.safeText(packetLoss)})` : "N/A"}</div>
+                    <div title="Current jitter value from WebRTC inbound stream."><span class="video-stats-label">Jitter:</span> ${this.formatWithUnit(jitter, "ms", 2)}</div>
                 </div>
             </section>
             <section class="video-stats-section">
@@ -1673,8 +1690,8 @@ class ViewerApp implements Component {
                     <div title="Selected ICE pair connection state."><span class="video-stats-label">Pair:</span> ${icePairState}</div>
                     <div title="Network protocol used by selected route (usually UDP)."><span class="video-stats-label">Protocol:</span> ${iceProtocol}</div>
                     <div title="Local and remote candidate types (e.g. host, srflx, relay, prflx)."><span class="video-stats-label">Type:</span> ${iceLocalType} -> ${iceRemoteType}</div>
-                    <div title="Host-side candidate address and port selected for ICE route."><span class="video-stats-label">Local Host:</span> ${iceLocalAddress}:${iceLocalPort}</div>
-                    <div title="Remote candidate address and port selected for ICE route."><span class="video-stats-label">Remote Host:</span> ${iceRemoteAddress}:${iceRemotePort}</div>
+                    <div title="Client-side candidate address and port selected for ICE route."><span class="video-stats-label">Client Candidate:</span> ${this.endpoint(iceLocalAddress, iceLocalPort)}</div>
+                    <div title="Peer candidate address and port selected for ICE route."><span class="video-stats-label">Peer Candidate:</span> ${this.endpoint(iceRemoteAddress, iceRemotePort)}</div>
                     <div title="Detected network type for the local candidate (for example wifi or ethernet)."><span class="video-stats-label">Network:</span> ${iceLocalNetworkType}</div>
                 </div>
             </section>
