@@ -1124,41 +1124,6 @@ impl ConnectionListener for StreamConnectionListener {
         // unsupported
     }
 
-    fn set_cursor_shape(
-        &mut self,
-        visible: bool,
-        width: u16,
-        height: u16,
-        hotspot_x: u16,
-        hotspot_y: u16,
-        rgba_data: &[u8],
-    ) {
-        let Some(stream) = self.stream.upgrade() else {
-            warn!("Failed to get stream because it is already deallocated");
-            return;
-        };
-
-        let cursor = HostCursorShape {
-            visible,
-            width,
-            height,
-            hotspot_x,
-            hotspot_y,
-            rgba: rgba_data.to_vec(),
-            cursor_type: None,
-            flags: None,
-        };
-
-        match stream.cursor_shape_tx.try_send(cursor) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                debug!("Dropping cursor update because cursor queue is full");
-            }
-            Err(TrySendError::Closed(_)) => {
-                warn!("Dropping cursor update because cursor queue is closed");
-            }
-        }
-    }
 }
 
 impl ConnectionListenerC for StreamConnectionListener {

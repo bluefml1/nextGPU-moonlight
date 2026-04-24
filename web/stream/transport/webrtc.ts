@@ -4,6 +4,8 @@ import { StatValue } from "../stats.js";
 import { allVideoCodecs, CAPABILITIES_CODECS, emptyVideoCodecs, maybeVideoCodecs, VideoCodecSupport } from "../video.js";
 import { DataTransportChannel, Transport, TRANSPORT_CHANNEL_OPTIONS, TransportAudioSetup, TransportChannel, TransportChannelIdKey, TransportChannelIdValue, TransportVideoSetup, AudioTrackTransportChannel, VideoTrackTransportChannel, TrackTransportChannel, TransportShutdown } from "./index.js";
 
+export type WebRTCIceMode = "prefer-direct" | "relay-only"
+
 export class WebRTCTransport implements Transport {
     implementationName: string = "webrtc"
 
@@ -17,12 +19,13 @@ export class WebRTCTransport implements Transport {
 
     // Prevent renegotiation spam: track whether a negotiation is already in progress
     private isNegotiating: boolean = false
+    private iceMode: WebRTCIceMode = "prefer-direct"
 
     constructor(logger?: Logger) {
         this.logger = logger ?? null
     }
 
-    async initPeer(configuration?: RTCConfiguration) {
+    async initPeer(configuration?: RTCConfiguration, mode: WebRTCIceMode = "prefer-direct") {
         this.logger?.debug(`Creating Client Peer`)
 
         if (this.peer) {
@@ -30,11 +33,15 @@ export class WebRTCTransport implements Transport {
             return
         }
 
-        // Configure WebRTC, forcing relay-only before any channels are created
-        const baseConfig: RTCConfiguration = configuration ? { ...configuration } : {}
+        this.iceMode = mode
 
-        // Filter ICE servers to TURN-only so no host/srflx candidates are discovered
-        if (baseConfig.iceServers) {
+        // Configure WebRTC with sensible defaults. Relay-only mode is optional.
+        const baseConfig: RTCConfiguration = configuration ? { ...configuration } : {}
+        baseConfig.iceCandidatePoolSize = 10
+        baseConfig.bundlePolicy = "max-bundle"
+        baseConfig.rtcpMuxPolicy = "require"
+
+        if (this.iceMode == "relay-only" && baseConfig.iceServers) {
             const before = baseConfig.iceServers.length
             baseConfig.iceServers = baseConfig.iceServers.filter(server => {
                 const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
@@ -43,8 +50,7 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug(`Filtered ICE servers for relay-only: ${before} -> ${baseConfig.iceServers.length}`)
         }
 
-        // Enforce relay at the ICE policy level
-        baseConfig.iceTransportPolicy = "relay"
+        baseConfig.iceTransportPolicy = this.iceMode == "relay-only" ? "relay" : "all"
 
         this.peer = new RTCPeerConnection(baseConfig)
         this.peer.addEventListener("error", this.onError.bind(this))
@@ -251,14 +257,15 @@ export class WebRTCTransport implements Transport {
                 return
             }
 
-            // Enforce relay-only candidates and prioritize relay at SDP level
-            const mungedSdp = this.enforceRelayInSdp(localDescription.sdp ?? "")
+            const localSdp = this.iceMode == "relay-only"
+                ? this.enforceRelayInSdp(localDescription.sdp ?? "")
+                : localDescription.sdp ?? ""
 
-            this.logger?.debug(`OnNegotiationNeeded: Sending local description (relay-only): ${localDescription.type}`)
+            this.logger?.debug(`OnNegotiationNeeded: Sending local description (${this.iceMode}): ${localDescription.type}`)
             this.sendMessage({
                 Description: {
                     ty: localDescription.type,
-                    sdp: mungedSdp
+                    sdp: localSdp
                 }
             })
         } catch (err) {
@@ -295,14 +302,15 @@ export class WebRTCTransport implements Transport {
                         return
                     }
 
-                    // Enforce relay-only candidates and prioritize relay at SDP level for the answer
-                    const mungedSdp = this.enforceRelayInSdp(localDescription.sdp ?? "")
+                    const localSdp = this.iceMode == "relay-only"
+                        ? this.enforceRelayInSdp(localDescription.sdp ?? "")
+                        : localDescription.sdp ?? ""
 
-                    this.logger?.debug(`Responding to offer description (relay-only): ${localDescription.type}`)
+                    this.logger?.debug(`Responding to offer description (${this.iceMode}): ${localDescription.type}`)
                     this.sendMessage({
                         Description: {
                             ty: localDescription.type,
-                            sdp: mungedSdp
+                            sdp: localSdp
                         }
                     })
                 }
@@ -318,14 +326,12 @@ export class WebRTCTransport implements Transport {
         if (event.candidate) {
             const candidate = event.candidate.toJSON()
 
-            // Enforce relay: drop non-relay candidates at the trickle ICE level
-            if (candidate.candidate && !candidate.candidate.includes(" typ relay")) {
+            if (this.iceMode == "relay-only" && candidate.candidate && !candidate.candidate.includes(" typ relay")) {
                 this.logger?.debug(`Dropping non-relay ICE candidate: ${candidate.candidate}`)
                 return
             }
 
-            // Optionally, bump relay candidate priority to be highest
-            if (candidate.candidate) {
+            if (this.iceMode == "relay-only" && candidate.candidate) {
                 const tokens = candidate.candidate.split(" ")
                 // candidate:<id> <component> <protocol> <priority> ...
                 if (tokens.length > 3) {
@@ -335,7 +341,7 @@ export class WebRTCTransport implements Transport {
                 }
             }
 
-            this.logger?.debug(`Sending relay ICE candidate: ${candidate.candidate}`)
+            this.logger?.debug(`Sending ICE candidate (${this.iceMode}): ${candidate.candidate}`)
 
             this.sendMessage({
                 AddIceCandidate: {
