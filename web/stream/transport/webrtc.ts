@@ -20,9 +20,118 @@ export class WebRTCTransport implements Transport {
     // Prevent renegotiation spam: track whether a negotiation is already in progress
     private isNegotiating: boolean = false
     private iceMode: WebRTCIceMode = "prefer-direct"
+    private emittedIceCandidateCount = 0
+    private readonly maxLocalIceCandidates = 18
+    private readonly maxHostCandidatesBeforeSrflx = 8
+    private readonly maxBufferedRemoteCandidates = 64
+    private readonly relayBlockWindowMs = 700
+    private restartAttempts = 0
+    private readonly maxRestartAttempts = 3
+    private restartTimer: number | null = null
+    private selectedPairLogTimer: number | null = null
+    private lastLoggedPairSignature: string | null = null
+    private lastLoggedMappingSignature: string | null = null
+    private initialOfferSent = false
+    private initialSrflxSeen = false
+    private srflxWaiters: Array<() => void> = []
+    private syncStarted = false
+    private syncStartTimer: number | null = null
+    private readonly syncStartTimeoutMs = 260
+    private readonly remoteOfferAfterSyncTimeoutMs = 320
+    private bufferedLocalCandidates: Array<RTCIceCandidateInit> = []
+    private delayedLocalRelayCandidates: Array<RTCIceCandidateInit> = []
+    private delayedRemoteRelayCandidates: Array<RTCIceCandidateInit> = []
+    private readonly maxDelayedRelayCandidates = 32
+    private relayUnblockTimer: number | null = null
+    private relayBlockUntilMs = 0
+    private currentRelayBlockWindowMs = 0
+    private relayBlockExtended = false
+    private remoteOfferFallbackTimer: number | null = null
+    private remoteSrflxBurstTriggered = false
+    private readonly remoteSrflxBurstPackets = 8
+    private remoteSrflxBurstRetryTimer: number | null = null
+    private remoteSrflxBurstRetries = 0
+    private readonly maxRemoteSrflxBurstRetries = 6
+    private sawRemoteSrflxCandidate = false
+    private relaySuppressionBiasApplied = false
+    private cumulativeRelaySuppressionMs = 0
+    private readonly maxCumulativeRelaySuppressionMs = 8000
+    private relayRaceStartedAtMs = 0
+    private readonly relayRaceEvaluationDelayMs = 1800
+    private pairStableSinceMs = 0
+    private lastStablePairKey: string | null = null
+    private lastPairTypeSwitchAtMs = 0
+    private readonly pathDecisionHoldMs = 6000
+    private consecutivePoorRelaySamples = 0
+    private readonly poorRelaySamplesRequired = 3
+    // bytesReceived is aggregated and laggy — sample slowly; use for trend / escape only, not fast suppression.
+    private readonly deliverySampleWindow = 12
+    private readonly deliverySampleMinIntervalMs = 2000
+    private readonly minDeliverySamplesForHardTrend = 8
+    private deliverySamples: number[] = []
+    private lastPairBytesReceived: number | null = null
+    private lastPairSampleAtMs: number | null = null
+    private readonly directRttSampleWindow = 12
+    private directRttSamplesMs: number[] = []
+    private lastPathScoreLogAt = 0
+    private readonly pathScoreLogCooldownMs = 1500
+    onIceRestartRequested: (() => void) | null = null
 
     constructor(logger?: Logger) {
         this.logger = logger ?? null
+    }
+
+    private normalizeIceServerUrls(urls: string | string[]): string[] {
+        const raw = Array.isArray(urls) ? urls : [urls]
+        const normalized: string[] = []
+        for (const entry of raw) {
+            if (typeof entry != "string") {
+                continue
+            }
+            const lower = entry.toLowerCase()
+            if (lower.startsWith("turn:") || lower.startsWith("turns:")) {
+                if (lower.includes("transport=tcp") || lower.includes("transport=tls")) {
+                    continue
+                }
+                if (lower.includes("transport=udp")) {
+                    normalized.push(entry)
+                    continue
+                }
+                normalized.push(`${entry}${entry.includes("?") ? "&" : "?"}transport=udp`)
+                continue
+            }
+            if (lower.startsWith("stun:") || lower.startsWith("stuns:")) {
+                normalized.push(entry)
+            }
+        }
+        return normalized
+    }
+
+    private shouldDropLocalCandidate(candidateLine: string): boolean {
+        const line = candidateLine.toLowerCase()
+        if (line.includes(" tcp ")) {
+            return true
+        }
+        if (this.iceMode == "relay-only" && !line.includes(" typ relay ")) {
+            return true
+        }
+        return false
+    }
+
+    private getCandidateType(candidateLine: string): "host" | "srflx" | "prflx" | "relay" | "unknown" {
+        if (candidateLine.includes(" typ host ")) {
+            return "host"
+        }
+        if (candidateLine.includes(" typ srflx ")) {
+            return "srflx"
+        }
+        if (candidateLine.includes(" typ prflx ")) {
+            return "prflx"
+        }
+        if (candidateLine.includes(" typ relay ")) {
+            return "relay"
+        }
+        return "unknown"
     }
 
     async initPeer(configuration?: RTCConfiguration, mode: WebRTCIceMode = "prefer-direct") {
@@ -37,17 +146,51 @@ export class WebRTCTransport implements Transport {
 
         // Configure WebRTC with sensible defaults. Relay-only mode is optional.
         const baseConfig: RTCConfiguration = configuration ? { ...configuration } : {}
-        baseConfig.iceCandidatePoolSize = 10
+        baseConfig.iceCandidatePoolSize = 0
         baseConfig.bundlePolicy = "max-bundle"
         baseConfig.rtcpMuxPolicy = "require"
+        this.emittedIceCandidateCount = 0
+        this.restartAttempts = 0
+        this.initialOfferSent = false
+        this.initialSrflxSeen = false
+        this.srflxWaiters = []
+        this.syncStarted = false
+        this.bufferedLocalCandidates = []
+        this.delayedLocalRelayCandidates = []
+        this.delayedRemoteRelayCandidates = []
+        this.relayBlockUntilMs = 0
+        this.currentRelayBlockWindowMs = 0
+        this.relayBlockExtended = false
+        this.remoteSrflxBurstTriggered = false
+        this.remoteSrflxBurstRetries = 0
+        this.sawRemoteSrflxCandidate = false
+        this.relaySuppressionBiasApplied = false
+        this.cumulativeRelaySuppressionMs = 0
+        this.relayRaceStartedAtMs = 0
+        this.pairStableSinceMs = 0
+        this.lastStablePairKey = null
+        this.lastPairTypeSwitchAtMs = 0
+        this.consecutivePoorRelaySamples = 0
+        this.deliverySamples = []
+        this.lastPairBytesReceived = null
+        this.lastPairSampleAtMs = null
+        this.directRttSamplesMs = []
+        this.lastPathScoreLogAt = 0
 
-        if (this.iceMode == "relay-only" && baseConfig.iceServers) {
+        if (baseConfig.iceServers) {
             const before = baseConfig.iceServers.length
-            baseConfig.iceServers = baseConfig.iceServers.filter(server => {
-                const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
-                return urls.some(url => typeof url === "string" && (url.startsWith("turn:") || url.startsWith("turns:")))
-            })
-            this.logger?.debug(`Filtered ICE servers for relay-only: ${before} -> ${baseConfig.iceServers.length}`)
+            const normalized = baseConfig.iceServers
+                .map((server) => ({
+                    ...server,
+                    urls: this.normalizeIceServerUrls(server.urls),
+                }))
+                .filter((server) => server.urls.length > 0)
+            baseConfig.iceServers = this.iceMode == "relay-only"
+                ? normalized.filter((server) =>
+                    server.urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"))
+                )
+                : normalized
+            this.logger?.debug(`Normalized ICE servers (${this.iceMode}): ${before} -> ${baseConfig.iceServers.length}`)
         }
 
         baseConfig.iceTransportPolicy = this.iceMode == "relay-only" ? "relay" : "all"
@@ -66,8 +209,8 @@ export class WebRTCTransport implements Transport {
         this.peer.addEventListener("track", this.onTrack.bind(this))
         this.peer.addEventListener("datachannel", this.onDataChannel.bind(this))
 
-        // Dedicated file transfer channel on the existing streaming peer
-        this.fileTransferChannel = this.setupFileSender(this.peer)
+        // Keep connect-time footprint small; create optional fileTransfer channel after connect.
+        this.fileTransferChannel = null
 
         this.initChannels()
 
@@ -75,9 +218,183 @@ export class WebRTCTransport implements Transport {
         if (this.remoteDescription) {
             await this.handleRemoteDescription(this.remoteDescription)
         } else {
-            await this.onNegotiationNeeded()
+            this.sendMessage("SyncReady")
+            this.syncStartTimer = window.setTimeout(() => {
+                this.logger?.debug(`Sync start timeout (${this.syncStartTimeoutMs}ms), starting negotiation locally`)
+                void this.startSynchronizedNegotiation("local-timeout")
+            }, this.syncStartTimeoutMs)
         }
         await this.tryDequeueIceCandidates()
+    }
+
+    private async startSynchronizedNegotiation(reason: "remote-start" | "local-timeout") {
+        if (this.syncStarted) {
+            return
+        }
+        this.syncStarted = true
+        if (this.syncStartTimer != null) {
+            clearTimeout(this.syncStartTimer)
+            this.syncStartTimer = null
+        }
+        if (this.iceMode == "prefer-direct") {
+            this.currentRelayBlockWindowMs = Math.max(150, Math.min(300, this.relayBlockWindowMs))
+            this.relayBlockExtended = false
+            this.relayBlockUntilMs = Date.now() + this.currentRelayBlockWindowMs
+            this.scheduleRelayUnblock(this.currentRelayBlockWindowMs, `relay-block-window-${this.currentRelayBlockWindowMs}ms`)
+            this.logger?.debug(`Blocking relay candidates for adaptive initial ${this.currentRelayBlockWindowMs}ms window`)
+        }
+        this.logger?.debug(`Starting synchronized negotiation (${reason})`)
+        await this.onNegotiationNeeded()
+        if (this.bufferedLocalCandidates.length > 0) {
+            for (const candidate of this.bufferedLocalCandidates.splice(0)) {
+                this.sendMessage({
+                    AddIceCandidate: {
+                        candidate: candidate.candidate ?? "",
+                        sdp_mid: candidate.sdpMid ?? null,
+                        sdp_mline_index: candidate.sdpMLineIndex ?? null,
+                        username_fragment: candidate.usernameFragment ?? null
+                    }
+                })
+            }
+        }
+    }
+
+    private scheduleRelayUnblock(delayMs: number, reason: string) {
+        if (this.relayUnblockTimer != null) {
+            clearTimeout(this.relayUnblockTimer)
+        }
+        this.relayUnblockTimer = window.setTimeout(() => {
+            this.relayUnblockTimer = null
+            if (
+                this.iceMode == "prefer-direct" &&
+                !this.relayBlockExtended &&
+                !this.initialSrflxSeen &&
+                !this.sawRemoteSrflxCandidate &&
+                this.peer &&
+                (this.peer.iceConnectionState == "new" || this.peer.iceConnectionState == "checking")
+            ) {
+                const extensionMs = Math.max(0, this.relayBlockWindowMs - this.currentRelayBlockWindowMs)
+                if (extensionMs > 0) {
+                    this.relayBlockExtended = true
+                    this.currentRelayBlockWindowMs += extensionMs
+                    this.relayBlockUntilMs = Date.now() + extensionMs
+                    this.logger?.debug(`Extending relay block by ${extensionMs}ms while waiting for srflx signals`)
+                    this.scheduleRelayUnblock(extensionMs, `relay-block-extension-${extensionMs}ms`)
+                    return
+                }
+            }
+            void this.flushDelayedRelayCandidates(reason)
+        }, delayMs)
+    }
+
+    private queueDelayedRelayCandidate(direction: "local" | "remote", candidate: RTCIceCandidateInit) {
+        if (direction == "local") {
+            if (this.delayedLocalRelayCandidates.length >= this.maxDelayedRelayCandidates) {
+                this.delayedLocalRelayCandidates.shift()
+            }
+            this.delayedLocalRelayCandidates.push(candidate)
+            return
+        }
+        if (this.delayedRemoteRelayCandidates.length >= this.maxDelayedRelayCandidates) {
+            this.delayedRemoteRelayCandidates.shift()
+        }
+        this.delayedRemoteRelayCandidates.push(candidate)
+    }
+
+    private queueBufferedRemoteCandidate(candidate: RTCIceCandidateInit) {
+        if (this.iceCandidates.length >= this.maxBufferedRemoteCandidates) {
+            this.iceCandidates.shift()
+        }
+        this.iceCandidates.push(candidate)
+    }
+
+    private async flushDelayedRelayCandidates(reason: string) {
+        const hasDelayed =
+            this.delayedLocalRelayCandidates.length > 0 || this.delayedRemoteRelayCandidates.length > 0
+        if (!hasDelayed) {
+            return
+        }
+        if (this.peer?.connectionState == "connected") {
+            this.logger?.debug("Dropping delayed relay candidates because P2P already connected")
+            this.delayedLocalRelayCandidates.length = 0
+            this.delayedRemoteRelayCandidates.length = 0
+            return
+        }
+        if (!this.peer || !this.peer.remoteDescription) {
+            this.logger?.debug("Remote description not ready; re-queueing delayed remote relay candidates")
+            for (const candidate of this.delayedRemoteRelayCandidates.splice(0)) {
+                this.queueBufferedRemoteCandidate(candidate)
+            }
+            return
+        }
+        this.logger?.debug(
+            `Flushing delayed relay candidates (${reason}): local=${this.delayedLocalRelayCandidates.length}, remote=${this.delayedRemoteRelayCandidates.length}`
+        )
+        for (const candidate of this.delayedLocalRelayCandidates.splice(0)) {
+            this.sendMessage({
+                AddIceCandidate: {
+                    candidate: candidate.candidate ?? "",
+                    sdp_mid: candidate.sdpMid ?? null,
+                    sdp_mline_index: candidate.sdpMLineIndex ?? null,
+                    username_fragment: candidate.usernameFragment ?? null
+                }
+            })
+        }
+        for (const candidate of this.delayedRemoteRelayCandidates.splice(0)) {
+            try {
+                await this.peer.addIceCandidate(candidate)
+            } catch (err) {
+                this.logger?.debug(`Failed to apply delayed remote relay candidate: ${err}`)
+            }
+        }
+    }
+
+    private triggerRemoteSrflxPacketBurst() {
+        if (this.remoteSrflxBurstTriggered) {
+            return
+        }
+        this.remoteSrflxBurstTriggered = true
+        const trySendBurst = () => {
+            const rtt = this.getChannel(TransportChannelId.RTT)
+            if (rtt.type != "data") {
+                return false
+            }
+            // Short packets are safe no-op on the app RTT parser and still produce network activity.
+            const packet = new Uint8Array([0xff]).buffer
+            for (let i = 0; i < this.remoteSrflxBurstPackets; i++) {
+                rtt.send(packet)
+            }
+            this.logger?.debug(`Sent remote-srflx aggressive packet burst (${this.remoteSrflxBurstPackets} packets)`)
+            return true
+        }
+        try {
+            if (trySendBurst()) {
+                return
+            }
+            this.remoteSrflxBurstRetries = 0
+            this.remoteSrflxBurstRetryTimer = window.setInterval(() => {
+                this.remoteSrflxBurstRetries += 1
+                try {
+                    if (trySendBurst() || this.remoteSrflxBurstRetries >= this.maxRemoteSrflxBurstRetries) {
+                        if (this.remoteSrflxBurstRetryTimer != null) {
+                            clearInterval(this.remoteSrflxBurstRetryTimer)
+                            this.remoteSrflxBurstRetryTimer = null
+                        }
+                        if (this.remoteSrflxBurstRetries >= this.maxRemoteSrflxBurstRetries) {
+                            this.logger?.debug("Remote srflx burst retries exhausted before RTT channel became usable")
+                        }
+                    }
+                } catch (err) {
+                    if (this.remoteSrflxBurstRetryTimer != null) {
+                        clearInterval(this.remoteSrflxBurstRetryTimer)
+                        this.remoteSrflxBurstRetryTimer = null
+                    }
+                    this.logger?.debug(`Remote srflx burst retry failed: ${err}`)
+                }
+            }, 20)
+        } catch (err) {
+            this.logger?.debug(`Failed to schedule remote-srflx packet burst: ${err}`)
+        }
     }
 
     private readonly FILE_TRANSFER_CHUNK_SIZE = 16 * 1024
@@ -217,6 +534,14 @@ export class WebRTCTransport implements Transport {
         }
     }
     async onReceiveMessage(message: StreamSignalingMessage) {
+        if (typeof message == "string") {
+            if (message == "SyncStart") {
+                await this.startSynchronizedNegotiation("remote-start")
+            } else if (message == "SyncReady") {
+                this.logger?.debug("Received sync-ready from remote (ignored on browser side)")
+            }
+            return
+        }
         if ("Description" in message) {
             const description = message.Description;
             await this.handleRemoteDescription({
@@ -240,7 +565,10 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug("OnNegotiationNeeded without a peer")
             return
         }
-
+        if (this.iceMode == "prefer-direct" && !this.syncStarted) {
+            this.logger?.debug("OnNegotiationNeeded deferred until sync start")
+            return
+        }
          // Avoid renegotiation spam: only allow one negotiation at a time
         if (this.isNegotiating || this.peer.signalingState !== "stable") {
             this.logger?.debug(`OnNegotiationNeeded ignored because negotiation is already in progress or signalingState=${this.peer.signalingState}`)
@@ -259,7 +587,7 @@ export class WebRTCTransport implements Transport {
 
             const localSdp = this.iceMode == "relay-only"
                 ? this.enforceRelayInSdp(localDescription.sdp ?? "")
-                : localDescription.sdp ?? ""
+                : this.deprioritizeRelayInSdp(localDescription.sdp ?? "")
 
             this.logger?.debug(`OnNegotiationNeeded: Sending local description (${this.iceMode}): ${localDescription.type}`)
             this.sendMessage({
@@ -268,6 +596,9 @@ export class WebRTCTransport implements Transport {
                     sdp: localSdp
                 }
             })
+            if (localDescription.type == "offer") {
+                this.initialOfferSent = true
+            }
         } catch (err) {
             this.logger?.debug(`OnNegotiationNeeded failed: ${err}`)
             // In case of error, clear negotiation flag so we can recover
@@ -292,7 +623,26 @@ export class WebRTCTransport implements Transport {
                 // avoid conflicting local renegotiations until we reach a stable state again.
                 this.isNegotiating = true
 
-                await this.peer.setRemoteDescription(remoteDescription)
+                if (
+                    remoteDescription.type == "offer" &&
+                    this.peer.signalingState != "stable"
+                ) {
+                    this.logger?.debug(
+                        `Offer glare detected (state=${this.peer.signalingState}), rolling back local description`
+                    )
+                    await this.peer.setLocalDescription({ type: "rollback" })
+                }
+
+                const sanitizedRemoteDescription =
+                    this.iceMode == "prefer-direct" && (remoteDescription.sdp ?? "").length > 0
+                        ? {
+                            ...remoteDescription,
+                            sdp: this.deprioritizeRelayInSdp(remoteDescription.sdp ?? ""),
+                        }
+                        : remoteDescription
+
+                await this.peer.setRemoteDescription(sanitizedRemoteDescription)
+                await this.tryDequeueIceCandidates()
 
                 if (remoteDescription.type == "offer") {
                     await this.peer.setLocalDescription()
@@ -304,7 +654,7 @@ export class WebRTCTransport implements Transport {
 
                     const localSdp = this.iceMode == "relay-only"
                         ? this.enforceRelayInSdp(localDescription.sdp ?? "")
-                        : localDescription.sdp ?? ""
+                        : this.deprioritizeRelayInSdp(localDescription.sdp ?? "")
 
                     this.logger?.debug(`Responding to offer description (${this.iceMode}): ${localDescription.type}`)
                     this.sendMessage({
@@ -325,13 +675,48 @@ export class WebRTCTransport implements Transport {
     private onIceCandidate(event: RTCPeerConnectionIceEvent) {
         if (event.candidate) {
             const candidate = event.candidate.toJSON()
+            const candidateLine = candidate.candidate ?? ""
+            const candidateType = this.getCandidateType(candidateLine)
+            const isPriorityCandidate = candidateType == "srflx" || candidateType == "prflx" || candidateType == "relay"
 
-            if (this.iceMode == "relay-only" && candidate.candidate && !candidate.candidate.includes(" typ relay")) {
-                this.logger?.debug(`Dropping non-relay ICE candidate: ${candidate.candidate}`)
+            if (this.shouldDropLocalCandidate(candidateLine)) {
+                this.logger?.debug(`Dropping ICE candidate (${this.iceMode}): ${candidateLine}`)
                 return
             }
 
-            if (this.iceMode == "relay-only" && candidate.candidate) {
+            if (
+                !isPriorityCandidate &&
+                !this.initialSrflxSeen &&
+                candidateType == "host" &&
+                this.emittedIceCandidateCount >= this.maxHostCandidatesBeforeSrflx
+            ) {
+                this.logger?.debug(
+                    `Dropping excess host candidate before srflx (${this.maxHostCandidatesBeforeSrflx}): ${candidateLine}`
+                )
+                return
+            }
+
+            if (!isPriorityCandidate && this.emittedIceCandidateCount >= this.maxLocalIceCandidates) {
+                this.logger?.debug(`Dropping ICE candidate due to local cap (${this.maxLocalIceCandidates})`)
+                return
+            }
+
+            if (candidateLine.includes(" typ srflx ")) {
+                this.initialSrflxSeen = true
+                for (const wake of this.srflxWaiters.splice(0)) {
+                    wake()
+                }
+                this.logger?.debug(`Observed srflx candidate in ${this.iceMode}: ${candidateLine}`)
+            }
+
+            if (candidate.candidate && this.iceMode == "prefer-direct") {
+                const tokens = candidate.candidate.split(" ")
+                // Prefer srflx/prflx over relay during nomination by lowering relay priority.
+                if (tokens.length > 3 && candidateType == "relay") {
+                    tokens[3] = "1"
+                    candidate.candidate = tokens.join(" ")
+                }
+            } else if (this.iceMode == "relay-only" && candidate.candidate) {
                 const tokens = candidate.candidate.split(" ")
                 // candidate:<id> <component> <protocol> <priority> ...
                 if (tokens.length > 3) {
@@ -341,16 +726,40 @@ export class WebRTCTransport implements Transport {
                 }
             }
 
+            this.emittedIceCandidateCount += 1
             this.logger?.debug(`Sending ICE candidate (${this.iceMode}): ${candidate.candidate}`)
 
-            this.sendMessage({
-                AddIceCandidate: {
-                    candidate: candidate.candidate ?? "",
-                    sdp_mid: candidate.sdpMid ?? null,
-                    sdp_mline_index: candidate.sdpMLineIndex ?? null,
-                    username_fragment: candidate.usernameFragment ?? null
+            if (this.iceMode == "prefer-direct" && candidateType == "relay") {
+                if (Date.now() < this.relayBlockUntilMs) {
+                    this.queueDelayedRelayCandidate("local", {
+                        candidate: candidate.candidate ?? "",
+                        sdpMid: candidate.sdpMid ?? null,
+                        sdpMLineIndex: candidate.sdpMLineIndex ?? null,
+                        usernameFragment: candidate.usernameFragment ?? null,
+                    })
+                    this.logger?.debug("Blocking local relay candidate during initial P2P-first window")
+                    return
                 }
-            })
+            }
+
+            if (!this.syncStarted && this.iceMode == "prefer-direct") {
+                this.bufferedLocalCandidates.push({
+                    candidate: candidate.candidate ?? "",
+                    sdpMid: candidate.sdpMid ?? null,
+                    sdpMLineIndex: candidate.sdpMLineIndex ?? null,
+                    usernameFragment: candidate.usernameFragment ?? null
+                })
+                this.logger?.debug("Buffering local ICE candidate until synchronized start")
+            } else {
+                this.sendMessage({
+                    AddIceCandidate: {
+                        candidate: candidate.candidate ?? "",
+                        sdp_mid: candidate.sdpMid ?? null,
+                        sdp_mline_index: candidate.sdpMLineIndex ?? null,
+                        username_fragment: candidate.usernameFragment ?? null
+                    }
+                })
+            }
         } else {
             this.logger?.debug("No new ice candidates")
         }
@@ -388,14 +797,53 @@ export class WebRTCTransport implements Transport {
         return newLines.join("\r\n")
     }
 
+    private deprioritizeRelayInSdp(sdp: string): string {
+        if (!sdp) {
+            return sdp
+        }
+        const lines = sdp.split(/\r\n|\n/)
+        const newLines: string[] = []
+        for (const line of lines) {
+            if (!line.startsWith("a=candidate:")) {
+                newLines.push(line)
+                continue
+            }
+            if (!line.includes(" typ relay ")) {
+                newLines.push(line)
+                continue
+            }
+            const tokens = line.split(" ")
+            if (tokens.length > 3) {
+                // Lower relay priority so nomination prefers host/srflx/prflx first.
+                tokens[3] = "1"
+            }
+            newLines.push(tokens.join(" "))
+        }
+        return newLines.join("\r\n")
+    }
+
     private iceCandidates: Array<RTCIceCandidateInit> = []
     private async addIceCandidate(candidate: RTCIceCandidateInit) {
         this.logger?.debug(`Received ice candidate: ${candidate.candidate}`)
-
-        if (!this.peer) {
+        const candidateLine = (candidate.candidate ?? "").toLowerCase()
+        if (candidateLine.includes(" tcp ")) {
+            this.logger?.debug("Ignoring remote TCP ICE candidate")
+            return
+        }
+        if (this.iceMode == "prefer-direct" && candidateLine.includes(" typ relay ")) {
+            if (Date.now() < this.relayBlockUntilMs) {
+                this.queueDelayedRelayCandidate("remote", candidate)
+                this.logger?.debug("Blocking remote relay candidate during initial P2P-first window")
+                return
+            }
+        }
+        if ((candidate.candidate ?? "").includes(" typ srflx ")) {
+            this.sawRemoteSrflxCandidate = true
+            this.triggerRemoteSrflxPacketBurst()
+        }
+        if (!this.peer || !this.peer.remoteDescription) {
             this.logger?.debug("Buffering ice candidate")
-
-            this.iceCandidates.push(candidate)
+            this.queueBufferedRemoteCandidate(candidate)
             return
         }
         await this.tryDequeueIceCandidates()
@@ -407,6 +855,10 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug("called tryDequeueIceCandidates without a peer")
             return
         }
+        if (!this.peer.remoteDescription) {
+            this.logger?.debug("Deferring queued ICE candidate apply until remote description is set")
+            return
+        }
 
         for (const candidate of this.iceCandidates) {
             await this.peer.addIceCandidate(candidate)
@@ -415,6 +867,31 @@ export class WebRTCTransport implements Transport {
     }
 
     private wasConnected = false
+    private scheduleIceRestart(reason: string) {
+        if (!this.peer) {
+            return
+        }
+        if (this.restartAttempts >= this.maxRestartAttempts) {
+            this.logger?.debug(`Skipping ICE restart (${reason}): max retries reached`)
+            return
+        }
+        if (this.restartTimer != null) {
+            return
+        }
+        this.restartAttempts += 1
+        const delayMs = 150 * this.restartAttempts
+        this.restartTimer = window.setTimeout(() => {
+            this.restartTimer = null
+            if (!this.peer || this.peer.connectionState == "closed") {
+                return
+            }
+            this.logger?.debug(`Running ICE restart attempt #${this.restartAttempts} (${reason})`)
+            this.onIceRestartRequested?.()
+            this.peer.restartIce()
+            void this.onNegotiationNeeded()
+        }, delayMs)
+    }
+
     private onConnectionStateChange() {
         if (!this.peer) {
             this.logger?.debug("OnConnectionStateChange without a peer")
@@ -425,6 +902,11 @@ export class WebRTCTransport implements Transport {
 
         if (this.peer.connectionState == "connected") {
             type = "recover"
+            this.delayedLocalRelayCandidates.length = 0
+            this.delayedRemoteRelayCandidates.length = 0
+            if (!this.fileTransferChannel) {
+                this.fileTransferChannel = this.setupFileSender(this.peer)
+            }
 
             if (this.onconnect) {
                 this.onconnect()
@@ -434,12 +916,21 @@ export class WebRTCTransport implements Transport {
                     this.logger?.debug(`Failed to log ICE candidate pair details: ${err}`)
                 })
             }
+            if (this.selectedPairLogTimer == null) {
+                this.selectedPairLogTimer = window.setInterval(() => {
+                    void this.logSelectedCandidatePairDetails()
+                }, 2000)
+            }
             this.wasConnected = true
         } else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "closed") && this.peer.iceGatheringState == "complete") {
             type = "fatal"
         }
 
         if (this.peer.connectionState == "failed" || this.peer.connectionState == "closed") {
+            if (this.selectedPairLogTimer != null) {
+                clearInterval(this.selectedPairLogTimer)
+                this.selectedPairLogTimer = null
+            }
             if (this.onclose) {
                 if (this.wasConnected) {
                     this.onclose("failed")
@@ -496,6 +987,10 @@ export class WebRTCTransport implements Transport {
                     bytesSent: (selectedPair as any).bytesSent,
                     bytesReceived: (selectedPair as any).bytesReceived,
                     currentRoundTripTime: (selectedPair as any).currentRoundTripTime,
+                    requestsSent: (selectedPair as any).requestsSent,
+                    responsesReceived: (selectedPair as any).responsesReceived,
+                    requestsReceived: (selectedPair as any).requestsReceived,
+                    responsesSent: (selectedPair as any).responsesSent,
                 },
                 localCandidate: local && {
                     id: (local as any).id,
@@ -519,10 +1014,293 @@ export class WebRTCTransport implements Transport {
                 }
             }
 
+            const pairSignature = `${details.pair.id}:${details.pair.state}:${details.localCandidate?.candidateType}:${details.remoteCandidate?.candidateType}`
+            const mappingSignature = `${details.localCandidate?.address}:${details.localCandidate?.port}:${details.remoteCandidate?.address}:${details.remoteCandidate?.port}`
+            if (this.lastLoggedPairSignature != pairSignature) {
+                if (this.lastLoggedPairSignature) {
+                    this.logger?.debug(`ICE pair transition: ${this.lastLoggedPairSignature} -> ${pairSignature}`)
+                }
+                this.lastLoggedPairSignature = pairSignature
+            }
+            if (this.lastLoggedMappingSignature != mappingSignature) {
+                if (this.lastLoggedMappingSignature) {
+                    this.logger?.debug(`NAT mapping change detected: ${this.lastLoggedMappingSignature} -> ${mappingSignature}`)
+                } else {
+                    this.logger?.debug(`Initial NAT mapping: ${mappingSignature}`)
+                }
+                this.lastLoggedMappingSignature = mappingSignature
+            }
+            const pathScore = this.computePathScore(details)
+            if (Date.now() - this.lastPathScoreLogAt >= this.pathScoreLogCooldownMs) {
+                this.lastPathScoreLogAt = Date.now()
+                this.logger?.debug(`ICE path score: ${JSON.stringify(pathScore)}`)
+            }
+            this.maybeEscapeHatchRelayUnblock(pathScore, details)
+            this.maybeApplyRelaySuppressionBias(details, pathScore)
             this.logger?.debug(`Selected ICE candidate pair: ${JSON.stringify(details)}`)
         } catch (err) {
             this.logger?.debug(`Error while collecting ICE candidate stats: ${err}`)
         }
+    }
+
+    /**
+     * Control hierarchy (see docs/p2p-chance.md):
+     * L1 hard — consent / sustained delivery-trend fail → escape hatch (allow relay), never extra suppression
+     * L2 stability — survival + variance gates before any suppression bias
+     * L3 optimization — type, RTT, consent (no bytesReceived in control score)
+     * bytesReceived — diagnostic / L1 trend only (laggy proxy)
+     */
+    private computePathScore(details: any): {
+        pairType: string
+        /** L3 (+ survival tilt); used for suppression "poor" — excludes delivery to avoid feedback loops */
+        optimizationScore: number
+        /** Full blend incl. delivery for logs only */
+        diagnosticScore: number
+        rttMs: number | null
+        rttVarianceMs: number | null
+        consentRatio: number | null
+        pairSurvivalMs: number
+        deliveryConsistency: number | null
+        burstDropStreak: number
+        level1HardConsentFail: boolean
+        level1HardDeliveryTrendFail: boolean
+        /** L2: must pass before applying relay suppression bias */
+        stabilityGateOk: boolean
+    } {
+        const localType = details.localCandidate?.candidateType ?? "unknown"
+        const remoteType = details.remoteCandidate?.candidateType ?? "unknown"
+        const pairType = `${localType}<=>${remoteType}`
+        const pairKey = `${details.pair?.id ?? "unknown"}:${pairType}`
+        if (this.lastStablePairKey != pairKey) {
+            this.lastStablePairKey = pairKey
+            this.pairStableSinceMs = Date.now()
+            this.lastPairTypeSwitchAtMs = Date.now()
+            this.consecutivePoorRelaySamples = 0
+            this.deliverySamples = []
+            this.lastPairBytesReceived = null
+            this.lastPairSampleAtMs = null
+        }
+        const pairSurvivalMs = Math.max(0, Date.now() - this.pairStableSinceMs)
+        const rttSeconds = typeof details.pair?.currentRoundTripTime == "number" ? details.pair.currentRoundTripTime : null
+        const rttMs = rttSeconds != null ? rttSeconds * 1000 : null
+        if (rttMs != null) {
+            this.directRttSamplesMs.push(rttMs)
+            while (this.directRttSamplesMs.length > this.directRttSampleWindow) {
+                this.directRttSamplesMs.shift()
+            }
+        }
+        const variance = this.getSampleVariance(this.directRttSamplesMs)
+        const requestsSent = Number(details.pair?.requestsSent ?? 0)
+        const responsesReceived = Number(details.pair?.responsesReceived ?? 0)
+        const consentRatio = requestsSent > 0 ? responsesReceived / requestsSent : null
+        const now = Date.now()
+        const bytesReceived = Number(details.pair?.bytesReceived ?? 0)
+        let deliveryConsistency: number | null = null
+        let burstDropStreak = 0
+        if (this.lastPairSampleAtMs != null && this.lastPairBytesReceived != null) {
+            const deltaMs = now - this.lastPairSampleAtMs
+            if (deltaMs >= this.deliverySampleMinIntervalMs) {
+                const deltaBytes = bytesReceived - this.lastPairBytesReceived
+                const delivered = deltaBytes > 0 ? 1 : 0
+                this.deliverySamples.push(delivered)
+                while (this.deliverySamples.length > this.deliverySampleWindow) {
+                    this.deliverySamples.shift()
+                }
+                const sum = this.deliverySamples.reduce((acc, sample) => acc + sample, 0)
+                deliveryConsistency = this.deliverySamples.length > 0 ? (sum / this.deliverySamples.length) : null
+                for (let i = this.deliverySamples.length - 1; i >= 0; i--) {
+                    if (this.deliverySamples[i] == 0) {
+                        burstDropStreak += 1
+                    } else {
+                        break
+                    }
+                }
+            }
+        }
+        this.lastPairBytesReceived = bytesReceived
+        this.lastPairSampleAtMs = now
+
+        // L1 hard
+        const level1HardConsentFail = consentRatio != null && consentRatio < 0.45
+        const level1HardDeliveryTrendFail =
+            this.deliverySamples.length >= this.minDeliverySamplesForHardTrend &&
+            deliveryConsistency != null &&
+            deliveryConsistency < 0.35
+
+        // L3 optimization (control path — no bytesReceived)
+        let optimizationScore = 0
+        if (localType == "relay" || remoteType == "relay") {
+            optimizationScore += 35
+        } else if (localType == "srflx" || localType == "prflx" || remoteType == "srflx" || remoteType == "prflx") {
+            optimizationScore += 80
+        } else {
+            optimizationScore += 70
+        }
+        if (rttMs != null) {
+            optimizationScore -= Math.min(40, Math.max(0, (rttMs - 25) * 0.25))
+        }
+        if (variance != null) {
+            optimizationScore -= Math.min(20, variance * 0.2)
+        }
+        if (consentRatio != null && consentRatio < 0.75) {
+            optimizationScore -= 20
+        }
+        if (pairSurvivalMs < 3000) {
+            optimizationScore -= 10
+        } else if (pairSurvivalMs > 7000) {
+            optimizationScore += 5
+        }
+        optimizationScore = Math.max(0, Math.round(optimizationScore))
+
+        // Diagnostic only (incl. delivery — not used for suppression decisions)
+        let diagnosticScore = optimizationScore
+        if (deliveryConsistency != null) {
+            if (deliveryConsistency < 0.7) {
+                diagnosticScore -= 18
+            } else if (deliveryConsistency > 0.9) {
+                diagnosticScore += 4
+            }
+        }
+        if (burstDropStreak >= 2) {
+            diagnosticScore -= Math.min(16, burstDropStreak * 6)
+        }
+        diagnosticScore = Math.max(0, Math.round(diagnosticScore))
+
+        // L2 stability gate for *adding* suppression (not for escape)
+        const stabilityGateOk = pairSurvivalMs >= 3500 && (variance == null || variance < 480)
+
+        return {
+            pairType,
+            optimizationScore,
+            diagnosticScore,
+            rttMs,
+            rttVarianceMs: variance,
+            consentRatio,
+            pairSurvivalMs,
+            deliveryConsistency,
+            burstDropStreak,
+            level1HardConsentFail,
+            level1HardDeliveryTrendFail,
+            stabilityGateOk,
+        }
+    }
+
+    private getSampleVariance(samples: number[]): number | null {
+        if (samples.length < 2) {
+            return null
+        }
+        const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length
+        const variance = samples.reduce((sum, value) => sum + ((value - mean) * (value - mean)), 0) / samples.length
+        return Number.isFinite(variance) ? variance : null
+    }
+
+    /**
+     * L1 escape: never leave relay blocked when the path is failing or budget exhausted — TURN must remain a recovery hatch.
+     */
+    private maybeEscapeHatchRelayUnblock(
+        pathScore: {
+            level1HardConsentFail: boolean
+            level1HardDeliveryTrendFail: boolean
+        },
+        _details: any
+    ) {
+        if (!this.peer || this.iceMode != "prefer-direct") {
+            return
+        }
+        const inRelayBlock = Date.now() < this.relayBlockUntilMs
+        if (!inRelayBlock) {
+            return
+        }
+        const budgetExhausted = this.cumulativeRelaySuppressionMs >= this.maxCumulativeRelaySuppressionMs
+        const hardFail = pathScore.level1HardConsentFail || pathScore.level1HardDeliveryTrendFail
+        if (!hardFail && !budgetExhausted) {
+            return
+        }
+        this.relayBlockUntilMs = Date.now()
+        this.logger?.debug(
+            `Relay escape hatch: unblocking relay candidates (hardFail=${hardFail}, budgetExhausted=${budgetExhausted}, ` +
+            `cumulativeSuppressionMs=${this.cumulativeRelaySuppressionMs})`
+        )
+        if (budgetExhausted) {
+            this.relaySuppressionBiasApplied = true
+        }
+    }
+
+    private maybeApplyRelaySuppressionBias(
+        details: any,
+        score: {
+            optimizationScore: number
+            pairSurvivalMs: number
+            stabilityGateOk: boolean
+            level1HardConsentFail: boolean
+            level1HardDeliveryTrendFail: boolean
+        }
+    ) {
+        if (!this.peer || this.iceMode != "prefer-direct") {
+            return
+        }
+        if (this.peer.connectionState != "connected" && this.peer.connectionState != "connecting") {
+            return
+        }
+        if (score.level1HardConsentFail || score.level1HardDeliveryTrendFail) {
+            this.consecutivePoorRelaySamples = 0
+            return
+        }
+        if (this.cumulativeRelaySuppressionMs >= this.maxCumulativeRelaySuppressionMs || this.relaySuppressionBiasApplied) {
+            return
+        }
+
+        const localType = details.localCandidate?.candidateType ?? ""
+        const remoteType = details.remoteCandidate?.candidateType ?? ""
+        const relayInUse = localType == "relay" || remoteType == "relay"
+        if (!relayInUse) {
+            this.consecutivePoorRelaySamples = 0
+            return
+        }
+        if (!this.sawRemoteSrflxCandidate) {
+            this.consecutivePoorRelaySamples = 0
+            return
+        }
+        if (Date.now() - this.relayRaceStartedAtMs < this.relayRaceEvaluationDelayMs) {
+            return
+        }
+        if (Date.now() - this.lastPairTypeSwitchAtMs < this.pathDecisionHoldMs) {
+            return
+        }
+        if (score.pairSurvivalMs < 3500) {
+            return
+        }
+        if (!score.stabilityGateOk) {
+            this.consecutivePoorRelaySamples = 0
+            return
+        }
+        // L3 only: poor optimization score (no delivery/bytesReceived in this number)
+        const poorSample = score.optimizationScore < 55
+        if (!poorSample) {
+            this.consecutivePoorRelaySamples = 0
+            return
+        }
+        this.consecutivePoorRelaySamples += 1
+        if (this.consecutivePoorRelaySamples < this.poorRelaySamplesRequired) {
+            return
+        }
+
+        const remainingBudget = this.maxCumulativeRelaySuppressionMs - this.cumulativeRelaySuppressionMs
+        const extraSuppressMs = Math.min(1200, remainingBudget)
+        if (extraSuppressMs <= 0) {
+            this.relaySuppressionBiasApplied = true
+            return
+        }
+        this.consecutivePoorRelaySamples = 0
+        this.cumulativeRelaySuppressionMs += extraSuppressMs
+        if (this.cumulativeRelaySuppressionMs >= this.maxCumulativeRelaySuppressionMs) {
+            this.relaySuppressionBiasApplied = true
+        }
+        this.relayBlockUntilMs = Math.max(this.relayBlockUntilMs, Date.now() + extraSuppressMs)
+        this.logger?.debug(
+            `Relay suppression bias (L3): +${extraSuppressMs}ms block (optimizationScore=${score.optimizationScore}, ` +
+            `cumulativeSuppressionMs=${this.cumulativeRelaySuppressionMs}/${this.maxCumulativeRelaySuppressionMs})`
+        )
     }
     private onSignalingStateChange() {
         if (!this.peer) {
@@ -542,6 +1320,18 @@ export class WebRTCTransport implements Transport {
             return
         }
         this.logger?.debug(`Changing Peer Ice State to ${this.peer.iceConnectionState}`)
+        if (this.peer.iceConnectionState == "connected" || this.peer.iceConnectionState == "completed") {
+            this.restartAttempts = 0
+            if (this.relayRaceStartedAtMs == 0) {
+                this.relayRaceStartedAtMs = Date.now()
+            }
+            void this.logSelectedCandidatePairDetails()
+        } else if (this.peer.iceConnectionState == "disconnected") {
+            this.scheduleIceRestart("disconnected")
+        } else if (this.peer.iceConnectionState == "failed") {
+            this.scheduleIceRestart("failed")
+            void this.logSelectedCandidatePairDetails()
+        }
     }
     private onIceGatheringStateChange() {
         if (!this.peer) {
@@ -730,7 +1520,31 @@ export class WebRTCTransport implements Transport {
     onclose: ((shutdown: TransportShutdown) => void) | null = null
     async close(): Promise<void> {
         this.logger?.debug("Closing WebRTC Peer")
-
+        for (const wake of this.srflxWaiters.splice(0)) {
+            wake()
+        }
+        if (this.relayUnblockTimer != null) {
+            clearTimeout(this.relayUnblockTimer)
+            this.relayUnblockTimer = null
+        }
+        if (this.remoteSrflxBurstRetryTimer != null) {
+            clearInterval(this.remoteSrflxBurstRetryTimer)
+            this.remoteSrflxBurstRetryTimer = null
+        }
+        this.delayedLocalRelayCandidates.length = 0
+        this.delayedRemoteRelayCandidates.length = 0
+        if (this.syncStartTimer != null) {
+            clearTimeout(this.syncStartTimer)
+            this.syncStartTimer = null
+        }
+        if (this.restartTimer != null) {
+            clearTimeout(this.restartTimer)
+            this.restartTimer = null
+        }
+        if (this.selectedPairLogTimer != null) {
+            clearInterval(this.selectedPairLogTimer)
+            this.selectedPairLogTimer = null
+        }
         this.peer?.close()
     }
 

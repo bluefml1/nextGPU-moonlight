@@ -403,11 +403,20 @@ export class Stream implements Component {
         else if ("Setup" in message) {
             const iceServers = message.Setup.ice_servers
 
-            this.iceServers = iceServers
+            this.iceServers = this.normalizeIceServersForUdpP2P(iceServers)
 
             this.debugLog(`window.isSecureContext: ${window.isSecureContext}`)
+            const prettyIceUrls: string[] = []
+            for (const server of this.iceServers) {
+                const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
+                for (const url of urls) {
+                    if (typeof url == "string") {
+                        prettyIceUrls.push(url)
+                    }
+                }
+            }
             this.debugLog(`Using WebRTC Ice Servers: ${createPrettyList(
-                iceServers.map(server => server.urls).reduce((list, url) => list.concat(url), [])
+                prettyIceUrls
             )}`)
 
             await this.startConnection()
@@ -688,6 +697,9 @@ export class Stream implements Component {
         this.stats.setTransport(this.transport)
 
         if (transport instanceof WebRTCTransport) {
+            transport.onIceRestartRequested = () => {
+                this.debugLog("WebRTC transport requested ICE restart (prflx/srflx recovery)")
+            }
             transport.onFileTransferProgress = (_direction, _fileName, progressPercent) => {
                 this.emitFileTransferProgress(progressPercent)
             }
@@ -923,6 +935,83 @@ export class Stream implements Component {
         this.rttOutstanding.clear()
     }
 
+    private extractIceHost(url: string): string | null {
+        const match = /^(stun|stuns|turn|turns):([^/?]+)/i.exec(url)
+        if (!match) {
+            return null
+        }
+        const hostPort = match[2]
+        const host = hostPort.startsWith("[")
+            ? hostPort.slice(1, hostPort.indexOf("]"))
+            : hostPort.split(":")[0]
+        return host?.toLowerCase() ?? null
+    }
+
+    private isUdpPreferredIceUrl(url: string): boolean {
+        const lower = url.toLowerCase()
+        if (lower.startsWith("turn:") || lower.startsWith("turns:")) {
+            // Keep TURN URLs here; transport layer will normalize to UDP preference.
+            return true
+        }
+        if (lower.startsWith("stun:") || lower.startsWith("stuns:")) {
+            return true
+        }
+        return false
+    }
+
+    private normalizeIceServersForUdpP2P(rawServers: Array<RTCIceServer>): Array<RTCIceServer> {
+        let selectedHost: string | null = null
+        const normalizedServers: Array<RTCIceServer> = []
+        let droppedHosts = 0
+
+        for (const server of rawServers) {
+            const rawUrls = Array.isArray(server.urls) ? server.urls : [server.urls]
+            const urls = rawUrls.filter((url): url is string => typeof url == "string")
+            if (urls.length == 0) {
+                continue
+            }
+            const serverHost = this.extractIceHost(urls[0])
+            if (!selectedHost && serverHost) {
+                selectedHost = serverHost
+            }
+            if (selectedHost && serverHost && serverHost != selectedHost) {
+                droppedHosts += 1
+                continue
+            }
+
+            // Keep STUN and TURN as separate entries to avoid browser quirks with mixed url lists.
+            const stunUrls = urls.filter((url) => {
+                const lower = url.toLowerCase()
+                return (lower.startsWith("stun:") || lower.startsWith("stuns:")) && this.isUdpPreferredIceUrl(url)
+            })
+            const turnUrls = urls.filter((url) => {
+                const lower = url.toLowerCase()
+                return (lower.startsWith("turn:") || lower.startsWith("turns:")) && this.isUdpPreferredIceUrl(url)
+            })
+
+            if (stunUrls.length > 0) {
+                normalizedServers.push({
+                    urls: stunUrls,
+                })
+            }
+            if (turnUrls.length > 0) {
+                normalizedServers.push({
+                    urls: turnUrls,
+                    username: server.username ?? "",
+                    credential: server.credential ?? "",
+                })
+            }
+        }
+
+        if (selectedHost) {
+            this.debugLog(`[ICE] normalized to single host: ${selectedHost}`)
+        }
+        if (droppedHosts > 0) {
+            this.debugLog(`[ICE] dropped ${droppedHosts} ICE server entries to avoid multi-destination NAT mapping churn`)
+        }
+        return normalizedServers
+    }
+
     private async connectWebRTCWithMode(mode: WebRTCIceMode, timeoutMs: number): Promise<{ transport: WebRTCTransport, connected: boolean }> {
         const transport = new WebRTCTransport(this.logger)
         transport.onsendmessage = (message) => this.sendWsMessage({ WebRtc: message })
@@ -977,13 +1066,20 @@ export class Stream implements Component {
             return "failednoconnect"
         }
 
-        // Staggered direct->relay attempts improves NAT success without locking into relay.
-        const directAttempt = await this.connectWebRTCWithMode("prefer-direct", 3500)
+        // Staggered direct retries before relay fallback increases UDP P2P success under CGNAT.
+        const directAttempt = await this.connectWebRTCWithMode("prefer-direct", 3200)
         let transport = directAttempt.transport
         let result = directAttempt.connected
 
         if (!result) {
-            this.debugLog("Direct WebRTC attempt failed, retrying with relay-only fallback window")
+            this.debugLog("Direct WebRTC attempt failed, retrying direct once with refreshed NAT warmup")
+            const secondDirectAttempt = await this.connectWebRTCWithMode("prefer-direct", 2600)
+            transport = secondDirectAttempt.transport
+            result = secondDirectAttempt.connected
+        }
+
+        if (!result) {
+            this.debugLog("Direct WebRTC retries failed, retrying with relay-only fallback window")
             const relayAttempt = await this.connectWebRTCWithMode("relay-only", 6000)
             transport = relayAttempt.transport
             result = relayAttempt.connected
