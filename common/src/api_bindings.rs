@@ -354,6 +354,8 @@ pub struct RtcIceCandidate {
 pub enum StreamSignalingMessage {
     Description(RtcSessionDescription),
     AddIceCandidate(RtcIceCandidate),
+    SyncReady,
+    SyncStart,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS)]

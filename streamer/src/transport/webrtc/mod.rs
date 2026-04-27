@@ -301,6 +301,18 @@ impl WebRtcInner {
     }
 
     // -- Handle Signaling
+    async fn send_sync_start(&self) {
+        if let Err(err) = self
+            .event_sender
+            .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
+                StreamServerMessage::WebRtc(StreamSignalingMessage::SyncStart),
+            )))
+            .await
+        {
+            warn!("Failed to send sync-start signaling message: {err:?}");
+        }
+    }
+
     #[allow(unused)]
     async fn send_answer(&self) -> bool {
         let local_description = match self.peer.create_answer(None).await {
@@ -477,6 +489,14 @@ impl WebRtcInner {
                 {
                     warn!("[Signaling]: failed to add ice candidate: {err:?}");
                 }
+            }
+            StreamClientMessage::WebRtc(StreamSignalingMessage::SyncReady) => {
+                debug!("[Signaling] Received sync-ready from browser, starting synchronized negotiation");
+                self.send_sync_start().await;
+                self.send_offer().await;
+            }
+            StreamClientMessage::WebRtc(StreamSignalingMessage::SyncStart) => {
+                debug!("[Signaling] Received unexpected sync-start from browser (ignored)");
             }
             _ => {}
         }
