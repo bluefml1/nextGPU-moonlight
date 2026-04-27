@@ -12,7 +12,7 @@ import { gatherPipeInfo, getPipe } from "./pipeline/index.js"
 import { StreamStats } from "./stats.js"
 import { Transport, TransportShutdown } from "./transport/index.js"
 import { WebSocketTransport } from "./transport/web_socket.js"
-import { WebRTCTransport } from "./transport/webrtc.js"
+import { WebRTCIceMode, WebRTCTransport } from "./transport/webrtc.js"
 import { allVideoCodecs, andVideoCodecs, createSupportedVideoFormatsBits, emptyVideoCodecs, getSelectedVideoCodec, hasAnyCodec, VideoCodecSupport } from "./video.js"
 import { VideoRenderer } from "./video/index.js"
 import { buildVideoPipeline, VideoPipelineOptions } from "./video/pipeline.js"
@@ -98,6 +98,10 @@ export class Stream implements Component {
 
     private ws: WebSocket
     private iceServers: Array<RTCIceServer> | null = null
+    private rttWarmupTimer: number | null = null
+    private rttHeartbeatTimer: number | null = null
+    private rttOutstanding = new Set<number>()
+    private rttSequence: number = 0
 
     private videoRenderer: VideoRenderer | null = null
     private audioPlayer: AudioPlayer | null = null
@@ -384,11 +388,20 @@ export class Stream implements Component {
         else if ("Setup" in message) {
             const iceServers = message.Setup.ice_servers
 
-            this.iceServers = iceServers
+            this.iceServers = this.normalizeIceServersForUdpP2P(iceServers)
 
             this.debugLog(`window.isSecureContext: ${window.isSecureContext}`)
+            const prettyIceUrls: string[] = []
+            for (const server of this.iceServers) {
+                const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
+                for (const url of urls) {
+                    if (typeof url == "string") {
+                        prettyIceUrls.push(url)
+                    }
+                }
+            }
             this.debugLog(`Using WebRTC Ice Servers: ${createPrettyList(
-                iceServers.map(server => server.urls).reduce((list, url) => list.concat(url), [])
+                prettyIceUrls
             )}`)
 
             await this.startConnection()
@@ -516,6 +529,7 @@ export class Stream implements Component {
 
     private setTransport(transport: Transport) {
         if (this.transport) {
+            this.stopRttKeepalive()
             this.resetKeyboardState("before transport switch")
             this.transport.close()
         }
@@ -527,6 +541,9 @@ export class Stream implements Component {
         this.stats.setTransport(this.transport)
 
         if (transport instanceof WebRTCTransport) {
+            transport.onIceRestartRequested = () => {
+                this.debugLog("WebRTC transport requested ICE restart (prflx/srflx recovery)")
+            }
             transport.onFileTransferProgress = (_direction, _fileName, progressPercent) => {
                 this.emitFileTransferProgress(progressPercent)
             }
@@ -545,15 +562,25 @@ export class Stream implements Component {
         const rtt = this.transport.getChannel(TransportChannelId.RTT)
         if (rtt.type == "data") {
             rtt.addReceiveListener((data) => {
+                if (data.byteLength < 3) {
+                    return
+                }
                 const buffer = new ByteBuffer(data.byteLength)
                 buffer.putU8Array(new Uint8Array(data))
                 buffer.flip()
 
                 const ty = buffer.getU8()
                 if (ty == 0) {
-                    rtt.send(data)
+                    const sequence = buffer.getU16()
+                    if (this.rttOutstanding.has(sequence)) {
+                        this.rttOutstanding.delete(sequence)
+                    } else {
+                        // Keep backwards compatibility for server-initiated RTT probes.
+                        rtt.send(data)
+                    }
                 }
             })
+            this.startRttKeepalive(this.transport)
         } else {
             this.debugLog("Failed to get rtt as data transport channel. Cannot respond to rtt packets")
         }
@@ -702,6 +729,175 @@ export class Stream implements Component {
         return true
     }
 
+    private sendRttProbe(transport: Transport) {
+        const rtt = transport.getChannel(TransportChannelId.RTT)
+        if (rtt.type != "data") {
+            return
+        }
+        this.rttSequence = (this.rttSequence + 1) & 0xffff
+        this.rttOutstanding.add(this.rttSequence)
+        if (this.rttOutstanding.size > 64) {
+            this.rttOutstanding.clear()
+        }
+        const buffer = new ByteBuffer(3)
+        buffer.putU8(0)
+        buffer.putU16(this.rttSequence)
+        buffer.flip()
+        rtt.send(buffer.getRemainingBuffer().buffer)
+    }
+
+    private startRttKeepalive(transport: Transport) {
+        this.stopRttKeepalive()
+
+        let warmupRemaining = 5
+        this.rttWarmupTimer = window.setInterval(() => {
+            this.sendRttProbe(transport)
+            warmupRemaining -= 1
+            if (warmupRemaining <= 0) {
+                this.stopRttWarmup()
+            }
+        }, 120)
+
+        this.rttHeartbeatTimer = window.setInterval(() => {
+            this.sendRttProbe(transport)
+        }, 4000)
+    }
+
+    private stopRttWarmup() {
+        if (this.rttWarmupTimer != null) {
+            clearInterval(this.rttWarmupTimer)
+            this.rttWarmupTimer = null
+        }
+    }
+
+    private stopRttKeepalive() {
+        this.stopRttWarmup()
+        if (this.rttHeartbeatTimer != null) {
+            clearInterval(this.rttHeartbeatTimer)
+            this.rttHeartbeatTimer = null
+        }
+        this.rttOutstanding.clear()
+    }
+
+    private extractIceHost(url: string): string | null {
+        const match = /^(stun|stuns|turn|turns):([^/?]+)/i.exec(url)
+        if (!match) {
+            return null
+        }
+        const hostPort = match[2]
+        const host = hostPort.startsWith("[")
+            ? hostPort.slice(1, hostPort.indexOf("]"))
+            : hostPort.split(":")[0]
+        return host?.toLowerCase() ?? null
+    }
+
+    private isUdpPreferredIceUrl(url: string): boolean {
+        const lower = url.toLowerCase()
+        if (lower.startsWith("turn:") || lower.startsWith("turns:")) {
+            // Keep TURN URLs here; transport layer will normalize to UDP preference.
+            return true
+        }
+        if (lower.startsWith("stun:") || lower.startsWith("stuns:")) {
+            return true
+        }
+        return false
+    }
+
+    private normalizeIceServersForUdpP2P(rawServers: Array<RTCIceServer>): Array<RTCIceServer> {
+        let selectedHost: string | null = null
+        const normalizedServers: Array<RTCIceServer> = []
+        let droppedHosts = 0
+
+        for (const server of rawServers) {
+            const rawUrls = Array.isArray(server.urls) ? server.urls : [server.urls]
+            const urls = rawUrls.filter((url): url is string => typeof url == "string")
+            if (urls.length == 0) {
+                continue
+            }
+            const serverHost = this.extractIceHost(urls[0])
+            if (!selectedHost && serverHost) {
+                selectedHost = serverHost
+            }
+            if (selectedHost && serverHost && serverHost != selectedHost) {
+                droppedHosts += 1
+                continue
+            }
+
+            // Keep STUN and TURN as separate entries to avoid browser quirks with mixed url lists.
+            const stunUrls = urls.filter((url) => {
+                const lower = url.toLowerCase()
+                return (lower.startsWith("stun:") || lower.startsWith("stuns:")) && this.isUdpPreferredIceUrl(url)
+            })
+            const turnUrls = urls.filter((url) => {
+                const lower = url.toLowerCase()
+                return (lower.startsWith("turn:") || lower.startsWith("turns:")) && this.isUdpPreferredIceUrl(url)
+            })
+
+            if (stunUrls.length > 0) {
+                normalizedServers.push({
+                    urls: stunUrls,
+                })
+            }
+            if (turnUrls.length > 0) {
+                normalizedServers.push({
+                    urls: turnUrls,
+                    username: server.username ?? "",
+                    credential: server.credential ?? "",
+                })
+            }
+        }
+
+        if (selectedHost) {
+            this.debugLog(`[ICE] normalized to single host: ${selectedHost}`)
+        }
+        if (droppedHosts > 0) {
+            this.debugLog(`[ICE] dropped ${droppedHosts} ICE server entries to avoid multi-destination NAT mapping churn`)
+        }
+        return normalizedServers
+    }
+
+    private async connectWebRTCWithMode(mode: WebRTCIceMode, timeoutMs: number): Promise<{ transport: WebRTCTransport, connected: boolean }> {
+        const transport = new WebRTCTransport(this.logger)
+        transport.onsendmessage = (message) => this.sendWsMessage({ WebRtc: message })
+
+        transport.initPeer({
+            iceServers: this.iceServers ?? [],
+        }, mode)
+        this.setTransport(transport)
+
+        const connected = await new Promise<boolean>((resolve) => {
+            let done = false
+            const complete = (value: boolean) => {
+                if (done) {
+                    return
+                }
+                done = true
+                resolve(value)
+            }
+
+            const timer = window.setTimeout(() => {
+                this.debugLog(`WebRTC ${mode} attempt timed out after ${timeoutMs}ms`)
+                complete(false)
+            }, timeoutMs)
+
+            transport.onconnect = () => {
+                clearTimeout(timer)
+                complete(true)
+            }
+            transport.onclose = () => {
+                clearTimeout(timer)
+                this.resetKeyboardState("transport closed during negotiation")
+                complete(false)
+            }
+        })
+
+        if (!connected) {
+            await transport.close()
+        }
+
+        return { transport, connected }
+    }
+
     private async tryWebRTCTransport(): Promise<TransportShutdown> {
         this.debugLog("Trying WebRTC transport")
 
@@ -714,23 +910,25 @@ export class Stream implements Component {
             return "failednoconnect"
         }
 
-        const transport = new WebRTCTransport(this.logger)
-        transport.onsendmessage = (message) => this.sendWsMessage({ WebRtc: message })
+        // Staggered direct retries before relay fallback increases UDP P2P success under CGNAT.
+        const directAttempt = await this.connectWebRTCWithMode("prefer-direct", 3200)
+        let transport = directAttempt.transport
+        let result = directAttempt.connected
 
-        transport.initPeer({
-            iceServers: this.iceServers,
-            iceTransportPolicy: "relay",
-        })
-        this.setTransport(transport)
+        if (!result) {
+            this.debugLog("Direct WebRTC attempt failed, retrying direct once with refreshed NAT warmup")
+            const secondDirectAttempt = await this.connectWebRTCWithMode("prefer-direct", 2600)
+            transport = secondDirectAttempt.transport
+            result = secondDirectAttempt.connected
+        }
 
-        // Wait for negotiation
-        const result = await (new Promise((resolve, _reject) => {
-            transport.onconnect = () => resolve(true)
-            transport.onclose = () => {
-                this.resetKeyboardState("transport closed during negotiation")
-                resolve(false)
-            }
-        }))
+        if (!result) {
+            this.debugLog("Direct WebRTC retries failed, retrying with relay-only fallback window")
+            const relayAttempt = await this.connectWebRTCWithMode("relay-only", 6000)
+            transport = relayAttempt.transport
+            result = relayAttempt.connected
+        }
+
         this.debugLog(`WebRTC negotiation success: ${result}`)
 
         if (!result) {
@@ -988,6 +1186,8 @@ export class Stream implements Component {
         parent.appendChild(this.divElement)
     }
     unmount(parent: HTMLElement): void {
+        this.stopAdaptiveStabilityController()
+        this.stopRttKeepalive()
         this.resetKeyboardState("stream unmount")
         this.divElement.removeEventListener("dragover", this.dragOverHandler)
         this.divElement.removeEventListener("drop", this.dropHandler)

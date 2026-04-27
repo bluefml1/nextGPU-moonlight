@@ -107,6 +107,35 @@ impl WebRtcVideo {
         info!("[Stream] Stream setup: {width}x{height}x{redraw_rate} and {format:?}");
 
         if !format.contained_in(self.supported_video_formats) {
+            // Some hosts can fall back to H264 even when HEVC was requested.
+            // Don't hard-fail the session in that case; continue with the
+            // actual host-selected codec so the stream can start.
+            let hevc_requested = self.supported_video_formats.intersects(
+                SupportedVideoFormats::H265
+                    | SupportedVideoFormats::H265_MAIN10
+                    | SupportedVideoFormats::H265_REXT8_444
+                    | SupportedVideoFormats::H265_REXT10_444,
+            );
+            let host_fallback_h264 = matches!(format, VideoFormat::H264 | VideoFormat::H264High8_444);
+            if hevc_requested && host_fallback_h264 {
+                let message = format!(
+                    "Host selected {format:?} although client requested HEVC ({}) - continuing with host fallback codec",
+                    self.supported_video_formats
+                );
+                warn!("{}", message);
+                if let Err(err) = inner
+                    .event_sender
+                    .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
+                        StreamServerMessage::DebugLog {
+                            message,
+                            ty: Some(LogMessageType::InformError),
+                        },
+                    )))
+                    .await
+                {
+                    warn!("Failed to send host fallback warning to client: {err}");
+                }
+            } else {
             let message = format!(
                 "The host tried to setup a video stream with a non supported video format: {format:?}, supported formats: {}",
                 self.supported_video_formats
@@ -128,6 +157,7 @@ impl WebRtcVideo {
             }
 
             return false;
+            }
         }
 
         let Some(codec) = video_format_to_codec(format) else {

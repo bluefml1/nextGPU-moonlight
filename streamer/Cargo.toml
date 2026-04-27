@@ -3,6 +3,7 @@ name = "streamer"
 version.workspace = true
 edition = "2024"
 license.workspace = true
+build = "build.rs"
 
 [dependencies]
 moonlight-common = { workspace = true }
