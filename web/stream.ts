@@ -19,7 +19,7 @@ import { SelectComponent } from "./component/input.js";
 import { LogMessageType, StreamCapabilities, StreamKeys, StreamKeyModifiers } from "./api_bindings.js";
 import { ScreenKeyboard, TextEvent } from "./screen_keyboard.js";
 import { FormModal } from "./component/modal/form.js";
-import { streamStatsToText } from "./stream/stats.js";
+import { StreamStatsData } from "./stream/stats.js";
 import { MoonlightFullscreenOverlay, MoonlightLoadingScreen, MoonlightPointerLockOverlay } from "./stream_overlays.js";
 
 /** Local dev hostnames — connection log panel is available here when DevTools is open. */
@@ -239,6 +239,15 @@ class ViewerApp implements Component {
     private div = document.createElement("div")
 
     private statsDiv = document.createElement("div")
+    private statsTopBar = document.createElement("button")
+    private statsSummaryDiv = document.createElement("div")
+    private statsChevronDiv = document.createElement("div")
+    private statsDetailsDiv = document.createElement("div")
+    private statsExpanded = false
+    private statsUpdateInterval: ReturnType<typeof setInterval> | null = null
+    private lastIceBytesReceived: number | null = null
+    private lastIceBytesTsMs: number | null = null
+    private lastBitrateMbps: number | null = null
     private stream: Stream | null = null
 
     private settings: Settings
@@ -454,19 +463,40 @@ class ViewerApp implements Component {
         // Configure stats element
         this.statsDiv.hidden = true
         this.statsDiv.classList.add("video-stats")
+        this.statsExpanded = localStorage.getItem("streamStatsExpanded") === "1"
+        this.statsTopBar.classList.add("video-stats-topbar")
+        this.statsTopBar.type = "button"
+        this.statsTopBar.setAttribute("aria-expanded", `${this.statsExpanded}`)
+        this.statsTopBar.addEventListener("click", () => {
+            this.statsExpanded = !this.statsExpanded
+            this.statsTopBar.setAttribute("aria-expanded", `${this.statsExpanded}`)
+            localStorage.setItem("streamStatsExpanded", this.statsExpanded ? "1" : "0")
+            if (!this.statsExpanded) {
+                this.statsDetailsDiv.classList.remove("video-stats-details-visible")
+            }
+        })
+        this.statsSummaryDiv.classList.add("video-stats-summary")
+        this.statsChevronDiv.classList.add("video-stats-chevron")
+        this.statsTopBar.appendChild(this.statsSummaryDiv)
+        this.statsTopBar.appendChild(this.statsChevronDiv)
+        this.statsDetailsDiv.classList.add("video-stats-details")
+        this.statsDiv.appendChild(this.statsTopBar)
+        this.statsDiv.appendChild(this.statsDetailsDiv)
 
-        setInterval(() => {
+        this.statsUpdateInterval = setInterval(() => {
             // Update stats display every 100ms
             const stats = this.getStream()?.getStats()
             if (stats && stats.isEnabled()) {
                 this.statsDiv.hidden = false
-
-                const text = streamStatsToText(stats.getCurrentStats())
-                this.statsDiv.innerText = text
+                const statsData = stats.getCurrentStats()
+                this.renderStatsOverlay(statsData)
             } else {
                 this.statsDiv.hidden = true
+                this.lastIceBytesReceived = null
+                this.lastIceBytesTsMs = null
+                this.lastBitrateMbps = null
             }
-        }, 100)
+        }, 500)
         this.div.appendChild(this.statsDiv)
 
         this.createFullscreenExitCircle()
@@ -1513,6 +1543,10 @@ class ViewerApp implements Component {
             clearInterval(this.keyWatchdogInterval)
             this.keyWatchdogInterval = null
         }
+        if (this.statsUpdateInterval != null) {
+            clearInterval(this.statsUpdateInterval)
+            this.statsUpdateInterval = null
+        }
         this.cleanupStartupOverlaysOnAbortOrUnmount()
         this.adaptivePointerLockArmed = false
         this.adaptivePointerLockActive = false
@@ -1528,6 +1562,148 @@ class ViewerApp implements Component {
         this.adaptiveLog("reset adaptive mouse state (viewer app unmount)")
         this.releaseAllKeys("viewer app unmount")
         parent.removeChild(this.div)
+    }
+
+    private metric(value: number | null | undefined, digits = 0): string {
+        if (value == null || !Number.isFinite(value)) {
+            return "N/A"
+        }
+        return value.toFixed(digits)
+    }
+    private formatWithUnit(value: number | null | undefined, unit: string, digits = 0): string {
+        if (value == null || !Number.isFinite(value)) {
+            return "N/A"
+        }
+        return `${value.toFixed(digits)} ${unit}`
+    }
+    private safeText(value: unknown): string {
+        if (value == null) {
+            return "N/A"
+        }
+        const text = String(value).trim()
+        if (!text || text.toLowerCase() === "null" || text.toLowerCase() === "nan" || text.toLowerCase() === "undefined") {
+            return "N/A"
+        }
+        return text
+    }
+    private unavailableText(value: unknown): string {
+        const text = this.safeText(value)
+        return text === "N/A" || text.toLowerCase() === "unknown" ? "Unavailable" : text
+    }
+    private computeBitrateMbps(statsData: StreamStatsData): number | null {
+        const bytesReceivedRaw = statsData.transport.iceBytesReceived
+        const bytesReceived = typeof bytesReceivedRaw === "number" && Number.isFinite(bytesReceivedRaw) ? bytesReceivedRaw : null
+        if (bytesReceived == null) {
+            return this.lastBitrateMbps
+        }
+        const now = Date.now()
+        if (this.lastIceBytesReceived == null || this.lastIceBytesTsMs == null) {
+            this.lastIceBytesReceived = bytesReceived
+            this.lastIceBytesTsMs = now
+            return this.lastBitrateMbps
+        }
+        const deltaBytes = bytesReceived - this.lastIceBytesReceived
+        const deltaMs = now - this.lastIceBytesTsMs
+        this.lastIceBytesReceived = bytesReceived
+        this.lastIceBytesTsMs = now
+        if (deltaBytes <= 0 || deltaMs <= 0) {
+            return this.lastBitrateMbps
+        }
+        const mbps = (deltaBytes * 8) / (deltaMs / 1000) / 1000000
+        this.lastBitrateMbps = Number.isFinite(mbps) ? mbps : this.lastBitrateMbps
+        return this.lastBitrateMbps
+    }
+    private endpoint(address: string, port: string): string {
+        if (address === "N/A") {
+            return "N/A"
+        }
+        if (port === "N/A") {
+            return address
+        }
+        return `${address}:${port}`
+    }
+    private qualityLabel(statsData: StreamStatsData): { label: string, cls: string } {
+        const latency = statsData.streamerRttMs ?? statsData.browserRtt
+        const packetLoss = typeof statsData.transport.webrtcPacketsLost === "number" ? statsData.transport.webrtcPacketsLost : null
+        const droppedFrames = typeof statsData.transport.webrtcFramesDropped === "number" ? statsData.transport.webrtcFramesDropped : null
+        if ((latency != null && latency > 80) || (packetLoss != null && packetLoss > 20) || (droppedFrames != null && droppedFrames > 20)) {
+            return { label: "Poor", cls: "video-stats-quality-poor" }
+        }
+        if ((latency != null && latency > 45) || (packetLoss != null && packetLoss > 5) || (droppedFrames != null && droppedFrames > 5)) {
+            return { label: "Okay", cls: "video-stats-quality-okay" }
+        }
+        return { label: "Smooth", cls: "video-stats-quality-smooth" }
+    }
+    private renderStatsOverlay(statsData: StreamStatsData) {
+        const quality = this.qualityLabel(statsData)
+        const latency = statsData.streamerRttMs ?? statsData.browserRtt
+        const fps = typeof statsData.transport.webrtcFps === "number" ? statsData.transport.webrtcFps : statsData.videoFps
+        const bitrateMbps = this.computeBitrateMbps(statsData)
+        const packetLoss = typeof statsData.transport.webrtcPacketsLost === "number" ? statsData.transport.webrtcPacketsLost : null
+        const packetsReceived = typeof statsData.transport.webrtcPacketsReceived === "number" ? statsData.transport.webrtcPacketsReceived : null
+        const packetLossPercent = packetLoss != null && packetsReceived != null && (packetLoss + packetsReceived) > 0
+            ? (packetLoss * 100) / (packetLoss + packetsReceived)
+            : null
+        const jitter = typeof statsData.transport.webrtcJitterMs === "number" ? statsData.transport.webrtcJitterMs : null
+        const icePairState = this.safeText(statsData.transport.icePairState)
+        const iceProtocol = this.safeText(statsData.transport.iceLocalProtocol)
+        const iceLocalType = this.safeText(statsData.transport.iceLocalCandidateType)
+        const iceRemoteType = this.safeText(statsData.transport.iceRemoteCandidateType)
+        const iceLocalNetworkType = this.unavailableText(statsData.transport.iceLocalNetworkType)
+        const iceLocalAddress = this.safeText(statsData.transport.iceLocalAddress)
+        const iceLocalPort = this.safeText(statsData.transport.iceLocalPort)
+        const iceRemoteAddress = this.safeText(statsData.transport.iceRemoteAddress)
+        const iceRemotePort = this.safeText(statsData.transport.iceRemotePort)
+        const resolution = statsData.videoWidth != null && statsData.videoHeight != null
+            ? `${statsData.videoWidth}x${statsData.videoHeight}`
+            : "N/A"
+        const codec = this.safeText(statsData.videoCodec)
+        const hdr = statsData.hdrEnabled === true ? "On" : statsData.hdrEnabled === false ? "Off" : "Unknown"
+        this.statsSummaryDiv.innerHTML = `
+            <span class="video-stats-chip" title="Overall stream quality from latency, dropped frames, and packet loss."><span class="video-stats-dot ${quality.cls}"></span>${quality.label}</span>
+            <span class="video-stats-chip" title="Round-trip latency between client and host."><span class="video-stats-label">Latency</span>${this.formatWithUnit(latency, "ms", 0)}</span>
+            <span class="video-stats-chip" title="Actual rendered frames per second from WebRTC stats."><span class="video-stats-label">FPS</span>${this.formatWithUnit(fps, "fps", 0)}</span>
+            <span class="video-stats-chip" title="Estimated incoming video bitrate from ICE bytes over time."><span class="video-stats-label">Bitrate</span>${this.formatWithUnit(bitrateMbps, "Mbps", 1)}</span>
+        `
+        this.statsChevronDiv.textContent = this.statsExpanded ? "▴" : "▾"
+        if (!this.statsExpanded) {
+            this.statsDetailsDiv.classList.remove("video-stats-details-visible")
+            this.statsDetailsDiv.innerHTML = ""
+            return
+        }
+        this.statsDetailsDiv.classList.add("video-stats-details-visible")
+        this.statsDetailsDiv.innerHTML = `
+            <section class="video-stats-section">
+                <h4>Connection (Most Important)</h4>
+                <div class="video-stats-grid">
+                    <div title="Round-trip latency between client and host."><span class="video-stats-label">RTT:</span> ${this.formatWithUnit(statsData.streamerRttMs, "ms", 0)}</div>
+                    <div title="How much latency fluctuates over time. Lower is more stable."><span class="video-stats-label">Variance:</span> ${this.formatWithUnit(statsData.streamerRttVarianceMs, "ms", 2)}</div>
+                    <div title="Estimated incoming video bitrate from transport stats."><span class="video-stats-label">Bitrate:</span> ${this.formatWithUnit(bitrateMbps, "Mbps", 1)}</div>
+                    <div title="Actual rendered frame rate."><span class="video-stats-label">FPS:</span> ${this.formatWithUnit(fps, "fps", 0)}</div>
+                    <div title="Packet loss ratio based on packets lost vs total packets."><span class="video-stats-label">Packet Loss:</span> ${packetLossPercent != null ? `${packetLossPercent.toFixed(2)}% (${this.safeText(packetLoss)})` : "N/A"}</div>
+                    <div title="Current jitter value from WebRTC inbound stream."><span class="video-stats-label">Jitter:</span> ${this.formatWithUnit(jitter, "ms", 2)}</div>
+                </div>
+            </section>
+            <section class="video-stats-section">
+                <h4>ICE / Route</h4>
+                <div class="video-stats-grid">
+                    <div title="Selected ICE pair connection state."><span class="video-stats-label">Pair:</span> ${icePairState}</div>
+                    <div title="Network protocol used by selected route (usually UDP)."><span class="video-stats-label">Protocol:</span> ${iceProtocol}</div>
+                    <div title="Local and remote candidate types (e.g. host, srflx, relay, prflx)."><span class="video-stats-label">Type:</span> ${iceLocalType} -> ${iceRemoteType}</div>
+                    <div title="Client-side candidate address and port selected for ICE route."><span class="video-stats-label">Client Candidate:</span> ${this.endpoint(iceLocalAddress, iceLocalPort)}</div>
+                    <div title="Peer candidate address and port selected for ICE route."><span class="video-stats-label">Peer Candidate:</span> ${this.endpoint(iceRemoteAddress, iceRemotePort)}</div>
+                    <div title="Detected network type for the local candidate (for example wifi or ethernet)."><span class="video-stats-label">Network:</span> ${iceLocalNetworkType}</div>
+                </div>
+            </section>
+            <section class="video-stats-section">
+                <h4>Video</h4>
+                <div class="video-stats-grid">
+                    <div title="Video codec used for this stream."><span class="video-stats-label">Codec:</span> ${codec}</div>
+                    <div title="Current decoded video resolution."><span class="video-stats-label">Resolution:</span> ${resolution}</div>
+                    <div title="High Dynamic Range status."><span class="video-stats-label">HDR:</span> ${hdr}</div>
+                </div>
+            </section>
+        `
     }
 
     getStreamRect(): DOMRect {

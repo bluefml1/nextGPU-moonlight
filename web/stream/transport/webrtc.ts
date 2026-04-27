@@ -1611,6 +1611,49 @@ export class WebRTCTransport implements Transport {
             }
         }
 
+        if (this.peer) {
+            try {
+                const peerStats = await this.peer.getStats()
+                let selectedPair: any = null
+                const localCandidates: Record<string, any> = {}
+                const remoteCandidates: Record<string, any> = {}
+                for (const [, value] of peerStats.entries()) {
+                    const maybe = value as any
+                    if (maybe.type === "candidate-pair" && maybe.nominated) {
+                        if (!selectedPair || (selectedPair.state !== "succeeded" && maybe.state === "succeeded")) {
+                            selectedPair = maybe
+                        }
+                    } else if (maybe.type === "local-candidate") {
+                        localCandidates[maybe.id] = maybe
+                    } else if (maybe.type === "remote-candidate") {
+                        remoteCandidates[maybe.id] = maybe
+                    }
+                }
+                if (selectedPair) {
+                    const local = localCandidates[selectedPair.localCandidateId]
+                    const remote = remoteCandidates[selectedPair.remoteCandidateId]
+                    statsData.icePairState = selectedPair.state ?? "unknown"
+                    statsData.iceBytesReceived = selectedPair.bytesReceived ?? 0
+                    statsData.iceBytesSent = selectedPair.bytesSent ?? 0
+                    statsData.iceCurrentRoundTripTimeMs = selectedPair.currentRoundTripTime ?? 0
+                    if (local) {
+                        statsData.iceLocalProtocol = local.protocol ?? "unknown"
+                        statsData.iceLocalCandidateType = local.candidateType ?? "unknown"
+                        statsData.iceLocalNetworkType = local.networkType ?? "unknown"
+                        statsData.iceLocalAddress = local.ip ?? local.address ?? "unknown"
+                        statsData.iceLocalPort = local.port ?? "unknown"
+                    }
+                    if (remote) {
+                        statsData.iceRemoteCandidateType = remote.candidateType ?? "unknown"
+                        statsData.iceRemoteAddress = remote.ip ?? remote.address ?? "unknown"
+                        statsData.iceRemotePort = remote.port ?? "unknown"
+                    }
+                }
+            } catch (err) {
+                this.logger?.debug(`Error while collecting live ICE stats: ${err}`)
+            }
+        }
+
         return statsData
     }
 }

@@ -108,16 +108,6 @@ export class Stream implements Component {
 
     private input: StreamInput
     private stats: StreamStats
-    private activeVideoCodecSupport: VideoCodecSupport | null = null
-    private adaptiveIntervalId: number | null = null
-    private adaptiveHighDelaySamples = 0
-    private adaptiveLowDelaySamples = 0
-    private adaptiveLastApplyAt = 0
-    private adaptiveBitrate: number
-    private adaptiveFps: number
-    private readonly adaptiveInitialBitrate: number
-    private readonly adaptiveInitialFps: number
-    private readonly adaptiveFpsSteps = [60, 45, 30]
     private lastCursorSignature: string | null = null
     private lastEmittedHostCursorHidden: boolean | null = null
 
@@ -140,10 +130,6 @@ export class Stream implements Component {
             typeof settings.hostUploadRelativeDir === "string" ? settings.hostUploadRelativeDir : ""
 
         this.streamerSize = getStreamerSize(settings, viewerScreenSize)
-        this.adaptiveInitialBitrate = settings.bitrate
-        this.adaptiveInitialFps = settings.fps
-        this.adaptiveBitrate = settings.bitrate
-        this.adaptiveFps = settings.fps
 
         // Configure web socket
         const wsApiHost = api.host_url.replace(/^http(s)?:/, "ws$1:")
@@ -172,7 +158,6 @@ export class Stream implements Component {
 
         // Stream Stats
         this.stats = new StreamStats()
-        this.startAdaptiveStabilityController()
 
         this.setupFileDropUpload()
     }
@@ -513,147 +498,6 @@ export class Stream implements Component {
         this.debugLog(
             `[CursorShape] applied ${cursor.width}x${cursor.height} -> ${renderWidth}x${renderHeight} hotspot(${hotspotX},${hotspotY}) checksum=${checksum}`
         )
-    }
-
-    private startAdaptiveStabilityController() {
-        if (this.adaptiveIntervalId != null) {
-            clearInterval(this.adaptiveIntervalId)
-        }
-        this.adaptiveIntervalId = window.setInterval(() => {
-            void this.tickAdaptiveStabilityController()
-        }, 2000)
-    }
-
-    private stopAdaptiveStabilityController() {
-        if (this.adaptiveIntervalId != null) {
-            clearInterval(this.adaptiveIntervalId)
-            this.adaptiveIntervalId = null
-        }
-    }
-
-    private getAdaptiveDelayMs(): number | null {
-        const stats = this.stats.getCurrentStats().transport
-        const raw = stats.webrtcJitterBufferDelayMs
-        if (typeof raw != "number" || !Number.isFinite(raw)) {
-            return null
-        }
-        // Browser stats can expose seconds for this value; normalize into ms.
-        return raw <= 10 ? raw * 1000 : raw
-    }
-
-    private getNextLowerFps(current: number): number {
-        const normalized = this.adaptiveFpsSteps.indexOf(current) != -1 ? current : this.adaptiveFpsSteps[0]
-        const idx = this.adaptiveFpsSteps.indexOf(normalized)
-        if (idx == -1 || idx >= this.adaptiveFpsSteps.length - 1) {
-            return this.adaptiveFpsSteps[this.adaptiveFpsSteps.length - 1]
-        }
-        return this.adaptiveFpsSteps[idx + 1]
-    }
-
-    private getNextHigherFps(current: number, max: number): number {
-        const normalized = this.adaptiveFpsSteps.indexOf(current) != -1 ? current : this.adaptiveFpsSteps[this.adaptiveFpsSteps.length - 1]
-        const idx = this.adaptiveFpsSteps.indexOf(normalized)
-        if (idx <= 0) {
-            return Math.min(max, this.adaptiveFpsSteps[0])
-        }
-        return Math.min(max, this.adaptiveFpsSteps[idx - 1])
-    }
-
-    private async tickAdaptiveStabilityController() {
-        if (!this.activeVideoCodecSupport) {
-            return
-        }
-
-        const delayMs = this.getAdaptiveDelayMs()
-        if (delayMs == null) {
-            return
-        }
-
-        const HIGH_DELAY_MS = 30
-        const LOW_DELAY_MS = 10
-        const APPLY_COOLDOWN_MS = 12000
-
-        if (delayMs >= HIGH_DELAY_MS) {
-            this.adaptiveHighDelaySamples += 1
-            this.adaptiveLowDelaySamples = 0
-        } else if (delayMs <= LOW_DELAY_MS) {
-            this.adaptiveLowDelaySamples += 1
-            this.adaptiveHighDelaySamples = 0
-        } else {
-            this.adaptiveHighDelaySamples = 0
-            this.adaptiveLowDelaySamples = 0
-        }
-
-        const now = Date.now()
-        if (now - this.adaptiveLastApplyAt < APPLY_COOLDOWN_MS) {
-            return
-        }
-
-        if (this.adaptiveHighDelaySamples >= 2) {
-            const minBitrate = 2000
-            const reducedBitrate = Math.max(minBitrate, Math.floor(this.adaptiveBitrate * 0.85))
-
-            let nextBitrate = this.adaptiveBitrate
-            let nextFps = this.adaptiveFps
-
-            if (reducedBitrate < this.adaptiveBitrate) {
-                nextBitrate = reducedBitrate
-            } else {
-                const loweredFps = this.getNextLowerFps(this.adaptiveFps)
-                if (loweredFps < this.adaptiveFps) {
-                    nextFps = loweredFps
-                } else {
-                    return
-                }
-            }
-
-            await this.applyAdaptiveStreamSettings(nextBitrate, nextFps, `high jitter buffer delay ${Math.round(delayMs)}ms`)
-            this.adaptiveHighDelaySamples = 0
-            return
-        }
-
-        if (this.adaptiveLowDelaySamples >= 6) {
-            const targetBitrate = this.adaptiveInitialBitrate
-            const increasedBitrate = Math.min(targetBitrate, Math.floor(this.adaptiveBitrate * 1.08))
-            const increasedFps = this.getNextHigherFps(this.adaptiveFps, this.adaptiveInitialFps)
-
-            if (increasedBitrate == this.adaptiveBitrate && increasedFps == this.adaptiveFps) {
-                return
-            }
-
-            await this.applyAdaptiveStreamSettings(increasedBitrate, increasedFps, `stable jitter buffer delay ${Math.round(delayMs)}ms`)
-            this.adaptiveLowDelaySamples = 0
-        }
-    }
-
-    private async applyAdaptiveStreamSettings(nextBitrate: number, nextFps: number, reason: string) {
-        if (!this.activeVideoCodecSupport) {
-            return
-        }
-
-        this.adaptiveBitrate = nextBitrate
-        this.adaptiveFps = nextFps
-        this.adaptiveLastApplyAt = Date.now()
-
-        const message: StreamClientMessage = {
-            StartStream: {
-                bitrate: this.adaptiveBitrate,
-                packet_size: this.settings.packetSize,
-                fps: this.adaptiveFps,
-                width: this.streamerSize[0],
-                height: this.streamerSize[1],
-                play_audio_local: this.settings.playAudioLocal,
-                video_supported_formats: createSupportedVideoFormatsBits(this.activeVideoCodecSupport),
-                video_colorspace: "Rec709",
-                video_color_range_full: false,
-                hdr: this.settings.hdr ?? false,
-            }
-        }
-
-        this.debugLog(
-            `[Adaptive] Applying stream profile (reason: ${reason}) -> bitrate=${this.adaptiveBitrate}, fps=${this.adaptiveFps}`
-        )
-        this.sendWsMessage(message)
     }
 
     async startConnection() {
@@ -1307,13 +1151,12 @@ export class Stream implements Component {
         return true
     }
     private async startStream(videoCodecSupport: VideoCodecSupport): Promise<void> {
-        this.activeVideoCodecSupport = videoCodecSupport
         this.resetKeyboardState("before stream start")
         const message: StreamClientMessage = {
             StartStream: {
-                bitrate: this.adaptiveBitrate,
+                bitrate: this.settings.bitrate,
                 packet_size: this.settings.packetSize,
-                fps: this.adaptiveFps,
+                fps: this.settings.fps,
                 width: this.streamerSize[0],
                 height: this.streamerSize[1],
                 play_audio_local: this.settings.playAudioLocal,
