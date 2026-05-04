@@ -21,6 +21,7 @@ import { ScreenKeyboard, TextEvent } from "./screen_keyboard.js";
 import { FormModal } from "./component/modal/form.js";
 import { StreamStatsData } from "./stream/stats.js";
 import { MoonlightFullscreenOverlay, MoonlightLoadingScreen, MoonlightPointerLockOverlay } from "./stream_overlays.js";
+import { runStreamProfileGate } from "./component/stream_profile_gate.js";
 
 /** Local dev hostnames — connection log panel is available here when DevTools is open. */
 function isLocalDevHostname(): boolean {
@@ -192,6 +193,8 @@ async function startApp() {
     const appId = Number.parseInt(appIdStr)
 
     await loadStaticAppSettingsFile()
+
+    await runStreamProfileGate(queryParams)
 
     // event propagation on overlays
     const sidebarRoot = getSidebarRoot()

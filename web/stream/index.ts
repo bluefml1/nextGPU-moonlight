@@ -1186,7 +1186,6 @@ export class Stream implements Component {
         parent.appendChild(this.divElement)
     }
     unmount(parent: HTMLElement): void {
-        this.stopAdaptiveStabilityController()
         this.stopRttKeepalive()
         this.resetKeyboardState("stream unmount")
         this.divElement.removeEventListener("dragover", this.dragOverHandler)
