@@ -2243,6 +2243,13 @@ input[type=number] {
     color: #e0e0ff;
 }
 
+.settings-active-profile-note {
+    margin: -4px 0 12px;
+    font-size: 0.95rem;
+    line-height: 1.35;
+    opacity: 0.78;
+}
+
 .modal-settings-panel .settings {
     color: #C8C8C8;
 }

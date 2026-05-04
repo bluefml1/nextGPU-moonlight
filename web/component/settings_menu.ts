@@ -4,6 +4,7 @@ import { PageStyle } from "../styles/index.js";
 import { Component, ComponentEvent } from "./index.js";
 import { InputComponent, SelectComponent } from "./input.js";
 import { SidebarEdge } from "./sidebar/index.js";
+import { clearStreamProfileLabel, getActiveStreamProfileTitle } from "../stream_profile_label.js";
 
 export type Settings = {
     sidebarEdge: SidebarEdge,
@@ -117,10 +118,13 @@ export class StreamSettingsComponent implements Component {
     private controllerSection: HTMLDivElement
     private otherSection: HTMLDivElement
 
+    private lastStreamTunedFingerprint: string | null = null
+
     private sidebarHeader: HTMLHeadingElement = document.createElement("h2")
     private sidebarEdge: SelectComponent
 
     private streamHeader: HTMLHeadingElement = document.createElement("h2")
+    private activeProfileNote: HTMLParagraphElement = document.createElement("p")
     private bitrate: InputComponent
     private packetSize: InputComponent
     private fps: InputComponent
@@ -211,6 +215,10 @@ export class StreamSettingsComponent implements Component {
         // Video
         this.streamHeader.innerText = "Video"
         this.streamSection.appendChild(this.streamHeader)
+
+        this.activeProfileNote.className = "settings-active-profile-note"
+        this.activeProfileNote.setAttribute("aria-live", "polite")
+        this.streamSection.appendChild(this.activeProfileNote)
 
         // Bitrate
         this.bitrate = new InputComponent("bitrate", "number", "Bitrate", {
@@ -473,6 +481,25 @@ export class StreamSettingsComponent implements Component {
         this.onSettingsChange()
     }
 
+    private streamTunedFingerprint(s: Settings): string {
+        return JSON.stringify({
+            bitrate: s.bitrate,
+            packetSize: s.packetSize,
+            fps: s.fps,
+            videoFrameQueueSize: s.videoFrameQueueSize,
+            videoSize: s.videoSize,
+            videoSizeCustom: s.videoSizeCustom,
+            videoCodec: s.videoCodec,
+            forceVideoElementRenderer: s.forceVideoElementRenderer,
+            canvasRenderer: s.canvasRenderer,
+            canvasVsync: s.canvasVsync,
+            playAudioLocal: s.playAudioLocal,
+            audioSampleQueueSize: s.audioSampleQueueSize,
+            dataTransport: s.dataTransport,
+            hdr: s.hdr,
+        })
+    }
+
     private onSettingsChange() {
         const presetId = this.videoSize.getValue() as VideoPresetId
         if (presetId === "custom") {
@@ -488,7 +515,20 @@ export class StreamSettingsComponent implements Component {
             }
         }
 
+        const fp = this.streamTunedFingerprint(this.getStreamSettings())
+        if (this.lastStreamTunedFingerprint !== null && fp !== this.lastStreamTunedFingerprint) {
+            clearStreamProfileLabel()
+        }
+        this.lastStreamTunedFingerprint = fp
+
+        this.refreshActiveProfileNote()
+
         this.divElement.dispatchEvent(new ComponentEvent("ml-settingschange", this))
+    }
+
+    private refreshActiveProfileNote(): void {
+        const title = getActiveStreamProfileTitle()
+        this.activeProfileNote.textContent = title ? `Active profile: ${title}` : "Active profile: —"
     }
 
     addChangeListener(listener: StreamSettingsChangeListener) {
@@ -558,6 +598,7 @@ export class StreamSettingsComponent implements Component {
 
     mount(parent: HTMLElement): void {
         parent.appendChild(this.divElement)
+        this.refreshActiveProfileNote()
     }
     unmount(parent: HTMLElement): void {
         parent.removeChild(this.divElement)
