@@ -175,7 +175,7 @@ export const MoonlightLoadingScreen = (() => {
         document.head.appendChild(style)
     }
 
-    function build(title = "Connecting to Moonlight", subtitle = "Establishing stream") {
+    function build(title = "Connecting to NextGPU", subtitle = "Establishing stream") {
         const root = document.createElement("div")
         root.id = "ml-loading-screen"
 
