@@ -327,11 +327,11 @@ input[type=number] {
 }
 
 
-/** Modal */
+/** Modal — above stream UI; below ~100k startup / pointer-lock overlays. */
 .modal-background {
     display: block;
     position: fixed;
-    z-index: 2;
+    z-index: 30000;
     left: 0;
     top: 0;
     width: 100%;
@@ -1592,6 +1592,21 @@ input[type=number] {
     min-height: 100vmin;
     width: auto;
     height: auto;
+}
+
+body.stream.ml-modal-active video.video-stream,
+body.stream.ml-modal-active canvas.video-stream {
+    pointer-events: none !important;
+}
+
+body.stream.ml-fullscreen-intro-active video.video-stream,
+body.stream.ml-fullscreen-intro-active canvas.video-stream {
+    pointer-events: none !important;
+}
+
+body.stream.ml-pointer-lock-overlay-active video.video-stream,
+body.stream.ml-pointer-lock-overlay-active canvas.video-stream {
+    pointer-events: none !important;
 }
 
 canvas.video-stream {
