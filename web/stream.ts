@@ -26,6 +26,25 @@ import { runStreamProfileGate } from "./component/stream_profile_gate.js";
 /** Persisted stream viewer mouse/touch mode (separate from `mlSettings`). */
 const ML_STREAM_INPUT_MODES_KEY = "mlStreamInputModes"
 
+function isPhoneLikeDevice(): boolean {
+    try {
+        return (
+            ("maxTouchPoints" in navigator && navigator.maxTouchPoints > 0) &&
+            window.matchMedia("(pointer: coarse)").matches
+        )
+    } catch {
+        return false
+    }
+}
+
+function defaultStreamInputConfigForDevice(): StreamInputConfig {
+    const config = defaultStreamInputConfig()
+    if (isPhoneLikeDevice()) {
+        config.touchMode = "touch"
+    }
+    return config
+}
+
 function mergePersistedStreamInputModes(base: StreamInputConfig): StreamInputConfig {
     try {
         const raw = localStorage.getItem(ML_STREAM_INPUT_MODES_KEY)
@@ -275,7 +294,7 @@ class ViewerApp implements Component {
 
     private settings: Settings
 
-    private inputConfig: StreamInputConfig = mergePersistedStreamInputModes(defaultStreamInputConfig())
+    private inputConfig: StreamInputConfig = mergePersistedStreamInputModes(defaultStreamInputConfigForDevice())
     private previousMouseMode: MouseMode
     private toggleFullscreenWithKeybind: boolean
 
@@ -1003,21 +1022,33 @@ class ViewerApp implements Component {
      * `preventDefault` on touchstart blocks click synthesis and options cannot be chosen on phones.
      */
     private isStreamInputUiTarget(target: EventTarget | null): boolean {
-        if (!(target instanceof Element)) return false
-        if (target.closest(".select-polyfill-list, .select-polyfill-display, .select-polyfill-wrapper")) {
+        const targetElement = target instanceof Element
+            ? target
+            : target instanceof Node
+                ? target.parentElement
+                : null
+        if (!targetElement) return false
+        if (targetElement.closest(".video-stats")) return true
+        if (targetElement.closest(".modal-video-connect")) return true
+        if (targetElement.closest(".modal-settings-panel")) return true
+        if (targetElement.closest("#sidebar-button")) return true
+        if (targetElement.closest(".select-polyfill-list, .select-polyfill-display, .select-polyfill-wrapper")) {
             return true
         }
-        if (target.closest("#mlfso-overlay, #mlplo-overlay")) return true
-        if (target.closest(".sidebar-stream")) return true
+        if (targetElement.closest("button, input, select, textarea, label, a, [role='button'], [role='slider'], [contenteditable='true']")) {
+            return true
+        }
+        if (targetElement.closest("#mlfso-overlay, #mlplo-overlay")) return true
+        if (targetElement.closest(".sidebar-stream")) return true
         const modal = getModalBackground()
-        if (modal && !modal.classList.contains("modal-disabled") && modal.contains(target)) return true
+        if (modal && !modal.classList.contains("modal-disabled") && modal.contains(targetElement)) return true
         return false
     }
 
     // Mouse
     onMouseButtonDown(event: MouseEvent) {
-        this.onUserInteraction()
         if (this.isStreamInputUiTarget(event.target)) return
+        this.onUserInteraction()
 
         if (this.tryAdaptivePointerRelockFromGesture("click")) {
             event.preventDefault()
@@ -1031,8 +1062,8 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onMouseButtonUp(event: MouseEvent) {
-        this.onUserInteraction()
         if (this.isStreamInputUiTarget(event.target)) return
+        this.onUserInteraction()
 
         event.preventDefault()
         this.stream?.getInput().onMouseUp(event)
@@ -1064,8 +1095,8 @@ class ViewerApp implements Component {
 
     // Touch
     onTouchStart(event: TouchEvent) {
-        this.onUserInteraction()
         if (this.isStreamInputUiTarget(event.target)) return
+        this.onUserInteraction()
         if (this.tryAdaptivePointerRelockFromGesture("touch")) {
             event.preventDefault()
             event.stopPropagation()
@@ -1078,8 +1109,8 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onTouchEnd(event: TouchEvent) {
-        this.onUserInteraction()
         if (this.isStreamInputUiTarget(event.target)) return
+        this.onUserInteraction()
 
         event.preventDefault()
         this.stream?.getInput().onTouchEnd(event, this.getStreamRect())
@@ -1087,8 +1118,8 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onTouchCancel(event: TouchEvent) {
-        this.onUserInteraction()
         if (this.isStreamInputUiTarget(event.target)) return
+        this.onUserInteraction()
 
         event?.preventDefault()
         this.stream?.getInput().onTouchCancel(event, this.getStreamRect())
