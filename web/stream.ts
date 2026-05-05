@@ -22,6 +22,26 @@ import { FormModal } from "./component/modal/form.js";
 import { StreamStatsData } from "./stream/stats.js";
 import { MoonlightFullscreenOverlay, MoonlightLoadingScreen, MoonlightPointerLockOverlay } from "./stream_overlays.js";
 
+/** Persisted stream viewer mouse/touch mode (separate from `mlSettings`). */
+const ML_STREAM_INPUT_MODES_KEY = "mlStreamInputModes"
+
+function mergePersistedStreamInputModes(base: StreamInputConfig): StreamInputConfig {
+    try {
+        const raw = localStorage.getItem(ML_STREAM_INPUT_MODES_KEY)
+        if (!raw) return base
+        const o = JSON.parse(raw) as Partial<{ mouseMode: string; touchMode: string }>
+        if (o.mouseMode === "relative" || o.mouseMode === "follow" || o.mouseMode === "pointAndDrag") {
+            base.mouseMode = o.mouseMode
+        }
+        if (o.touchMode === "touch" || o.touchMode === "mouseRelative" || o.touchMode === "pointAndDrag") {
+            base.touchMode = o.touchMode
+        }
+    } catch {
+        /* ignore corrupt storage */
+    }
+    return base
+}
+
 /** Local dev hostnames — connection log panel is available here when DevTools is open. */
 function isLocalDevHostname(): boolean {
     const h = location.hostname
@@ -252,7 +272,7 @@ class ViewerApp implements Component {
 
     private settings: Settings
 
-    private inputConfig: StreamInputConfig = defaultStreamInputConfig()
+    private inputConfig: StreamInputConfig = mergePersistedStreamInputModes(defaultStreamInputConfig())
     private previousMouseMode: MouseMode
     private toggleFullscreenWithKeybind: boolean
 
@@ -361,7 +381,7 @@ class ViewerApp implements Component {
         if (this.pointerRelockNoticeEl) return this.pointerRelockNoticeEl
         const el = document.createElement("div")
         el.id = "ml-pointer-relock-notice"
-        el.textContent = "Click to lock mouse"
+        el.textContent = "Tap, click, scroll, or press a key to lock mouse"
         el.style.position = "fixed"
         el.style.top = "50%"
         el.style.left = "50%"
@@ -426,7 +446,7 @@ class ViewerApp implements Component {
     }
 
     private async attemptAdaptivePointerRelock(
-        trigger: "overlay-esc" | "click",
+        trigger: "overlay-esc" | "click" | "touch" | "wheel" | "key",
         withFullscreen = false
     ) {
         this.adaptiveLog(`attempt pointer relock from ${trigger}`)
@@ -449,6 +469,22 @@ class ViewerApp implements Component {
             }
             this.adaptiveLog(`pointer lock request failed in adaptive relock path: ${String(error)}`)
         }
+    }
+
+    private canRelockFromGesture(): boolean {
+        return (
+            this.adaptivePointerLockArmed &&
+            this.getInputConfig().mouseMode !== "relative" &&
+            this.getInputConfig().mouseMode !== "pointAndDrag" &&
+            !document.pointerLockElement
+        )
+    }
+
+    private tryAdaptivePointerRelockFromGesture(trigger: "click" | "touch" | "wheel" | "key"): boolean {
+        if (!this.canRelockFromGesture()) return false
+        this.adaptiveLog(`${trigger} with armed auto-lock -> requestPointerLock() (mouseMode=${this.getInputConfig().mouseMode})`)
+        void this.attemptAdaptivePointerRelock(trigger)
+        return true
     }
 
     constructor(api: Api, hostId: number, appId: number) {
@@ -795,9 +831,25 @@ class ViewerApp implements Component {
         return this.inputConfig
     }
     setInputConfig(config: StreamInputConfig) {
+        const prevMouse = this.inputConfig.mouseMode
+        const prevTouch = this.inputConfig.touchMode
         Object.assign(this.inputConfig, config)
 
         this.stream?.getInput().setConfig(this.inputConfig)
+
+        if (this.inputConfig.mouseMode !== prevMouse || this.inputConfig.touchMode !== prevTouch) {
+            try {
+                localStorage.setItem(
+                    ML_STREAM_INPUT_MODES_KEY,
+                    JSON.stringify({
+                        mouseMode: this.inputConfig.mouseMode,
+                        touchMode: this.inputConfig.touchMode,
+                    })
+                )
+            } catch {
+                /* quota / private mode */
+            }
+        }
     }
 
     // Keyboard
@@ -811,6 +863,11 @@ class ViewerApp implements Component {
         }
         if (event.code === "Escape" && this.isFullscreen()) {
             this.startFullscreenExitEscHold()
+        }
+        if (event.code !== "Escape" && this.tryAdaptivePointerRelockFromGesture("key")) {
+            event.preventDefault()
+            event.stopPropagation()
+            return
         }
 
         if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.code === "KeyC") {
@@ -937,18 +994,32 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
 
+    /**
+     * Stream input hooks on `document` must not swallow touches/clicks aimed at browser UI.
+     * In particular, the select polyfill teleports `.select-polyfill-list` to `body`; without this,
+     * `preventDefault` on touchstart blocks click synthesis and options cannot be chosen on phones.
+     */
+    private isStreamInputUiTarget(target: EventTarget | null): boolean {
+        if (!(target instanceof Element)) return false
+        if (target.closest(".select-polyfill-list, .select-polyfill-display, .select-polyfill-wrapper")) {
+            return true
+        }
+        if (target.closest("#mlfso-overlay, #mlplo-overlay")) return true
+        if (target.closest(".sidebar-stream")) return true
+        const modal = getModalBackground()
+        if (modal && !modal.classList.contains("modal-disabled") && modal.contains(target)) return true
+        return false
+    }
+
     // Mouse
     onMouseButtonDown(event: MouseEvent) {
         this.onUserInteraction()
+        if (this.isStreamInputUiTarget(event.target)) return
 
-        if (
-            this.adaptivePointerLockArmed &&
-            this.getInputConfig().mouseMode !== "relative" &&
-            this.getInputConfig().mouseMode !== "pointAndDrag" &&
-            !document.pointerLockElement
-        ) {
-            this.adaptiveLog(`click with armed auto-lock -> requestPointerLock() (mouseMode=${this.getInputConfig().mouseMode})`)
-            void this.attemptAdaptivePointerRelock("click")
+        if (this.tryAdaptivePointerRelockFromGesture("click")) {
+            event.preventDefault()
+            event.stopPropagation()
+            return
         }
 
         event.preventDefault()
@@ -958,6 +1029,7 @@ class ViewerApp implements Component {
     }
     onMouseButtonUp(event: MouseEvent) {
         this.onUserInteraction()
+        if (this.isStreamInputUiTarget(event.target)) return
 
         event.preventDefault()
         this.stream?.getInput().onMouseUp(event)
@@ -971,6 +1043,11 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onMouseWheel(event: WheelEvent) {
+        if (this.tryAdaptivePointerRelockFromGesture("wheel")) {
+            event.preventDefault()
+            event.stopPropagation()
+            return
+        }
         event.preventDefault()
         this.stream?.getInput().onMouseWheel(event)
 
@@ -985,6 +1062,12 @@ class ViewerApp implements Component {
     // Touch
     onTouchStart(event: TouchEvent) {
         this.onUserInteraction()
+        if (this.isStreamInputUiTarget(event.target)) return
+        if (this.tryAdaptivePointerRelockFromGesture("touch")) {
+            event.preventDefault()
+            event.stopPropagation()
+            return
+        }
 
         event.preventDefault()
         this.stream?.getInput().onTouchStart(event, this.getStreamRect())
@@ -993,6 +1076,7 @@ class ViewerApp implements Component {
     }
     onTouchEnd(event: TouchEvent) {
         this.onUserInteraction()
+        if (this.isStreamInputUiTarget(event.target)) return
 
         event.preventDefault()
         this.stream?.getInput().onTouchEnd(event, this.getStreamRect())
@@ -1001,6 +1085,7 @@ class ViewerApp implements Component {
     }
     onTouchCancel(event: TouchEvent) {
         this.onUserInteraction()
+        if (this.isStreamInputUiTarget(event.target)) return
 
         event?.preventDefault()
         this.stream?.getInput().onTouchCancel(event, this.getStreamRect())
@@ -1014,6 +1099,8 @@ class ViewerApp implements Component {
         window.requestAnimationFrame(this.onTouchUpdate.bind(this))
     }
     onTouchMove(event: TouchEvent) {
+        if (this.isStreamInputUiTarget(event.target)) return
+
         event.preventDefault()
         this.stream?.getInput().onTouchMove(event, this.getStreamRect())
 
@@ -2777,6 +2864,16 @@ class ViewerSidebar implements Component, Sidebar {
 
     onCapabilitiesChange(capabilities: StreamCapabilities) {
         this.touchMode.setOptionEnabled("touch", capabilities.touch)
+        if (!capabilities.touch) {
+            const config = this.app.getInputConfig()
+            if (config.touchMode === "touch") {
+                config.touchMode = "mouseRelative"
+                this.app.setInputConfig(config)
+            }
+            if (this.touchMode.getValue() === "touch") {
+                this.touchMode.setValue("mouseRelative", { silent: true })
+            }
+        }
     }
 
     showUploadDoneAnnouncement(fileName: string) {
@@ -2839,6 +2936,7 @@ class ViewerSidebar implements Component, Sidebar {
 class SendKeycodeModal extends FormModal<number> {
 
     private dropdownSearch: SelectComponent
+    private modalParent: HTMLElement | null = null
 
     constructor() {
         super()
@@ -2865,6 +2963,18 @@ class SendKeycodeModal extends FormModal<number> {
             hasSearch: true,
             displayName: "Select Keycode"
         })
+    }
+
+    mount(parent: Element): void {
+        super.mount(parent)
+        this.modalParent = document.getElementById("modal-parent")
+        this.modalParent?.classList.add("modal-content-compact")
+    }
+
+    unmount(parent: Element): void {
+        this.modalParent?.classList.remove("modal-content-compact")
+        this.modalParent = null
+        super.unmount(parent)
     }
 
     mountForm(form: HTMLFormElement): void {

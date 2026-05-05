@@ -376,6 +376,9 @@ const MoonlightFullscreenOverlayImpl = (() => {
             gap: 14px;
             cursor: pointer;
             user-select: none;
+            pointer-events: auto;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
             animation: mlfso-fadein .3s ease both;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
@@ -426,7 +429,7 @@ const MoonlightFullscreenOverlayImpl = (() => {
     `
 
     let overlayEl: HTMLDivElement | null = null
-    let keyHandler: (() => void) | null = null
+    let keyHandler: ((e: KeyboardEvent) => void) | null = null
 
     function injectStyles() {
         if (document.getElementById("mlfso-styles")) return
@@ -483,21 +486,48 @@ const MoonlightFullscreenOverlayImpl = (() => {
             console.info("[Overlay:Fullscreen] show")
             injectStyles()
             overlayEl = buildOverlay()
+
+            let finished = false
+            const detachKey = () => {
+                if (keyHandler) {
+                    document.removeEventListener("keydown", keyHandler, true)
+                    keyHandler = null
+                }
+            }
             const go = () => {
+                if (finished) return
+                finished = true
                 console.info("[Overlay:Fullscreen] user gesture -> request fullscreen")
+                detachKey()
                 api.hide()
                 onFullscreen?.()
             }
-            overlayEl.addEventListener("click", go, { once: true })
-            keyHandler = go
-            document.addEventListener("keydown", keyHandler, { once: true })
+
+            keyHandler = (e: KeyboardEvent) => {
+                if (finished || !overlayEl) return
+                e.preventDefault()
+                e.stopImmediatePropagation()
+                go()
+            }
+            document.addEventListener("keydown", keyHandler, { capture: true })
+
+            // Capture runs before document bubble listeners (e.g. stream input). passive: false on wheel so
+            // scroll counts as an intentional gesture and does not scroll the page instead.
+            const cap = { capture: true } as const
+            overlayEl.addEventListener("pointerdown", go, { once: true, ...cap })
+            overlayEl.addEventListener("touchstart", go, { once: true, passive: true, ...cap })
+            overlayEl.addEventListener("touchend", go, { once: true, passive: true, ...cap })
+            overlayEl.addEventListener("click", go, { once: true, ...cap })
+
             document.body.appendChild(overlayEl)
+            document.body.classList.add("ml-fullscreen-intro-active")
         },
         hide(fadeMs = 280) {
             if (!overlayEl) return
             console.info("[Overlay:Fullscreen] hide", { fadeMs })
+            document.body.classList.remove("ml-fullscreen-intro-active")
             if (keyHandler) {
-                document.removeEventListener("keydown", keyHandler)
+                document.removeEventListener("keydown", keyHandler, true)
                 keyHandler = null
             }
             overlayEl.style.transition = `opacity ${fadeMs}ms ease`
@@ -542,7 +572,9 @@ const MoonlightPointerLockOverlayImpl = (() => {
             animation: mlplo-fadein .3s ease both;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             pointer-events: auto;
-            cursor: auto;
+            cursor: pointer;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
         }
 
         #mlplo-notice {
@@ -567,7 +599,7 @@ const MoonlightPointerLockOverlayImpl = (() => {
     `
 
     let overlayEl: HTMLDivElement | null = null
-    let keyHandler: (() => void) | null = null
+    let keyHandler: ((e: KeyboardEvent) => void) | null = null
 
     function injectStyles() {
         if (document.getElementById("mlplo-styles")) return
@@ -582,7 +614,7 @@ const MoonlightPointerLockOverlayImpl = (() => {
         root.id = "mlplo-overlay"
         const notice = document.createElement("div")
         notice.id = "mlplo-notice"
-        notice.textContent = "Click to lock mouse"
+        notice.textContent = "Tap, click, scroll, or press a key to lock mouse"
         root.appendChild(notice)
         return root
     }
@@ -593,23 +625,55 @@ const MoonlightPointerLockOverlayImpl = (() => {
             console.info("[Overlay:EscRelock] show")
             injectStyles()
             overlayEl = buildOverlay()
+
+            let finished = false
+            const detachKey = () => {
+                if (keyHandler) {
+                    document.removeEventListener("keydown", keyHandler, true)
+                    keyHandler = null
+                }
+            }
             const go = () => {
+                if (finished) return
+                finished = true
                 console.info("[Overlay:EscRelock] user gesture -> relock")
+                detachKey()
                 api.hide()
                 onRelock?.()
             }
-            const notice = overlayEl.querySelector("#mlplo-notice")
-            notice?.addEventListener("click", go, { once: true })
-            keyHandler = go
-            document.addEventListener("keydown", keyHandler, { once: true })
+
+            keyHandler = (e: KeyboardEvent) => {
+                if (finished || !overlayEl) return
+                e.preventDefault()
+                e.stopImmediatePropagation()
+                go()
+            }
+            document.addEventListener("keydown", keyHandler, { capture: true })
+
+            const cap = { capture: true } as const
+            // Full-viewport gestures; capture runs before stream's document listeners. Wheel must be non-passive
+            // so preventDefault can run (user activation + no accidental page scroll).
+            const onWheel = (e: WheelEvent) => {
+                if (finished || !overlayEl) return
+                e.preventDefault()
+                go()
+            }
+            overlayEl.addEventListener("pointerdown", go, { once: true, ...cap })
+            overlayEl.addEventListener("touchstart", go, { once: true, passive: true, ...cap })
+            overlayEl.addEventListener("touchend", go, { once: true, passive: true, ...cap })
+            overlayEl.addEventListener("wheel", onWheel, { once: true, passive: false, ...cap })
+            overlayEl.addEventListener("click", go, { once: true, ...cap })
+
             document.body.appendChild(overlayEl)
-            notice?.setAttribute("aria-live", "polite")
+            document.body.classList.add("ml-pointer-lock-overlay-active")
+            overlayEl.querySelector("#mlplo-notice")?.setAttribute("aria-live", "polite")
         },
         hide(fadeMs = 220) {
             if (!overlayEl) return
             console.info("[Overlay:EscRelock] hide", { fadeMs })
+            document.body.classList.remove("ml-pointer-lock-overlay-active")
             if (keyHandler) {
-                document.removeEventListener("keydown", keyHandler)
+                document.removeEventListener("keydown", keyHandler, true)
                 keyHandler = null
             }
             overlayEl.style.transition = `opacity ${fadeMs}ms ease`

@@ -403,13 +403,13 @@ input[type=number] {
     color: white;
 }
 
-/** Modal */
+/** Modal — above stream video (fixed, no z-index), sidebar (2000), and stream chrome (~10k); below pointer-lock/startup overlays (~100k). */
 .modal-background {
     display: flex;
     justify-content: center;
     align-items: center;
     position: fixed;
-    z-index: 2;
+    z-index: 30000;
     left: 0;
     top: 0;
     width: 100%;
@@ -439,6 +439,34 @@ input[type=number] {
     overflow: hidden;
     display: flex;
     flex-direction: column;
+}
+
+.modal-content.modal-content-compact {
+    width: min(560px, 92vw);
+    max-width: 92vw;
+    height: auto;
+    min-height: 0;
+    max-height: 80vh;
+    padding: 16px 18px;
+}
+
+.modal-content.modal-content-compact form {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.modal-content.modal-content-compact form .select-polyfill-wrapper,
+.modal-content.modal-content-compact form input[type="text"],
+.modal-content.modal-content-compact form input[type="number"],
+.modal-content.modal-content-compact form select {
+    flex: 1 1 240px;
+    min-width: 200px;
+}
+
+.modal-content.modal-content-compact form button {
+    margin: 0;
 }
 
 /* ——— Moonlight Settings Modal: dark desktop premium panel ——— */
@@ -654,6 +682,114 @@ input[type=number] {
     overflow: hidden;
     opacity: 0;
     pointer-events: none;
+}
+
+@media (max-width: 1024px) {
+    .modal-content {
+        width: 98%;
+        max-width: none;
+        height: 92vh;
+        min-height: 0;
+        padding: 14px;
+    }
+
+    .modal-settings-panel .settings-sidebar {
+        width: 196px;
+        min-width: 196px;
+    }
+
+    .modal-settings-panel .settings-panel {
+        padding: 20px 20px 24px;
+    }
+}
+
+@media (max-width: 768px) {
+    .modal-background {
+        align-items: stretch;
+    }
+
+    .modal-content {
+        width: 100%;
+        height: 100%;
+        max-height: 100%;
+        min-height: 0;
+        padding: 0;
+        border-radius: 0;
+        border-width: 0;
+    }
+
+    .modal-settings-panel {
+        max-width: none;
+        border-radius: 0;
+        border-width: 0;
+    }
+
+    .modal-settings-panel-header {
+        padding: 12px 14px;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+
+    .modal-settings-panel-header h2 {
+        font-size: 1rem;
+    }
+
+    .modal-settings-panel .settings-body {
+        flex-direction: column;
+    }
+
+    .modal-settings-panel .settings-sidebar {
+        width: 100%;
+        min-width: 0;
+        padding: 8px 10px;
+        gap: 8px;
+        border-right: none;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        flex-direction: row;
+        overflow-x: auto;
+    }
+
+    .modal-settings-panel .settings-nav-item {
+        flex: 0 0 auto;
+        min-height: 40px;
+        padding: 8px 12px;
+        border-left: none;
+        border-bottom: 2px solid transparent;
+        border-radius: 10px;
+        font-size: 12px;
+    }
+
+    .modal-settings-panel .settings-nav-item:hover {
+        border-left: none;
+        border-bottom: 2px solid transparent;
+    }
+
+    .modal-settings-panel .settings-nav-item.active {
+        padding-left: 12px;
+        border-left: none;
+        border-bottom: 2px solid #3FA9F5;
+    }
+
+    .modal-settings-panel .settings-panel {
+        padding: 14px 12px 18px;
+    }
+
+    .modal-settings-panel .settings-section > .input-div {
+        gap: 10px 12px;
+        padding: 12px;
+    }
+
+    .modal-settings-panel .settings-section > .input-div::before {
+        width: 32px;
+        height: 32px;
+        min-width: 32px;
+        min-height: 32px;
+        background-size: 18px 18px;
+    }
+
+    .modal-settings-panel .settings-section > .input-div > label {
+        min-width: 100%;
+    }
 }
 
 /* 5. Settings cards (icon placeholder + label + control) */
@@ -2680,6 +2816,23 @@ input[type=number] {
     min-height: 100vmin;
     width: auto;
     height: auto;
+}
+
+/* Let settings / other modals receive taps on phones: fixed video can composite above HTML or steal touches. */
+body.stream.ml-modal-active video.video-stream,
+body.stream.ml-modal-active canvas.video-stream {
+    pointer-events: none !important;
+}
+
+/* Fullscreen "tap to continue" intro: video layer can steal first taps on iOS. */
+body.stream.ml-fullscreen-intro-active video.video-stream,
+body.stream.ml-fullscreen-intro-active canvas.video-stream {
+    pointer-events: none !important;
+}
+
+body.stream.ml-pointer-lock-overlay-active video.video-stream,
+body.stream.ml-pointer-lock-overlay-active canvas.video-stream {
+    pointer-events: none !important;
 }
 
 canvas.video-stream {

@@ -779,6 +779,11 @@ export class Stream implements Component {
         this.rttOutstanding.clear()
     }
 
+    // Legacy cleanup hook retained for compatibility with existing unmount flow.
+    private stopAdaptiveStabilityController() {
+        // No-op: adaptive stability controller is not currently active.
+    }
+
     private extractIceHost(url: string): string | null {
         const match = /^(stun|stuns|turn|turns):([^/?]+)/i.exec(url)
         if (!match) {
