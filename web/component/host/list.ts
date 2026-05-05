@@ -19,7 +19,14 @@ export class HostList extends FetchListComponent<DetailedHost | UndetailedHost, 
     }
 
     async forceFetch() {
-        const hosts = await apiGetHosts(this.api)
+        this.beginLoadingState()
+        let hosts
+        try {
+            hosts = await apiGetHosts(this.api)
+        } catch (e) {
+            this.setErrorState("Unable to load hosts.")
+            throw e
+        }
 
         this.updateCache(hosts.response.hosts)
 

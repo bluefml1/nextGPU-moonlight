@@ -4,7 +4,7 @@ import { Component } from "./component/index.js";
 import { showErrorPopup } from "./component/error.js";
 import { InfoEvent, Stream } from "./stream/index.js"
 import { getModalBackground, Modal, showMessage, showModal } from "./component/modal/index.js";
-import { getSidebarDragOffsetY, getSidebarRoot, setSidebar, setSidebarExtended, setSidebarStyle, Sidebar } from "./component/sidebar/index.js";
+import { getSidebarDragOffsetY, getSidebarRoot, isSidebarExtended, setSidebar, setSidebarExtended, setSidebarStyle, Sidebar } from "./component/sidebar/index.js";
 import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig } from "./stream/input.js";
 import {
     exportAppSettingsToFile,
@@ -208,12 +208,116 @@ class DevStreamConnectionLog {
     }
 }
 
+class StreamRecoveryOverlay {
+    private root = document.createElement("div")
+    private card = document.createElement("div")
+    private title = document.createElement("h2")
+    private body = document.createElement("p")
+    private actions = document.createElement("div")
+    private retryButton = document.createElement("button")
+    private settingsButton = document.createElement("button")
+    private exitButton = document.createElement("button")
+
+    constructor(
+        onRetry: () => void,
+        onOpenSettings: () => void,
+        onExit: () => void,
+    ) {
+        this.root.style.cssText =
+            "position:fixed;inset:0;z-index:100003;display:none;align-items:center;justify-content:center;" +
+            "background:radial-gradient(circle at 20% 20%, rgba(76,128,255,.18), transparent 45%),rgba(5,8,14,.80);" +
+            "backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);padding:20px"
+
+        this.card.style.cssText =
+            "max-width:min(560px,calc(100vw - 24px));width:100%;border-radius:16px;padding:22px 22px 18px;" +
+            "background:linear-gradient(180deg, rgba(14,20,34,.98), rgba(10,14,24,.98));" +
+            "border:1px solid rgba(122,154,255,.28);box-shadow:0 18px 48px rgba(0,0,0,.52);" +
+            "color:rgba(244,248,255,.96);font-family:Inter,system-ui,-apple-system,\"Segoe UI\",sans-serif;box-sizing:border-box"
+        this.root.appendChild(this.card)
+
+        this.title.textContent = "Connection Interrupted"
+        this.title.style.cssText =
+            "margin:0 0 8px;font-size:22px;font-weight:700;letter-spacing:.015em;line-height:1.25"
+        this.card.appendChild(this.title)
+
+        this.body.style.cssText =
+            "margin:0 0 18px;color:rgba(221,231,255,.82);line-height:1.55;font-size:14px"
+        this.body.textContent = "The streaming session was interrupted."
+        this.card.appendChild(this.body)
+
+        this.actions.style.cssText = "display:flex;gap:10px;flex-wrap:wrap;align-items:center"
+        this.card.appendChild(this.actions)
+
+        const applyButtonBase = (button: HTMLButtonElement) => {
+            button.style.cssText =
+                "border-radius:10px;border:1px solid transparent;padding:9px 14px;min-height:38px;" +
+                "font-size:13px;font-weight:600;letter-spacing:.01em;line-height:1;cursor:pointer;" +
+                "transition:filter .12s ease,opacity .12s ease,border-color .12s ease"
+            button.addEventListener("mouseenter", () => {
+                if (!button.disabled) button.style.filter = "brightness(1.08)"
+            })
+            button.addEventListener("mouseleave", () => {
+                button.style.filter = "none"
+            })
+        }
+
+        this.retryButton.type = "button"
+        this.retryButton.textContent = "Retry Connection"
+        applyButtonBase(this.retryButton)
+        this.retryButton.style.background = "linear-gradient(135deg, #3e68ff, #1f8dff)"
+        this.retryButton.style.borderColor = "rgba(134,170,255,.75)"
+        this.retryButton.style.color = "#f6f9ff"
+        this.retryButton.addEventListener("click", onRetry)
+        this.actions.appendChild(this.retryButton)
+
+        this.settingsButton.type = "button"
+        this.settingsButton.textContent = "Open Stream Settings"
+        applyButtonBase(this.settingsButton)
+        this.settingsButton.style.background = "rgba(255,255,255,.06)"
+        this.settingsButton.style.borderColor = "rgba(158,184,255,.4)"
+        this.settingsButton.style.color = "rgba(234,242,255,.95)"
+        this.settingsButton.addEventListener("click", onOpenSettings)
+        this.actions.appendChild(this.settingsButton)
+
+        this.exitButton.type = "button"
+        this.exitButton.textContent = "Close Page"
+        applyButtonBase(this.exitButton)
+        this.exitButton.style.background = "rgba(255,255,255,.03)"
+        this.exitButton.style.borderColor = "rgba(255,255,255,.2)"
+        this.exitButton.style.color = "rgba(220,230,246,.86)"
+        this.exitButton.addEventListener("click", onExit)
+        this.actions.appendChild(this.exitButton)
+
+        document.body.appendChild(this.root)
+    }
+
+    setBusy(busy: boolean) {
+        this.retryButton.disabled = busy
+        this.settingsButton.disabled = busy
+        this.exitButton.disabled = busy
+        const opacity = busy ? "0.65" : "1"
+        this.retryButton.style.opacity = opacity
+        this.settingsButton.style.opacity = opacity
+        this.exitButton.style.opacity = opacity
+    }
+
+    show(message: string) {
+        this.body.textContent = message
+        this.root.style.display = "flex"
+    }
+
+    hide() {
+        this.root.style.display = "none"
+        this.setBusy(false)
+    }
+}
+
 async function startApp() {
     const api = await getApi()
 
     const rootElement = document.getElementById("root");
     if (rootElement == null) {
-        showErrorPopup("couldn't find root element", true)
+        showErrorPopup("Unable to initialize the interface.", true)
         return;
     }
 
@@ -223,7 +327,7 @@ async function startApp() {
     const hostIdStr = queryParams.get("hostId")
     const appIdStr = queryParams.get("appId")
     if (hostIdStr == null || appIdStr == null) {
-        await showMessage("No Host or no App Id found")
+        await showMessage("Missing host or application identifier.")
 
         window.close()
         return
@@ -281,16 +385,26 @@ class ViewerApp implements Component {
     private div = document.createElement("div")
 
     private statsDiv = document.createElement("div")
-    private statsTopBar = document.createElement("button")
+    private statsTopBar = document.createElement("div")
+    private statsTitleDiv = document.createElement("div")
+    private statsActionsDiv = document.createElement("div")
+    private statsMinimizeButton = document.createElement("button")
+    private statsCloseButton = document.createElement("button")
     private statsSummaryDiv = document.createElement("div")
-    private statsChevronDiv = document.createElement("div")
     private statsDetailsDiv = document.createElement("div")
-    private statsExpanded = false
+    private statsMinimized = false
+    private statsClosed = false
+    private latestConnectionState = "Connecting"
+    private statsDragOffsetX = 0
+    private statsDragOffsetY = 0
+    private statsDragging = false
     private statsUpdateInterval: ReturnType<typeof setInterval> | null = null
     private lastIceBytesReceived: number | null = null
     private lastIceBytesTsMs: number | null = null
     private lastBitrateMbps: number | null = null
     private stream: Stream | null = null
+    private recoveryOverlay: StreamRecoveryOverlay
+    private recoveryShown = false
 
     private settings: Settings
 
@@ -329,8 +443,131 @@ class ViewerApp implements Component {
     private devConnectionLog: DevStreamConnectionLog | null = null
     private devConnectionLogPoll: ReturnType<typeof setInterval> | null = null
     private lastSidebarAnchorKey = ""
+    private settingsQuickButton: HTMLButtonElement | null = null
 
     private readonly streamConnectionConsoleLogger = new StreamConnectionInfoConsoleLogger()
+
+    private anchorSidebarToSettingsButton() {
+        const sidebarRoot = getSidebarRoot()
+        const button = this.settingsQuickButton
+        if (!sidebarRoot || !button) return
+        const rect = button.getBoundingClientRect()
+        const targetTop = Math.round(rect.top + (rect.height / 2))
+        sidebarRoot.style.left = ""
+        sidebarRoot.style.bottom = ""
+        sidebarRoot.style.right = "12px"
+        sidebarRoot.style.top = `${targetTop}px`
+    }
+
+    private syncSettingsQuickButtonVisibility() {
+        const button = this.settingsQuickButton
+        if (!button) return
+        // Hide settings quick arrow in fullscreen for immersive view.
+        button.style.display = this.isFullscreen() ? "none" : "flex"
+    }
+
+    private ensureSettingsQuickButton() {
+        if (this.settingsQuickButton) return
+        const button = document.createElement("button")
+        button.type = "button"
+        button.textContent = "❮"
+        button.setAttribute("aria-label", "Open sidebar controls")
+        button.title = "Open sidebar controls"
+        button.style.cssText =
+            "position:fixed;right:12px;bottom:72px;z-index:100010;" +
+            "width:48px;height:48px;padding:0;border-radius:12px;border:1px solid rgba(255,255,255,.78);" +
+            "background:rgba(0,0,0,.92);" +
+            "color:#ffffff;font-size:28px;font-weight:800;line-height:1;" +
+            "box-shadow:0 12px 24px rgba(0,0,0,.48),0 0 0 1px rgba(255,255,255,.08) inset;" +
+            "display:flex;align-items:center;justify-content:center;cursor:pointer"
+        button.addEventListener("mouseenter", () => {
+            button.style.transform = "scale(1.04)"
+            button.style.boxShadow = "0 14px 28px rgba(0,0,0,.52),0 0 18px rgba(255,255,255,.26)"
+        })
+        button.addEventListener("mouseleave", () => {
+            button.style.transform = "none"
+            button.style.boxShadow = "0 12px 24px rgba(0,0,0,.48),0 0 0 1px rgba(255,255,255,.08) inset"
+        })
+        let dragPointerId: number | null = null
+        let dragStartX = 0
+        let dragStartY = 0
+        let dragOffsetX = 0
+        let dragOffsetY = 0
+        let dragged = false
+        const DRAG_THRESHOLD = 6
+        const toggleFromQuickButton = () => {
+            if (isPhoneLikeDevice()) {
+                const screenKeyboard = this.sidebar.getScreenKeyboard()
+                if (screenKeyboard.isVisible()) {
+                    screenKeyboard.hide()
+                } else {
+                    setSidebarExtended(false)
+                    screenKeyboard.show()
+                }
+                return
+            }
+            setSidebarStyle({ edge: "right" })
+            this.anchorSidebarToSettingsButton()
+            if (isSidebarExtended()) {
+                setSidebarExtended(false)
+            } else {
+                setSidebarExtended(true)
+            }
+        }
+        button.addEventListener("pointerdown", (event: PointerEvent) => {
+            dragPointerId = event.pointerId
+            dragged = false
+            const rect = button.getBoundingClientRect()
+            dragStartX = event.clientX
+            dragStartY = event.clientY
+            dragOffsetX = event.clientX - rect.left
+            dragOffsetY = event.clientY - rect.top
+            button.setPointerCapture(event.pointerId)
+        })
+        button.addEventListener("pointermove", (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            const dx = event.clientX - dragStartX
+            const dy = event.clientY - dragStartY
+            if (!dragged && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
+                dragged = true
+            }
+            if (!dragged) return
+            const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+            const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+            const nextTop = Math.max(8, Math.min(vh - button.offsetHeight - 8, event.clientY - dragOffsetY))
+            // Constrain dragging to vertical movement on the right side only.
+            button.style.left = "auto"
+            button.style.bottom = "auto"
+            button.style.right = "12px"
+            button.style.top = `${nextTop}px`
+        })
+        button.addEventListener("pointerup", (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            if (button.hasPointerCapture(event.pointerId)) button.releasePointerCapture(event.pointerId)
+            dragPointerId = null
+            if (dragged) {
+                event.preventDefault()
+                event.stopImmediatePropagation()
+                dragged = false
+                return
+            }
+            toggleFromQuickButton()
+        })
+        button.addEventListener("pointercancel", (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            if (button.hasPointerCapture(event.pointerId)) button.releasePointerCapture(event.pointerId)
+            dragPointerId = null
+            dragged = false
+        })
+        button.addEventListener("keydown", (event: KeyboardEvent) => {
+            if (event.key !== "Enter" && event.key !== " ") return
+            event.preventDefault()
+            toggleFromQuickButton()
+        })
+        document.body.appendChild(button)
+        this.settingsQuickButton = button
+        this.syncSettingsQuickButtonVisibility()
+    }
 
     private adaptiveLog(message: string) {
         console.info(`[AdaptiveMouse] ${message}`)
@@ -517,34 +754,47 @@ class ViewerApp implements Component {
         // Configure sidebar
         this.sidebar = new ViewerSidebar(this)
         setSidebar(this.sidebar)
+        this.ensureSettingsQuickButton()
 
         // Configure stats element
         this.statsDiv.hidden = true
         this.statsDiv.classList.add("video-stats")
-        this.statsExpanded = localStorage.getItem("streamStatsExpanded") === "1"
+        this.statsMinimized = localStorage.getItem("streamStatsMinimized") === "1"
         this.statsTopBar.classList.add("video-stats-topbar")
-        this.statsTopBar.type = "button"
-        this.statsTopBar.setAttribute("aria-expanded", `${this.statsExpanded}`)
-        this.statsTopBar.addEventListener("click", () => {
-            this.statsExpanded = !this.statsExpanded
-            this.statsTopBar.setAttribute("aria-expanded", `${this.statsExpanded}`)
-            localStorage.setItem("streamStatsExpanded", this.statsExpanded ? "1" : "0")
-            if (!this.statsExpanded) {
-                this.statsDetailsDiv.classList.remove("video-stats-details-visible")
-            }
+        this.statsTopBar.addEventListener("pointerdown", this.onStatsPointerDown.bind(this))
+        this.statsTitleDiv.classList.add("video-stats-title")
+        this.statsTitleDiv.textContent = "Stream Stats"
+        this.statsActionsDiv.classList.add("video-stats-actions")
+        this.statsMinimizeButton.classList.add("video-stats-action-btn")
+        this.statsMinimizeButton.type = "button"
+        this.statsMinimizeButton.addEventListener("click", () => {
+            this.statsMinimized = !this.statsMinimized
+            localStorage.setItem("streamStatsMinimized", this.statsMinimized ? "1" : "0")
+        })
+        this.statsCloseButton.classList.add("video-stats-action-btn")
+        this.statsCloseButton.type = "button"
+        this.statsCloseButton.textContent = "×"
+        this.statsCloseButton.addEventListener("click", () => {
+            this.statsClosed = true
+            this.statsDiv.hidden = true
         })
         this.statsSummaryDiv.classList.add("video-stats-summary")
-        this.statsChevronDiv.classList.add("video-stats-chevron")
-        this.statsTopBar.appendChild(this.statsSummaryDiv)
-        this.statsTopBar.appendChild(this.statsChevronDiv)
         this.statsDetailsDiv.classList.add("video-stats-details")
+        this.statsTopBar.appendChild(this.statsTitleDiv)
+        this.statsActionsDiv.appendChild(this.statsMinimizeButton)
+        this.statsActionsDiv.appendChild(this.statsCloseButton)
+        this.statsTopBar.appendChild(this.statsActionsDiv)
         this.statsDiv.appendChild(this.statsTopBar)
+        this.statsDiv.appendChild(this.statsSummaryDiv)
+        this.statsDetailsDiv.classList.add("video-stats-details")
         this.statsDiv.appendChild(this.statsDetailsDiv)
+        document.addEventListener("pointermove", this.onStatsPointerMove.bind(this))
+        document.addEventListener("pointerup", this.onStatsPointerUp.bind(this))
 
         this.statsUpdateInterval = setInterval(() => {
             // Update stats display every 100ms
             const stats = this.getStream()?.getStats()
-            if (stats && stats.isEnabled()) {
+            if (stats && stats.isEnabled() && !this.statsClosed) {
                 this.statsDiv.hidden = false
                 const statsData = stats.getCurrentStats()
                 this.renderStatsOverlay(statsData)
@@ -556,6 +806,12 @@ class ViewerApp implements Component {
             }
         }, 500)
         this.div.appendChild(this.statsDiv)
+
+        this.recoveryOverlay = new StreamRecoveryOverlay(
+            () => { void this.retryAfterConnectionIssue() },
+            () => this.openSettingsModal(),
+            () => { void this.exitToLibrary() },
+        )
 
         this.createFullscreenExitCircle()
         this.createFileTransferProgressCircle()
@@ -641,14 +897,21 @@ class ViewerApp implements Component {
     }
 
     private async startStream(hostId: number, appId: number, settings: Settings, browserSize: [number, number]) {
-        // Hard-lock sidebar/icon to the left edge.
+        // Anchor sidebar/icon to the right edge by default.
         setSidebarStyle({
-            edge: "left",
+            edge: "right",
         })
 
         this.beginStartupOverlays()
+        this.recoveryOverlay.hide()
+        this.recoveryShown = false
+        this.latestConnectionState = "Connecting"
 
         this.stream = new Stream(this.api, hostId, appId, settings, browserSize)
+        // Apply viewer input config immediately (phone default touch mode, persisted modes, etc.)
+        // so users don't need to manually reselect modes in the sidebar.
+        this.stream.getInput().setConfig(this.inputConfig)
+        this.stream.getStats().setEnabled(true)
 
         // Add app info listener
         this.stream.addInfoListener(this.onInfo.bind(this))
@@ -665,6 +928,38 @@ class ViewerApp implements Component {
 
         this.stream.mount(this.div)
         this.moveSidebarRootIntoStreamLayer()
+    }
+
+    private openSettingsModal() {
+        this.recoveryOverlay.hide()
+        this.recoveryShown = false
+        showModal(new SettingsPanelModal(this))
+    }
+
+    private async retryAfterConnectionIssue() {
+        if (!this.recoveryShown) return
+        this.recoveryOverlay.setBusy(true)
+        window.location.reload()
+    }
+
+    async exitToLibrary() {
+        const stream = this.stream
+        if (stream) {
+            const success = await stream.stop()
+            if (!success) console.debug("Failed to close stream correctly")
+        }
+        window.close()
+    }
+
+    private showConnectionRecovery(message: string) {
+        if (this.recoveryShown) return
+        this.recoveryShown = true
+        this.startupConnectionResolved = true
+        this.waitingForFullscreenGesture = false
+        this.cleanupStartupOverlaysOnAbortOrUnmount()
+        MoonlightFullscreenOverlay.hide()
+        MoonlightLoadingScreen.hide()
+        this.recoveryOverlay.show(message)
     }
 
     getAppId(): number {
@@ -713,10 +1008,13 @@ class ViewerApp implements Component {
 
             document.title = `Stream: ${app.title}`
         } else if (data.type == "connectionComplete") {
+            this.latestConnectionState = "Connected"
             this.startupConnectionResolved = true
             this.waitingForFullscreenGesture = false
             this.sidebar.onCapabilitiesChange(data.capabilities)
             MoonlightLoadingScreen.hide()
+            this.recoveryOverlay.hide()
+            this.recoveryShown = false
         } else if (data.type == "hostCursorHidden") {
             this.latestHostCursorHidden = data.hidden
             if (data.hidden) {
@@ -764,16 +1062,23 @@ class ViewerApp implements Component {
                 data.additional &&
                 (data.additional.type === "fatal" || data.additional.type === "fatalDescription")
             ) {
-                this.startupConnectionResolved = true
-                this.waitingForFullscreenGesture = false
                 showErrorPopup(message)
-                MoonlightFullscreenOverlay.hide()
-                MoonlightLoadingScreen.hide()
+                this.latestConnectionState = "Failed"
+                this.showConnectionRecovery("The stream could not be established or was terminated. Retry to reconnect using the current configuration.")
             } else if (data.additional?.type === "informError") {
                 showErrorPopup(data.line)
+            } else if (message === "Web Socket Closed" || message === "Web Socket or WebRtcPeer Error") {
+                this.latestConnectionState = "Disconnected"
+                this.showConnectionRecovery("Connection was lost. Retry to reconnect, or open stream settings to adjust transport and quality.")
             }
         } else if (data.type == "serverMessage") {
             MoonlightLoadingScreen.setSubtitle(`Server: ${data.message}`)
+        } else if (data.type == "connectionStatus") {
+            const statusText = String(data.status).toLowerCase()
+            this.latestConnectionState = String(data.status)
+            if (statusText.includes("terminated") || statusText.includes("failed") || statusText.includes("disconnected")) {
+                this.showConnectionRecovery("The session has been disconnected. Retry to reconnect or close this page.")
+            }
         } else if (data.type == "fileTransferProgress") {
             this.updateFileTransferProgressCircle(data.percent, data.loaded, data.total, data.source)
         } else if (data.type == "fileTransferProgressEnd") {
@@ -1529,6 +1834,7 @@ class ViewerApp implements Component {
     }
     private async onFullscreenChange() {
         this.checkFullyImmersed()
+        this.syncSettingsQuickButtonVisibility()
         if (!this.isFullscreen()) {
             this.cancelFullscreenExitEscHold()
             this.releaseAllKeys("fullscreen exited")
@@ -1646,13 +1952,9 @@ class ViewerApp implements Component {
 
     // -- Fully immersed Fullscreen -> Fullscreen API + Pointer Lock
     private checkFullyImmersed() {
-        if ("pointerLockElement" in document && document.pointerLockElement &&
-            "fullscreenElement" in document && document.fullscreenElement) {
-            // We're fully immersed -> remove sidebar
-            setSidebar(null)
-        } else {
-            setSidebar(this.sidebar)
-        }
+        // Keep the sidebar opener available even in immersive mode so users
+        // can always access settings/controls without reloading.
+        setSidebar(this.sidebar)
         this.updateSidebarAnchorToStreamRect()
     }
 
@@ -1660,6 +1962,10 @@ class ViewerApp implements Component {
         parent.appendChild(this.div)
     }
     unmount(parent: HTMLElement): void {
+        if (this.settingsQuickButton?.parentElement) {
+            this.settingsQuickButton.parentElement.removeChild(this.settingsQuickButton)
+        }
+        this.settingsQuickButton = null
         if (this.keyWatchdogInterval != null) {
             clearInterval(this.keyWatchdogInterval)
             this.keyWatchdogInterval = null
@@ -1707,6 +2013,28 @@ class ViewerApp implements Component {
         }
         return text
     }
+    private getConnectionLatencyMs(statsData: StreamStatsData): number | null {
+        const webrtcRttMs = typeof statsData.transport.iceCurrentRoundTripTimeMs === "number"
+            ? statsData.transport.iceCurrentRoundTripTimeMs
+            : null
+        if (webrtcRttMs != null && Number.isFinite(webrtcRttMs) && webrtcRttMs > 0) {
+            return webrtcRttMs
+        }
+        return statsData.streamerRttMs ?? statsData.browserRtt
+    }
+    private iceCandidatePairType(statsData: StreamStatsData): string | null {
+        const localType = this.safeText(statsData.transport.iceLocalCandidateType).toLowerCase()
+        const remoteType = this.safeText(statsData.transport.iceRemoteCandidateType).toLowerCase()
+        const hasLocal = localType !== "n/a" && localType !== "unknown"
+        const hasRemote = remoteType !== "n/a" && remoteType !== "unknown"
+        if (!hasLocal && !hasRemote) {
+            return null
+        }
+        if (hasLocal && hasRemote) {
+            return `${localType}-${remoteType}`
+        }
+        return hasLocal ? localType : remoteType
+    }
     private unavailableText(value: unknown): string {
         const text = this.safeText(value)
         return text === "N/A" || text.toLowerCase() === "unknown" ? "Unavailable" : text
@@ -1743,88 +2071,132 @@ class ViewerApp implements Component {
         }
         return `${address}:${port}`
     }
-    private qualityLabel(statsData: StreamStatsData): { label: string, cls: string } {
-        const latency = statsData.streamerRttMs ?? statsData.browserRtt
-        const packetLoss = typeof statsData.transport.webrtcPacketsLost === "number" ? statsData.transport.webrtcPacketsLost : null
-        const droppedFrames = typeof statsData.transport.webrtcFramesDropped === "number" ? statsData.transport.webrtcFramesDropped : null
-        if ((latency != null && latency > 80) || (packetLoss != null && packetLoss > 20) || (droppedFrames != null && droppedFrames > 20)) {
-            return { label: "Poor", cls: "video-stats-quality-poor" }
+    private onStatsPointerDown(event: PointerEvent) {
+        const target = event.target as HTMLElement | null
+        if (target && target.closest(".video-stats-action-btn")) {
+            return
         }
-        if ((latency != null && latency > 45) || (packetLoss != null && packetLoss > 5) || (droppedFrames != null && droppedFrames > 5)) {
-            return { label: "Okay", cls: "video-stats-quality-okay" }
+        const rect = this.statsDiv.getBoundingClientRect()
+        this.statsDragging = true
+        this.statsDragOffsetX = event.clientX - rect.left
+        this.statsDragOffsetY = event.clientY - rect.top
+        this.statsDiv.classList.add("video-stats-dragging")
+    }
+    private onStatsPointerMove(event: PointerEvent) {
+        if (!this.statsDragging) return
+        const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+        const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+        const rect = this.statsDiv.getBoundingClientRect()
+        const nextLeft = Math.min(
+            Math.max(8, event.clientX - this.statsDragOffsetX),
+            Math.max(8, viewportWidth - rect.width - 8)
+        )
+        const nextTop = Math.min(
+            Math.max(8, event.clientY - this.statsDragOffsetY),
+            Math.max(8, viewportHeight - rect.height - 8)
+        )
+        this.statsDiv.style.left = `${nextLeft}px`
+        this.statsDiv.style.right = "auto"
+        this.statsDiv.style.top = `${nextTop}px`
+        this.statsDiv.style.transform = "none"
+    }
+    private onStatsPointerUp() {
+        if (!this.statsDragging) return
+        this.statsDragging = false
+        this.statsDiv.classList.remove("video-stats-dragging")
+    }
+    toggleStatsWidgetVisibility() {
+        const stats = this.getStream()?.getStats()
+        if (!stats) return
+        if (this.statsClosed) {
+            this.statsClosed = false
+            this.statsDiv.hidden = false
+            if (!stats.isEnabled()) {
+                stats.setEnabled(true)
+            }
+            return
         }
-        return { label: "Smooth", cls: "video-stats-quality-smooth" }
+        stats.toggle()
+    }
+    private connectionStatusLabel(statsData: StreamStatsData): string {
+        const latency = this.getConnectionLatencyMs(statsData)
+        const packetLoss = typeof statsData.transport.webrtcPacketsLost === "number"
+            ? statsData.transport.webrtcPacketsLost
+            : null
+        const packetsReceived = typeof statsData.transport.webrtcPacketsReceived === "number"
+            ? statsData.transport.webrtcPacketsReceived
+            : null
+        const lossPercent = packetLoss != null && packetsReceived != null && (packetLoss + packetsReceived) > 0
+            ? (packetLoss * 100) / (packetLoss + packetsReceived)
+            : null
+        const jitter = typeof statsData.transport.webrtcJitterMs === "number"
+            ? statsData.transport.webrtcJitterMs
+            : null
+        const fps = typeof statsData.transport.webrtcFps === "number"
+            ? statsData.transport.webrtcFps
+            : statsData.videoFps
+
+        if ((latency != null && latency >= 120) || (lossPercent != null && lossPercent >= 8) || (jitter != null && jitter >= 20) || (fps != null && fps < 20)) {
+            return "Very Bad"
+        }
+        if ((latency != null && latency >= 80) || (lossPercent != null && lossPercent >= 4) || (jitter != null && jitter >= 12) || (fps != null && fps < 35)) {
+            return "Bad"
+        }
+        if ((latency != null && latency >= 55) || (lossPercent != null && lossPercent >= 2) || (jitter != null && jitter >= 8) || (fps != null && fps < 50)) {
+            return "Normal"
+        }
+        if ((latency != null && latency >= 35) || (lossPercent != null && lossPercent >= 0.6) || (jitter != null && jitter >= 4) || (fps != null && fps < 58)) {
+            return "Good"
+        }
+        return "Very Good"
     }
     private renderStatsOverlay(statsData: StreamStatsData) {
-        const quality = this.qualityLabel(statsData)
-        const latency = statsData.streamerRttMs ?? statsData.browserRtt
+        const latency = this.getConnectionLatencyMs(statsData)
         const fps = typeof statsData.transport.webrtcFps === "number" ? statsData.transport.webrtcFps : statsData.videoFps
-        const bitrateMbps = this.computeBitrateMbps(statsData)
         const packetLoss = typeof statsData.transport.webrtcPacketsLost === "number" ? statsData.transport.webrtcPacketsLost : null
         const packetsReceived = typeof statsData.transport.webrtcPacketsReceived === "number" ? statsData.transport.webrtcPacketsReceived : null
         const packetLossPercent = packetLoss != null && packetsReceived != null && (packetLoss + packetsReceived) > 0
             ? (packetLoss * 100) / (packetLoss + packetsReceived)
             : null
         const jitter = typeof statsData.transport.webrtcJitterMs === "number" ? statsData.transport.webrtcJitterMs : null
-        const icePairState = this.safeText(statsData.transport.icePairState)
-        const iceProtocol = this.safeText(statsData.transport.iceLocalProtocol)
-        const iceLocalType = this.safeText(statsData.transport.iceLocalCandidateType)
-        const iceRemoteType = this.safeText(statsData.transport.iceRemoteCandidateType)
-        const iceLocalNetworkType = this.unavailableText(statsData.transport.iceLocalNetworkType)
-        const iceLocalAddress = this.safeText(statsData.transport.iceLocalAddress)
-        const iceLocalPort = this.safeText(statsData.transport.iceLocalPort)
-        const iceRemoteAddress = this.safeText(statsData.transport.iceRemoteAddress)
-        const iceRemotePort = this.safeText(statsData.transport.iceRemotePort)
+        const rawIceState = this.safeText(statsData.transport.icePairState)
+        const icePairState = rawIceState === "N/A" ? this.latestConnectionState : rawIceState
+        const iceCandidatePair = this.iceCandidatePairType(statsData)
+        const connectionStateLabel = iceCandidatePair ? `${icePairState} (${iceCandidatePair})` : icePairState
+        const connectionStatusLabel = this.connectionStatusLabel(statsData)
         const resolution = statsData.videoWidth != null && statsData.videoHeight != null
             ? `${statsData.videoWidth}x${statsData.videoHeight}`
             : "N/A"
         const codec = this.safeText(statsData.videoCodec)
-        const hdr = statsData.hdrEnabled === true ? "On" : statsData.hdrEnabled === false ? "Off" : "Unknown"
-        this.statsSummaryDiv.innerHTML = `
-            <span class="video-stats-chip" title="Overall stream quality from latency, dropped frames, and packet loss."><span class="video-stats-dot ${quality.cls}"></span>${quality.label}</span>
-            <span class="video-stats-chip" title="Round-trip latency between client and host."><span class="video-stats-label">Latency</span>${this.formatWithUnit(latency, "ms", 0)}</span>
-            <span class="video-stats-chip" title="Actual rendered frames per second from WebRTC stats."><span class="video-stats-label">FPS</span>${this.formatWithUnit(fps, "fps", 0)}</span>
-            <span class="video-stats-chip" title="Estimated incoming video bitrate from ICE bytes over time."><span class="video-stats-label">Bitrate</span>${this.formatWithUnit(bitrateMbps, "Mbps", 1)}</span>
-        `
-        this.statsChevronDiv.textContent = this.statsExpanded ? "▴" : "▾"
-        if (!this.statsExpanded) {
-            this.statsDetailsDiv.classList.remove("video-stats-details-visible")
-            this.statsDetailsDiv.innerHTML = ""
+        this.statsMinimizeButton.textContent = this.statsMinimized ? "▢" : "—"
+        this.statsTopBar.classList.toggle("video-stats-topbar-mini", this.statsMinimized)
+        this.statsDetailsDiv.classList.remove("video-stats-mini", "video-stats-details-visible")
+        this.statsDetailsDiv.innerHTML = ""
+
+        if (this.statsMinimized) {
+            this.statsTitleDiv.innerHTML = `
+                <span class="video-stats-chip"><span class="video-stats-label">FPS</span>${this.formatWithUnit(fps, "fps", 0)}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">Latency</span>${this.formatWithUnit(latency, "ms", 0)}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">Status</span>${connectionStatusLabel}</span>
+            `
+            this.statsSummaryDiv.hidden = true
+            this.statsSummaryDiv.innerHTML = ""
             return
         }
-        this.statsDetailsDiv.classList.add("video-stats-details-visible")
-        this.statsDetailsDiv.innerHTML = `
-            <section class="video-stats-section">
-                <h4>Connection (Most Important)</h4>
-                <div class="video-stats-grid">
-                    <div title="Round-trip latency between client and host."><span class="video-stats-label">RTT:</span> ${this.formatWithUnit(statsData.streamerRttMs, "ms", 0)}</div>
-                    <div title="How much latency fluctuates over time. Lower is more stable."><span class="video-stats-label">Variance:</span> ${this.formatWithUnit(statsData.streamerRttVarianceMs, "ms", 2)}</div>
-                    <div title="Estimated incoming video bitrate from transport stats."><span class="video-stats-label">Bitrate:</span> ${this.formatWithUnit(bitrateMbps, "Mbps", 1)}</div>
-                    <div title="Actual rendered frame rate."><span class="video-stats-label">FPS:</span> ${this.formatWithUnit(fps, "fps", 0)}</div>
-                    <div title="Packet loss ratio based on packets lost vs total packets."><span class="video-stats-label">Packet Loss:</span> ${packetLossPercent != null ? `${packetLossPercent.toFixed(2)}% (${this.safeText(packetLoss)})` : "N/A"}</div>
-                    <div title="Current jitter value from WebRTC inbound stream."><span class="video-stats-label">Jitter:</span> ${this.formatWithUnit(jitter, "ms", 2)}</div>
-                </div>
-            </section>
-            <section class="video-stats-section">
-                <h4>ICE / Route</h4>
-                <div class="video-stats-grid">
-                    <div title="Selected ICE pair connection state."><span class="video-stats-label">Pair:</span> ${icePairState}</div>
-                    <div title="Network protocol used by selected route (usually UDP)."><span class="video-stats-label">Protocol:</span> ${iceProtocol}</div>
-                    <div title="Local and remote candidate types (e.g. host, srflx, relay, prflx)."><span class="video-stats-label">Type:</span> ${iceLocalType} -> ${iceRemoteType}</div>
-                    <div title="Client-side candidate address and port selected for ICE route."><span class="video-stats-label">Client Candidate:</span> ${this.endpoint(iceLocalAddress, iceLocalPort)}</div>
-                    <div title="Peer candidate address and port selected for ICE route."><span class="video-stats-label">Peer Candidate:</span> ${this.endpoint(iceRemoteAddress, iceRemotePort)}</div>
-                    <div title="Detected network type for the local candidate (for example wifi or ethernet)."><span class="video-stats-label">Network:</span> ${iceLocalNetworkType}</div>
-                </div>
-            </section>
-            <section class="video-stats-section">
-                <h4>Video</h4>
-                <div class="video-stats-grid">
-                    <div title="Video codec used for this stream."><span class="video-stats-label">Codec:</span> ${codec}</div>
-                    <div title="Current decoded video resolution."><span class="video-stats-label">Resolution:</span> ${resolution}</div>
-                    <div title="High Dynamic Range status."><span class="video-stats-label">HDR:</span> ${hdr}</div>
-                </div>
-            </section>
+
+        this.statsTitleDiv.textContent = "Stream Stats"
+        this.statsSummaryDiv.hidden = false
+        this.statsSummaryDiv.innerHTML = `
+            <span class="video-stats-row"><span class="video-stats-label">Connection State</span><span>${connectionStateLabel}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">Status</span><span>${connectionStatusLabel}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">FPS</span><span>${this.formatWithUnit(fps, "fps", 0)}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">Latency</span><span>${this.formatWithUnit(latency, "ms", 0)}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">Video Codec</span><span>${codec}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">Resolution</span><span>${resolution}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">Jitter</span><span>${this.formatWithUnit(jitter, "ms", 2)}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">Loss</span><span>${packetLossPercent != null ? `${packetLossPercent.toFixed(2)}%` : "N/A"}</span></span>
         `
+        this.statsDetailsDiv.classList.remove("video-stats-details-visible")
     }
 
     getStreamRect(): DOMRect {
@@ -1836,6 +2208,12 @@ class ViewerApp implements Component {
     private updateSidebarAnchorToStreamRect() {
         const sidebarRoot = getSidebarRoot()
         if (!sidebarRoot) {
+            return
+        }
+
+        if (this.settingsQuickButton) {
+            this.anchorSidebarToSettingsButton()
+            this.lastSidebarAnchorKey = "quick-button-anchor"
             return
         }
 
@@ -1856,7 +2234,13 @@ class ViewerApp implements Component {
             return
         }
 
-        const edge = "left" as string
+        const edge = sidebarRoot.classList.contains("sidebar-edge-right")
+            ? "right"
+            : sidebarRoot.classList.contains("sidebar-edge-up")
+                ? "up"
+                : sidebarRoot.classList.contains("sidebar-edge-down")
+                    ? "down"
+                    : "left"
         const streamLeft = Math.max(0, Math.min(viewportWidth, streamRect.left))
         const streamRightInset = Math.max(0, Math.min(viewportWidth, viewportWidth - streamRect.right))
         const streamTop = Math.max(0, Math.min(viewportHeight, streamRect.top))
@@ -1912,17 +2296,14 @@ class ViewerApp implements Component {
 
     private moveSidebarRootIntoStreamLayer() {
         const sidebarRoot = getSidebarRoot()
-        const streamLayer = this.stream && (this.stream as any).divElement instanceof HTMLElement ? (this.stream as any).divElement as HTMLElement : null
-        if (!sidebarRoot || !streamLayer) {
+        if (!sidebarRoot) {
             return
         }
-        if (sidebarRoot.parentElement !== streamLayer) {
-            streamLayer.appendChild(sidebarRoot)
+        // Keep sidebar on body so it never gets hidden by stream-layer stacking contexts.
+        if (sidebarRoot.parentElement !== document.body) {
+            document.body.appendChild(sidebarRoot)
         }
-        const videoNode = streamLayer.querySelector("video.video-stream, canvas.video-stream")
-        if (videoNode && sidebarRoot.nextSibling !== videoNode) {
-            streamLayer.insertBefore(sidebarRoot, videoNode)
-        }
+        sidebarRoot.style.zIndex = "100002"
     }
     getStream(): Stream | null {
         return this.stream
@@ -2025,7 +2406,7 @@ class ConnectionInfoModal implements Modal<void> {
         this.root.appendChild(this.options)
         this.options.classList.add("modal-video-connect-options")
 
-        this.debugDetailButton.innerText = "Show Logs"
+        this.debugDetailButton.innerText = "View Logs"
         this.debugDetailButton.addEventListener("click", this.onDebugDetailClick.bind(this))
         this.options.appendChild(this.debugDetailButton)
 
@@ -2041,7 +2422,7 @@ class ConnectionInfoModal implements Modal<void> {
         let debugDetailCurrentlyShown = this.root.contains(this.debugDetailDisplay)
 
         if (debugDetailCurrentlyShown) {
-            this.debugDetailButton.innerText = "Show Logs"
+            this.debugDetailButton.innerText = "View Logs"
             this.root.removeChild(this.debugDetailDisplay)
         } else {
             this.debugDetailButton.innerText = "Hide Logs"
@@ -2198,7 +2579,7 @@ class SettingsPanelModal implements Component, Modal<null> {
         speedtestContainer.appendChild(speedtestTitle)
 
         const speedtestButton = document.createElement("button")
-        speedtestButton.innerText = "Test SpeedTest"
+        speedtestButton.innerText = "Run Speed Test"
         speedtestContainer.appendChild(speedtestButton)
 
         const speedtestResult = document.createElement("div")
@@ -2528,14 +2909,14 @@ class ViewerSidebar implements Component, Sidebar {
         this.screenKeyboard.addKeyDownListener(this.onKeyDown.bind(this))
         this.screenKeyboard.addKeyUpListener(this.onKeyUp.bind(this))
         this.screenKeyboard.addTextListener(this.onText.bind(this))
-        this.div.appendChild(this.screenKeyboard.getHiddenElement())
+        document.body.appendChild(this.screenKeyboard.getHiddenElement())
 
         this.uploadDoneAnnouncementButton = document.createElement("button")
         this.uploadDoneAnnouncementButton.classList.add("upload-done-announcement")
         this.uploadDoneAnnouncementButton.type = "button"
         this.uploadDoneAnnouncementTitle = document.createElement("span")
         this.uploadDoneAnnouncementTitle.classList.add("upload-done-announcement-title")
-        this.uploadDoneAnnouncementTitle.textContent = "NextGPU announces"
+        this.uploadDoneAnnouncementTitle.textContent = "Upload Status"
         this.uploadDoneAnnouncementMessage = document.createElement("span")
         this.uploadDoneAnnouncementMessage.classList.add("upload-done-announcement-message")
         this.uploadDoneAnnouncementButton.appendChild(this.uploadDoneAnnouncementTitle)
@@ -2610,8 +2991,7 @@ class ViewerSidebar implements Component, Sidebar {
         statsHeaderPhone.appendChild(statsIconPhone)
         statsHeaderPhone.appendChild(document.createTextNode("Stats"))
         statsHeaderPhone.addEventListener("click", () => {
-            const stats = this.app.getStream()?.getStats()
-            if (stats) stats.toggle()
+            this.app.toggleStatsWidgetVisibility()
         })
         phonePanelHeader.appendChild(statsHeaderPhone)
         this.phonePanelView.appendChild(phonePanelHeader)
@@ -2710,8 +3090,7 @@ class ViewerSidebar implements Component, Sidebar {
         statsHeaderPc.appendChild(statsIconPc)
         statsHeaderPc.appendChild(document.createTextNode("Stats"))
         statsHeaderPc.addEventListener("click", () => {
-            const stats = this.app.getStream()?.getStats()
-            if (stats) stats.toggle()
+            this.app.toggleStatsWidgetVisibility()
         })
         pcPanelHeader.appendChild(statsHeaderPc)
         this.pcPanelView.appendChild(pcPanelHeader)
@@ -2857,8 +3236,7 @@ class ViewerSidebar implements Component, Sidebar {
         this.statsButton.appendChild(statsIcon)
         this.statsButton.appendChild(document.createTextNode("Stats"))
         this.statsButton.addEventListener("click", () => {
-            const stats = this.app.getStream()?.getStats()
-            if (stats) stats.toggle()
+            this.app.toggleStatsWidgetVisibility()
         })
 
         this.exitStreamButton = document.createElement("button")
@@ -2870,13 +3248,7 @@ class ViewerSidebar implements Component, Sidebar {
         this.exitStreamButton.appendChild(exitIcon)
         this.exitStreamButton.appendChild(document.createTextNode("Exit"))
         this.exitStreamButton.addEventListener("click", async () => {
-            const stream = this.app.getStream()
-            if (stream) {
-                const success = await stream.stop()
-                if (!success) console.debug("Failed to close stream correctly")
-            }
-            if (window.matchMedia('(display-mode: standalone)').matches) history.back()
-            else window.close()
+            await this.app.exitToLibrary()
         })
 
         this.commonSection.appendChild(this.uploadFileButton)
@@ -2964,6 +3336,10 @@ class ViewerSidebar implements Component, Sidebar {
     }
     unmount(parent: HTMLElement): void {
         parent.removeChild(this.div)
+        const keyboardRoot = this.screenKeyboard.getHiddenElement()
+        if (keyboardRoot.parentElement) {
+            keyboardRoot.parentElement.removeChild(keyboardRoot)
+        }
     }
 }
 

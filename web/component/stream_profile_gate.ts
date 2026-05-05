@@ -169,23 +169,23 @@ const CARDS: {
     {
         id: "performance",
         title: "Performance",
-        desc: "Prioritizes quick reactions. Easiest on the PC doing the decoding.",
-        tagline: "1080p · standard smooth video",
+        desc: "Prioritizes low input latency and responsiveness.",
+        tagline: "1080p · optimized for responsiveness",
         kbd: "Press 1",
     },
     {
         id: "balance",
         title: "Balance",
-        desc: "Our suggested default: sharper than Full HD, still very playable.",
-        tagline: "1440p · can use higher refresh if your host supports it",
+        desc: "Recommended default for most sessions: balanced clarity and responsiveness.",
+        tagline: "1440p · supports higher refresh when available",
         kbd: "Press 2",
         recommended: true,
     },
     {
         id: "quality",
         title: "Quality",
-        desc: "The most pixels. Pick this when you want maximum clarity on a strong setup.",
-        tagline: "4K · needs more GPU & network headroom",
+        desc: "Highest visual fidelity for high-end network and hardware conditions.",
+        tagline: "4K · requires additional GPU and network headroom",
         kbd: "Press 3",
     },
 ]
@@ -213,13 +213,13 @@ function showProfilePickerUi(): Promise<StreamProfileId> {
 
     const h1 = document.createElement("h1")
     h1.id = "ml-profile-gate-title"
-    h1.textContent = "Choose stream mode"
+    h1.textContent = "Select Stream Profile"
     shell.appendChild(h1)
 
     const sub = document.createElement("p")
     sub.className = "ml-profile-gate-sub"
     sub.textContent =
-        "Unsure what to pick? Balance is the best match for most people. You can adjust bitrate and more in settings after you connect."
+        "Balance is recommended for most users. You can fine-tune stream settings after connection."
     shell.appendChild(sub)
 
     const row = document.createElement("div")

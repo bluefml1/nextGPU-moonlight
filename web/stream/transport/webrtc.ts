@@ -76,6 +76,8 @@ export class WebRTCTransport implements Transport {
     private lastPathScoreLogAt = 0
     private readonly pathScoreLogCooldownMs = 1500
     onIceRestartRequested: (() => void) | null = null
+    private connectedOnce = false
+    private readonly lockIceAfterConnected = true
 
     constructor(logger?: Logger) {
         this.logger = logger ?? null
@@ -570,7 +572,7 @@ export class WebRTCTransport implements Transport {
         }
          // Avoid renegotiation spam: only allow one negotiation at a time
         if (this.isNegotiating || this.peer.signalingState !== "stable") {
-            this.logger?.debug(`OnNegotiationNeeded ignored because negotiation is already in progress or signalingState=${this.peer.signalingState}`)
+            this.logger?.debug("OnNegotiationNeeded ignored because negotiation is already in progress")
             return
         }
 
@@ -672,6 +674,9 @@ export class WebRTCTransport implements Transport {
     }
 
     private onIceCandidate(event: RTCPeerConnectionIceEvent) {
+        if (this.lockIceAfterConnected && this.connectedOnce) {
+            return
+        }
         if (event.candidate) {
             const candidate = event.candidate.toJSON()
             const candidateLine = candidate.candidate ?? ""
@@ -823,6 +828,9 @@ export class WebRTCTransport implements Transport {
 
     private iceCandidates: Array<RTCIceCandidateInit> = []
     private async addIceCandidate(candidate: RTCIceCandidateInit) {
+        if (this.lockIceAfterConnected && this.connectedOnce) {
+            return
+        }
         this.logger?.debug(`Received ice candidate: ${candidate.candidate}`)
         const candidateLine = (candidate.candidate ?? "").toLowerCase()
         if (candidateLine.includes(" tcp ")) {
@@ -870,6 +878,9 @@ export class WebRTCTransport implements Transport {
         if (!this.peer) {
             return
         }
+        if (this.lockIceAfterConnected && this.connectedOnce) {
+            return
+        }
         if (this.restartAttempts >= this.maxRestartAttempts) {
             this.logger?.debug(`Skipping ICE restart (${reason}): max retries reached`)
             return
@@ -900,9 +911,14 @@ export class WebRTCTransport implements Transport {
         let type: null | "fatal" | "recover" = null
 
         if (this.peer.connectionState == "connected") {
+            this.connectedOnce = true
             type = "recover"
             this.delayedLocalRelayCandidates.length = 0
             this.delayedRemoteRelayCandidates.length = 0
+            if (this.restartTimer != null) {
+                clearTimeout(this.restartTimer)
+                this.restartTimer = null
+            }
             if (!this.fileTransferChannel) {
                 this.fileTransferChannel = this.setupFileSender(this.peer)
             }
@@ -1306,8 +1322,6 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug("OnSignalingStateChange without a peer")
             return
         }
-        this.logger?.debug(`Changing Peer Signaling State to ${this.peer.signalingState}`)
-
         // Once we return to a stable signaling state, allow new negotiations
         if (this.peer.signalingState === "stable") {
             this.isNegotiating = false
@@ -1326,15 +1340,22 @@ export class WebRTCTransport implements Transport {
             }
             void this.logSelectedCandidatePairDetails()
         } else if (this.peer.iceConnectionState == "disconnected") {
-            this.scheduleIceRestart("disconnected")
+            if (!(this.lockIceAfterConnected && this.connectedOnce)) {
+                this.scheduleIceRestart("disconnected")
+            }
         } else if (this.peer.iceConnectionState == "failed") {
-            this.scheduleIceRestart("failed")
+            if (!(this.lockIceAfterConnected && this.connectedOnce)) {
+                this.scheduleIceRestart("failed")
+            }
             void this.logSelectedCandidatePairDetails()
         }
     }
     private onIceGatheringStateChange() {
         if (!this.peer) {
             this.logger?.debug("OnIceGatheringStateChange without a peer")
+            return
+        }
+        if (this.lockIceAfterConnected && this.connectedOnce) {
             return
         }
         this.logger?.debug(`Changing Peer Ice Gathering State to ${this.peer.iceGatheringState}`)
@@ -1634,7 +1655,10 @@ export class WebRTCTransport implements Transport {
                     statsData.icePairState = selectedPair.state ?? "unknown"
                     statsData.iceBytesReceived = selectedPair.bytesReceived ?? 0
                     statsData.iceBytesSent = selectedPair.bytesSent ?? 0
-                    statsData.iceCurrentRoundTripTimeMs = selectedPair.currentRoundTripTime ?? 0
+                    // W3C currentRoundTripTime is reported in seconds.
+                    statsData.iceCurrentRoundTripTimeMs = selectedPair.currentRoundTripTime != null
+                        ? selectedPair.currentRoundTripTime * 1000
+                        : 0
                     if (local) {
                         statsData.iceLocalProtocol = local.protocol ?? "unknown"
                         statsData.iceLocalCandidateType = local.candidateType ?? "unknown"

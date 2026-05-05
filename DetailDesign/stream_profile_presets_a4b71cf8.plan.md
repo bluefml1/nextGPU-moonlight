@@ -51,8 +51,8 @@ These are the **exact** `Partial<Settings>` values to implement in `STREAM_PROFI
 
 | Tier | bitrate | packetSize | fps | videoCodec | videoSize (enum) | Notes |
 |------|---------|------------|-----|--------------|------------------|--------|
-| Performance | `10000` | `256` | `60` | `h264` | *(see table below)* | |
-| Balance | `10000` | `512` | `90` | `h265` | `"1440p"` (“2K”) | No `"2k"` literal in [`Settings`](web/component/settings_menu.ts); use **`1440p`** (2560×1440) from [`VIDEO_PRESETS`](web/component/settings_menu.ts). |
+| Performance | `10000` | `1024` | `60` | `h265` | *(see table below)* | |
+| Balance | `10000` | `1024` | `60` | `h265` | `"1440p"` (“2K”) | No `"2k"` literal in [`Settings`](web/component/settings_menu.ts); use **`1440p`** (2560×1440) from [`VIDEO_PRESETS`](web/component/settings_menu.ts). |
 | Quality | `10000` | `1024` | `60` | `h265` | `"4k"` | 3840×2160 via same preset table. |
 
 **QA / host**: `fps: 90` requires host and Sunshine/GFE pipeline support; validate on target rigs. **4K at 10 Mbps** will be aggressively compressed; card UI may still advertise “4K” while noting bandwidth is capped if you add copy later.
@@ -62,9 +62,9 @@ These are the **exact** `Partial<Settings>` values to implement in `STREAM_PROFI
 | Field | Value |
 |--------|--------|
 | `bitrate` | `10000` |
-| `packetSize` | `256` |
+| `packetSize` | `1024` |
 | `fps` | `60` |
-| `videoCodec` | `"h264"` |
+| `videoCodec` | `"h265"` |
 
 Resolution not specified by product: use **`videoSize` `"1080p"`** and **`videoSizeCustom` `{ width: 1920, height: 1080 }`** so Performance stays a lighter tier than Balance (2K) / Quality (4K).
 
@@ -86,8 +86,8 @@ Resolution not specified by product: use **`videoSize` `"1080p"`** and **`videoS
 | Field | Value |
 |--------|--------|
 | `bitrate` | `10000` |
-| `packetSize` | `512` |
-| `fps` | `90` |
+| `packetSize` | `1024` |
+| `fps` | `60` |
 | `videoCodec` | `"h265"` |
 | `videoSize` | `"1440p"` |
 | `videoSizeCustom` | `{ width: 2560, height: 1440 }` |
@@ -123,7 +123,7 @@ Resolution not specified by product: use **`videoSize` `"1080p"`** and **`videoS
 
 - **Apply order**: `structuredClone` / deep copy base → assign overlay keys → `setLocalStreamSettings`. For nested `videoSizeCustom` and `controllerConfig`, assign **whole objects** for overlay keys to avoid half-merged objects.
 - **CONFIG.default_settings**: Server-injected defaults still apply to the baseline `defaultSettings()` object; profile overlay runs on top of **saved** `getLocalStreamSettings() ?? defaultSettings()` per §Design decisions (3). Document in code if you later want “profile ignores CONFIG” (not in this plan).
-- **Card copy**: e.g. Performance “10 Mbps · 256 · 60 · H.264 · 1080p”; Balance “10 Mbps · 512 · 90 · HEVC · 1440p (2K)”; Quality “10 Mbps · 1024 · 60 · HEVC · 4K”.
+- **Card copy**: e.g. Performance “10 Mbps · 1024 · 60 · HEVC · 1080p”; Balance “10 Mbps · 1024 · 60 · HEVC · 1440p (2K)”; Quality “10 Mbps · 1024 · 60 · HEVC · 4K”.
 - **HEVC**: Balance and Quality use `h265`; if QA finds decode/host issues, consider preset `auto` for those tiers only.
 
 ## UI (“production gaming grade”)
