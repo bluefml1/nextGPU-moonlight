@@ -12,9 +12,9 @@ export type StreamProfileId = "performance" | "balance" | "quality"
 const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
     performance: {
         bitrate: 10000,
-        packetSize: 256,
+        packetSize: 1024,
         fps: 60,
-        videoCodec: "h264",
+        videoCodec: "h265",
         videoFrameQueueSize: 2,
         videoSize: "1080p",
         videoSizeCustom: { width: 1920, height: 1080 },
@@ -28,8 +28,8 @@ const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
     },
     balance: {
         bitrate: 10000,
-        packetSize: 512,
-        fps: 90,
+        packetSize: 1024,
+        fps: 60,
         videoCodec: "h265",
         videoSize: "1440p",
         videoSizeCustom: { width: 2560, height: 1440 },
