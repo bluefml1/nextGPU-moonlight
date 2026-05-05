@@ -26,6 +26,29 @@ import { runStreamProfileGate } from "./component/stream_profile_gate.js";
 /** Persisted stream viewer mouse/touch mode (separate from `mlSettings`). */
 const ML_STREAM_INPUT_MODES_KEY = "mlStreamInputModes"
 
+function isPhoneLikeDevice(): boolean {
+    try {
+        const ua = navigator.userAgent || ""
+        const isiPadLike = /iPad/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+        const isTabletUa = /Tablet|Android/.test(ua)
+        const touchPrimary = !window.matchMedia("(hover: hover) and (pointer: fine)").matches
+        return (
+            ("maxTouchPoints" in navigator && navigator.maxTouchPoints > 0) &&
+            (window.matchMedia("(pointer: coarse)").matches || isiPadLike || (isTabletUa && touchPrimary))
+        )
+    } catch {
+        return false
+    }
+}
+
+function defaultStreamInputConfigForDevice(): StreamInputConfig {
+    const config = defaultStreamInputConfig()
+    if (isPhoneLikeDevice()) {
+        config.touchMode = "touch"
+    }
+    return config
+}
+
 function mergePersistedStreamInputModes(base: StreamInputConfig): StreamInputConfig {
     try {
         const raw = localStorage.getItem(ML_STREAM_INPUT_MODES_KEY)
@@ -389,7 +412,7 @@ class ViewerApp implements Component {
 
     private settings: Settings
 
-    private inputConfig: StreamInputConfig = mergePersistedStreamInputModes(defaultStreamInputConfig())
+    private inputConfig: StreamInputConfig = mergePersistedStreamInputModes(defaultStreamInputConfigForDevice())
     private previousMouseMode: MouseMode
     private toggleFullscreenWithKeybind: boolean
 
@@ -425,6 +448,7 @@ class ViewerApp implements Component {
     private devConnectionLogPoll: ReturnType<typeof setInterval> | null = null
     private lastSidebarAnchorKey = ""
     private settingsQuickButton: HTMLButtonElement | null = null
+    private keyboardFallbackButton: HTMLButtonElement | null = null
 
     private readonly streamConnectionConsoleLogger = new StreamConnectionInfoConsoleLogger()
 
@@ -440,20 +464,71 @@ class ViewerApp implements Component {
         sidebarRoot.style.top = `${targetTop}px`
     }
 
+    private syncSettingsQuickButtonVisibility() {
+        const button = this.settingsQuickButton
+        if (!button) return
+        if (isPhoneLikeDevice()) {
+            button.style.display = "none"
+            this.syncKeyboardFallbackButtonVisibility()
+            return
+        }
+        // Keep quick arrow visible on touch/tablet devices in fullscreen so it can toggle keyboard.
+        button.style.display = this.isFullscreen() ? "none" : "flex"
+        // In fullscreen, keep arrow above any overlay layers so taps always reach it.
+        button.style.zIndex = this.isFullscreen() ? "200000" : "200000"
+        this.syncKeyboardFallbackButtonVisibility()
+    }
+
+    private syncKeyboardFallbackButtonVisibility() {
+        const button = this.keyboardFallbackButton
+        if (!button) return
+        const show = isPhoneLikeDevice()
+        button.style.display = show ? "flex" : "none"
+    }
+
+    private ensureKeyboardFallbackButton() {
+        if (this.keyboardFallbackButton) return
+        const button = document.createElement("button")
+        button.type = "button"
+        button.id = "ml-keyboard-fallback-button"
+        button.textContent = "Keyboard"
+        button.setAttribute("aria-label", "Toggle keyboard")
+        button.title = "Toggle keyboard"
+        button.style.cssText =
+            "position:fixed;right:68px;bottom:72px;z-index:210000;display:none;" +
+            "height:40px;padding:0 14px;border-radius:11px;border:1px solid rgba(255,255,255,.72);" +
+            "background:rgba(0,0,0,.92);color:#fff;font:700 13px system-ui,sans-serif;letter-spacing:.02em;" +
+            "align-items:center;justify-content:center;touch-action:manipulation"
+        button.addEventListener("click", (event: MouseEvent) => {
+            event.preventDefault()
+            const screenKeyboard = this.sidebar.getScreenKeyboard()
+            if (screenKeyboard.isVisible() || screenKeyboard.isActuallyVisible()) {
+                screenKeyboard.hide()
+            } else {
+                setSidebarExtended(false)
+                screenKeyboard.show()
+            }
+        })
+        document.body.appendChild(button)
+        this.keyboardFallbackButton = button
+        this.syncKeyboardFallbackButtonVisibility()
+    }
+
     private ensureSettingsQuickButton() {
         if (this.settingsQuickButton) return
         const button = document.createElement("button")
         button.type = "button"
+        button.id = "ml-settings-quick-button"
         button.textContent = "❮"
         button.setAttribute("aria-label", "Open sidebar controls")
         button.title = "Open sidebar controls"
         button.style.cssText =
-            "position:fixed;right:12px;bottom:72px;z-index:100004;" +
+            "position:fixed;right:12px;bottom:72px;z-index:200000;" +
             "width:48px;height:48px;padding:0;border-radius:12px;border:1px solid rgba(255,255,255,.78);" +
             "background:rgba(0,0,0,.92);" +
             "color:#ffffff;font-size:28px;font-weight:800;line-height:1;" +
             "box-shadow:0 12px 24px rgba(0,0,0,.48),0 0 0 1px rgba(255,255,255,.08) inset;" +
-            "display:flex;align-items:center;justify-content:center;cursor:pointer"
+            "display:flex;align-items:center;justify-content:center;cursor:pointer;touch-action:manipulation"
         button.addEventListener("mouseenter", () => {
             button.style.transform = "scale(1.04)"
             button.style.boxShadow = "0 14px 28px rgba(0,0,0,.52),0 0 18px rgba(255,255,255,.26)"
@@ -468,8 +543,19 @@ class ViewerApp implements Component {
         let dragOffsetX = 0
         let dragOffsetY = 0
         let dragged = false
+        let suppressClickUntilMs = 0
         const DRAG_THRESHOLD = 6
         const toggleFromQuickButton = () => {
+            if (isPhoneLikeDevice()) {
+                const screenKeyboard = this.sidebar.getScreenKeyboard()
+                if (screenKeyboard.isVisible() || screenKeyboard.isActuallyVisible()) {
+                    screenKeyboard.hide()
+                } else {
+                    setSidebarExtended(false)
+                    screenKeyboard.show()
+                }
+                return
+            }
             setSidebarStyle({ edge: "right" })
             this.anchorSidebarToSettingsButton()
             if (isSidebarExtended()) {
@@ -477,6 +563,39 @@ class ViewerApp implements Component {
             } else {
                 setSidebarExtended(true)
             }
+        }
+        const triggerToggleFromButton = () => toggleFromQuickButton()
+        const onDocumentPointerMove = (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            const dx = event.clientX - dragStartX
+            const dy = event.clientY - dragStartY
+            if (!dragged && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
+                dragged = true
+            }
+            if (!dragged) return
+            const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+            const nextTop = Math.max(8, Math.min(vh - button.offsetHeight - 8, event.clientY - dragOffsetY))
+            // Constrain dragging to vertical movement on the right side only.
+            button.style.left = "auto"
+            button.style.bottom = "auto"
+            button.style.right = "12px"
+            button.style.top = `${nextTop}px`
+        }
+        const onDocumentPointerEnd = (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            dragPointerId = null
+            document.removeEventListener("pointermove", onDocumentPointerMove)
+            document.removeEventListener("pointerup", onDocumentPointerEnd)
+            document.removeEventListener("pointercancel", onDocumentPointerEnd)
+            if (dragged) {
+                event.preventDefault()
+                event.stopImmediatePropagation()
+                dragged = false
+                suppressClickUntilMs = Date.now() + 500
+                return
+            }
+            suppressClickUntilMs = Date.now() + 500
+            triggerToggleFromButton()
         }
         button.addEventListener("pointerdown", (event: PointerEvent) => {
             dragPointerId = event.pointerId
@@ -486,50 +605,26 @@ class ViewerApp implements Component {
             dragStartY = event.clientY
             dragOffsetX = event.clientX - rect.left
             dragOffsetY = event.clientY - rect.top
-            button.setPointerCapture(event.pointerId)
-        })
-        button.addEventListener("pointermove", (event: PointerEvent) => {
-            if (dragPointerId == null || event.pointerId !== dragPointerId) return
-            const dx = event.clientX - dragStartX
-            const dy = event.clientY - dragStartY
-            if (!dragged && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
-                dragged = true
-            }
-            if (!dragged) return
-            const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
-            const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
-            const nextTop = Math.max(8, Math.min(vh - button.offsetHeight - 8, event.clientY - dragOffsetY))
-            // Constrain dragging to vertical movement on the right side only.
-            button.style.left = "auto"
-            button.style.bottom = "auto"
-            button.style.right = "12px"
-            button.style.top = `${nextTop}px`
-        })
-        button.addEventListener("pointerup", (event: PointerEvent) => {
-            if (dragPointerId == null || event.pointerId !== dragPointerId) return
-            if (button.hasPointerCapture(event.pointerId)) button.releasePointerCapture(event.pointerId)
-            dragPointerId = null
-            if (dragged) {
-                event.preventDefault()
-                event.stopImmediatePropagation()
-                dragged = false
-                return
-            }
-            toggleFromQuickButton()
-        })
-        button.addEventListener("pointercancel", (event: PointerEvent) => {
-            if (dragPointerId == null || event.pointerId !== dragPointerId) return
-            if (button.hasPointerCapture(event.pointerId)) button.releasePointerCapture(event.pointerId)
-            dragPointerId = null
-            dragged = false
+            document.addEventListener("pointermove", onDocumentPointerMove)
+            document.addEventListener("pointerup", onDocumentPointerEnd)
+            document.addEventListener("pointercancel", onDocumentPointerEnd)
         })
         button.addEventListener("keydown", (event: KeyboardEvent) => {
             if (event.key !== "Enter" && event.key !== " ") return
             event.preventDefault()
-            toggleFromQuickButton()
+            triggerToggleFromButton()
+        })
+        // Fallback for iPad/tablet browsers where click is emitted but pointerup can be lost.
+        button.addEventListener("click", (event: MouseEvent) => {
+            if (dragged) return
+            if (Date.now() < suppressClickUntilMs) return
+            event.preventDefault()
+            triggerToggleFromButton()
         })
         document.body.appendChild(button)
         this.settingsQuickButton = button
+        this.ensureKeyboardFallbackButton()
+        this.syncSettingsQuickButtonVisibility()
     }
 
     private adaptiveLog(message: string) {
@@ -871,6 +966,9 @@ class ViewerApp implements Component {
         this.latestConnectionState = "Connecting"
 
         this.stream = new Stream(this.api, hostId, appId, settings, browserSize)
+        // Apply viewer input config immediately (phone default touch mode, persisted modes, etc.)
+        // so users don't need to manually reselect modes in the sidebar.
+        this.stream.getInput().setConfig(this.inputConfig)
         this.stream.getStats().setEnabled(true)
 
         // Add app info listener
@@ -1287,21 +1385,35 @@ class ViewerApp implements Component {
      * `preventDefault` on touchstart blocks click synthesis and options cannot be chosen on phones.
      */
     private isStreamInputUiTarget(target: EventTarget | null): boolean {
-        if (!(target instanceof Element)) return false
-        if (target.closest(".select-polyfill-list, .select-polyfill-display, .select-polyfill-wrapper")) {
+        const targetElement = target instanceof Element
+            ? target
+            : target instanceof Node
+                ? target.parentElement
+                : null
+        if (!targetElement) return false
+        if (targetElement.closest(".video-stats")) return true
+        if (targetElement.closest(".modal-video-connect")) return true
+        if (targetElement.closest(".modal-settings-panel")) return true
+        if (targetElement.closest("#sidebar-button")) return true
+        if (targetElement.closest("#ml-settings-quick-button")) return true
+        if (targetElement.closest("#ml-keyboard-fallback-button")) return true
+        if (targetElement.closest(".select-polyfill-list, .select-polyfill-display, .select-polyfill-wrapper")) {
             return true
         }
-        if (target.closest("#mlfso-overlay, #mlplo-overlay")) return true
-        if (target.closest(".sidebar-stream")) return true
+        if (targetElement.closest("button, input, select, textarea, label, a, [role='button'], [role='slider'], [contenteditable='true']")) {
+            return true
+        }
+        if (targetElement.closest("#mlfso-overlay, #mlplo-overlay")) return true
+        if (targetElement.closest(".sidebar-stream")) return true
         const modal = getModalBackground()
-        if (modal && !modal.classList.contains("modal-disabled") && modal.contains(target)) return true
+        if (modal && !modal.classList.contains("modal-disabled") && modal.contains(targetElement)) return true
         return false
     }
 
     // Mouse
     onMouseButtonDown(event: MouseEvent) {
-        this.onUserInteraction()
         if (this.isStreamInputUiTarget(event.target)) return
+        this.onUserInteraction()
 
         if (this.tryAdaptivePointerRelockFromGesture("click")) {
             event.preventDefault()
@@ -1315,8 +1427,8 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onMouseButtonUp(event: MouseEvent) {
-        this.onUserInteraction()
         if (this.isStreamInputUiTarget(event.target)) return
+        this.onUserInteraction()
 
         event.preventDefault()
         this.stream?.getInput().onMouseUp(event)
@@ -1348,8 +1460,8 @@ class ViewerApp implements Component {
 
     // Touch
     onTouchStart(event: TouchEvent) {
-        this.onUserInteraction()
         if (this.isStreamInputUiTarget(event.target)) return
+        this.onUserInteraction()
         if (this.tryAdaptivePointerRelockFromGesture("touch")) {
             event.preventDefault()
             event.stopPropagation()
@@ -1362,8 +1474,8 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onTouchEnd(event: TouchEvent) {
-        this.onUserInteraction()
         if (this.isStreamInputUiTarget(event.target)) return
+        this.onUserInteraction()
 
         event.preventDefault()
         this.stream?.getInput().onTouchEnd(event, this.getStreamRect())
@@ -1371,8 +1483,8 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onTouchCancel(event: TouchEvent) {
-        this.onUserInteraction()
         if (this.isStreamInputUiTarget(event.target)) return
+        this.onUserInteraction()
 
         event?.preventDefault()
         this.stream?.getInput().onTouchCancel(event, this.getStreamRect())
@@ -1782,6 +1894,7 @@ class ViewerApp implements Component {
     }
     private async onFullscreenChange() {
         this.checkFullyImmersed()
+        this.syncSettingsQuickButtonVisibility()
         if (!this.isFullscreen()) {
             this.cancelFullscreenExitEscHold()
             this.releaseAllKeys("fullscreen exited")
@@ -1912,7 +2025,11 @@ class ViewerApp implements Component {
         if (this.settingsQuickButton?.parentElement) {
             this.settingsQuickButton.parentElement.removeChild(this.settingsQuickButton)
         }
+        if (this.keyboardFallbackButton?.parentElement) {
+            this.keyboardFallbackButton.parentElement.removeChild(this.keyboardFallbackButton)
+        }
         this.settingsQuickButton = null
+        this.keyboardFallbackButton = null
         if (this.keyWatchdogInterval != null) {
             clearInterval(this.keyWatchdogInterval)
             this.keyWatchdogInterval = null
@@ -2856,7 +2973,7 @@ class ViewerSidebar implements Component, Sidebar {
         this.screenKeyboard.addKeyDownListener(this.onKeyDown.bind(this))
         this.screenKeyboard.addKeyUpListener(this.onKeyUp.bind(this))
         this.screenKeyboard.addTextListener(this.onText.bind(this))
-        this.div.appendChild(this.screenKeyboard.getHiddenElement())
+        document.body.appendChild(this.screenKeyboard.getHiddenElement())
 
         this.uploadDoneAnnouncementButton = document.createElement("button")
         this.uploadDoneAnnouncementButton.classList.add("upload-done-announcement")
@@ -3283,6 +3400,10 @@ class ViewerSidebar implements Component, Sidebar {
     }
     unmount(parent: HTMLElement): void {
         parent.removeChild(this.div)
+        const keyboardRoot = this.screenKeyboard.getHiddenElement()
+        if (keyboardRoot.parentElement) {
+            keyboardRoot.parentElement.removeChild(keyboardRoot)
+        }
     }
 }
 

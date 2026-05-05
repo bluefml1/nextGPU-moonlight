@@ -557,7 +557,8 @@ export class SelectComponent extends ElementWithLabel {
                 list.style.position = "fixed"
                 list.style.width = displayRect.width + "px"
                 list.style.left = displayRect.left + "px"
-                list.style.zIndex = "9999"
+                // Keep teleported select list above modal/popup layers so options stay clickable.
+                list.style.zIndex = "100100"
                 list.classList.remove("top")
                 list.classList.remove("bottom")
 
