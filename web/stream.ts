@@ -491,16 +491,23 @@ class ViewerApp implements Component {
         const button = document.createElement("button")
         button.type = "button"
         button.id = "ml-keyboard-fallback-button"
-        button.textContent = "Keyboard"
         button.setAttribute("aria-label", "Toggle keyboard")
         button.title = "Toggle keyboard"
+        const keyboardIcon = document.createElement("img")
+        keyboardIcon.src = "resources/nextgpu-keyboard.svg"
+        keyboardIcon.alt = ""
+        keyboardIcon.setAttribute("aria-hidden", "true")
+        keyboardIcon.style.width = "15px"
+        keyboardIcon.style.height = "15px"
+        keyboardIcon.style.display = "block"
+        button.appendChild(keyboardIcon)
         button.style.cssText =
             "position:fixed;right:68px;bottom:72px;z-index:210000;display:none;" +
-            "height:40px;padding:0 14px;border-radius:11px;border:1px solid rgba(255,255,255,.72);" +
-            "background:rgba(0,0,0,.92);color:#fff;font:700 13px system-ui,sans-serif;letter-spacing:.02em;" +
-            "align-items:center;justify-content:center;touch-action:manipulation"
-        button.addEventListener("click", (event: MouseEvent) => {
-            event.preventDefault()
+            "width:32px;height:32px;padding:0;border-radius:8px;border:1px solid rgba(255,255,255,.78);" +
+            "background:rgba(0,0,0,.92);" +
+            "box-shadow:0 12px 24px rgba(0,0,0,.48),0 0 0 1px rgba(255,255,255,.08) inset;" +
+            "align-items:center;justify-content:center;cursor:pointer;touch-action:none"
+        const toggleKeyboard = () => {
             const screenKeyboard = this.sidebar.getScreenKeyboard()
             if (screenKeyboard.isVisible() || screenKeyboard.isActuallyVisible()) {
                 screenKeyboard.hide()
@@ -508,6 +515,70 @@ class ViewerApp implements Component {
                 setSidebarExtended(false)
                 screenKeyboard.show()
             }
+        }
+        let dragPointerId: number | null = null
+        let dragStartX = 0
+        let dragStartY = 0
+        let dragOffsetX = 0
+        let dragOffsetY = 0
+        let dragged = false
+        let suppressClickUntilMs = 0
+        const DRAG_THRESHOLD = 6
+        const onDocumentPointerMove = (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            const dx = event.clientX - dragStartX
+            const dy = event.clientY - dragStartY
+            if (!dragged && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
+                dragged = true
+            }
+            if (!dragged) return
+            const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+            const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+            const nextLeft = Math.max(8, Math.min(vw - button.offsetWidth - 8, event.clientX - dragOffsetX))
+            const nextTop = Math.max(8, Math.min(vh - button.offsetHeight - 8, event.clientY - dragOffsetY))
+            button.style.right = "auto"
+            button.style.bottom = "auto"
+            button.style.left = `${nextLeft}px`
+            button.style.top = `${nextTop}px`
+        }
+        const onDocumentPointerEnd = (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            dragPointerId = null
+            document.removeEventListener("pointermove", onDocumentPointerMove)
+            document.removeEventListener("pointerup", onDocumentPointerEnd)
+            document.removeEventListener("pointercancel", onDocumentPointerEnd)
+            if (dragged) {
+                event.preventDefault()
+                event.stopImmediatePropagation()
+                dragged = false
+                suppressClickUntilMs = Date.now() + 500
+                return
+            }
+            suppressClickUntilMs = Date.now() + 500
+            toggleKeyboard()
+        }
+        button.addEventListener("pointerdown", (event: PointerEvent) => {
+            dragPointerId = event.pointerId
+            dragged = false
+            const rect = button.getBoundingClientRect()
+            dragStartX = event.clientX
+            dragStartY = event.clientY
+            dragOffsetX = event.clientX - rect.left
+            dragOffsetY = event.clientY - rect.top
+            document.addEventListener("pointermove", onDocumentPointerMove)
+            document.addEventListener("pointerup", onDocumentPointerEnd)
+            document.addEventListener("pointercancel", onDocumentPointerEnd)
+        })
+        button.addEventListener("keydown", (event: KeyboardEvent) => {
+            if (event.key !== "Enter" && event.key !== " ") return
+            event.preventDefault()
+            toggleKeyboard()
+        })
+        button.addEventListener("click", (event: MouseEvent) => {
+            if (dragged) return
+            if (Date.now() < suppressClickUntilMs) return
+            event.preventDefault()
+            toggleKeyboard()
         })
         document.body.appendChild(button)
         this.keyboardFallbackButton = button
