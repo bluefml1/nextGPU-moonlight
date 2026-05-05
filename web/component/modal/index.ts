@@ -34,9 +34,11 @@ export async function showModal<Output>(modal: Modal<Output> | null): Promise<Ou
         window.dispatchEvent(new CustomEvent("ml-modal-visibility", { detail: { visible: false } }))
         modalAbort.abort()
         modalAbort = null
+        document.body.classList.remove("ml-modal-active")
     }
 
     if (!modal) {
+        document.body.classList.remove("ml-modal-active")
         return null
     }
 
@@ -50,11 +52,13 @@ export async function showModal<Output>(modal: Modal<Output> | null): Promise<Ou
     modalAbort = abortController
     modal.mount(modalParent)
     modalBackground?.classList.remove("modal-disabled")
+    document.body.classList.add("ml-modal-active")
     window.dispatchEvent(new CustomEvent("ml-modal-visibility", { detail: { visible: true } }))
 
     const output = await modal.onFinish(abortController.signal)
 
     modalBackground?.classList.add("modal-disabled")
+    document.body.classList.remove("ml-modal-active")
     window.dispatchEvent(new CustomEvent("ml-modal-visibility", { detail: { visible: false } }))
     modalAbort.abort()
     modalAbort = null

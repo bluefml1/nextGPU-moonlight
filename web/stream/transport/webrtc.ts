@@ -218,7 +218,6 @@ export class WebRTCTransport implements Transport {
         if (this.remoteDescription) {
             await this.handleRemoteDescription(this.remoteDescription)
         } else {
-            this.sendMessage("SyncReady")
             this.syncStartTimer = window.setTimeout(() => {
                 this.logger?.debug(`Sync start timeout (${this.syncStartTimeoutMs}ms), starting negotiation locally`)
                 void this.startSynchronizedNegotiation("local-timeout")

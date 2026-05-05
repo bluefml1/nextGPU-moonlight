@@ -238,6 +238,8 @@ export class SelectComponent extends ElementWithLabel {
     private options: Array<{ value: string, name: string }>
 
     private strategy: SelectStrategy
+    /** Document capture listener for closing polyfill when tapping outside; must be removed on any close. */
+    private polyfillOutsideCloseHandler: ((e: Event) => void) | null = null
 
     constructor(internalName: string, options: Array<{ value: string, name: string }>, init?: SelectInit) {
         super(internalName, init?.displayName)
@@ -420,6 +422,36 @@ export class SelectComponent extends ElementWithLabel {
         throw "Invalid strategy for select input field"
     }
 
+    /**
+     * Programmatically set the selected value. Skips disabled polyfill options unless force is true.
+     */
+    setValue(value: string, opts?: { silent?: boolean; force?: boolean }) {
+        const silent = opts?.silent ?? false
+        const force = opts?.force ?? false
+
+        if (this.strategy.name == "datalist") {
+            const named = this.options.find(option => option.value == value)
+            if (named) {
+                this.strategy.inputElement.value = named.name
+                if (!silent) this.dispatchChange()
+            }
+        } else if (this.strategy.name == "select") {
+            const selectElement = this.strategy.optionRoot
+            const opt = Array.from(selectElement.options).find(o => o.value === value)
+            if (opt && (!opt.disabled || force)) {
+                selectElement.value = value
+                if (!silent) this.dispatchChange()
+            }
+        } else if (this.strategy.name == "polyfill") {
+            if (!force && this.strategy.disabled.has(value)) {
+                return
+            }
+            this.strategy.value = value
+            this.updateStrategyPolyfill()
+            if (!silent) this.dispatchChange()
+        }
+    }
+
     setOptionEnabled(value: string, enabled: boolean) {
         if (this.strategy.name == "datalist" || this.strategy.name == "select") {
             const optionRoot = this.strategy.optionRoot
@@ -429,8 +461,20 @@ export class SelectComponent extends ElementWithLabel {
                     optionElement.disabled = !enabled
                 }
             }
+
+            if (this.strategy.name == "select") {
+                const selectElement = this.strategy.optionRoot
+                if (!enabled && selectElement.value === value) {
+                    const next = Array.from(selectElement.options).find(o => !o.disabled)
+                    if (next) {
+                        selectElement.value = next.value
+                        this.dispatchChange()
+                    }
+                }
+            }
         } else if (this.strategy.name == "polyfill") {
-            const element = this.strategy.list
+            const st = this.strategy
+            const element = st.list
 
             for (const optionElement of element.children) {
                 // @ts-ignore
@@ -441,13 +485,24 @@ export class SelectComponent extends ElementWithLabel {
                 }
 
                 if (enabled) {
-                    this.strategy.disabled.delete(value)
+                    st.disabled.delete(value)
 
                     optionElement.classList.remove("select-polyfill-option-disabled")
                 } else {
-                    this.strategy.disabled.add(value)
+                    st.disabled.add(value)
 
                     optionElement.classList.add("select-polyfill-option-disabled")
+                }
+            }
+
+            if (!enabled && st.value === value) {
+                const fallback = this.options.find(
+                    o => o.value !== value && !st.disabled.has(o.value)
+                )
+                if (fallback) {
+                    st.value = fallback.value
+                    this.updateStrategyPolyfill()
+                    this.dispatchChange()
                 }
             }
         }
@@ -477,6 +532,14 @@ export class SelectComponent extends ElementWithLabel {
             this.strategy.display.innerText = selectedOption?.name ?? "(Not Selected)"
         }
     }
+    private clearPolyfillOutsideCloseListener() {
+        if (this.polyfillOutsideCloseHandler) {
+            document.removeEventListener("mousedown", this.polyfillOutsideCloseHandler, true)
+            document.removeEventListener("pointerdown", this.polyfillOutsideCloseHandler, true)
+            this.polyfillOutsideCloseHandler = null
+        }
+    }
+
     private setStrategyPolyfillOpened(opened: boolean) {
         if (this.strategy.name != "polyfill") {
             throw "SelectComponent strategy is not polyfill"
@@ -484,6 +547,8 @@ export class SelectComponent extends ElementWithLabel {
 
         if (opened != this.strategy.opened) {
             if (opened) {
+                this.clearPolyfillOutsideCloseListener()
+
                 const list = this.strategy.list
                 const displayRect = this.strategy.display.getBoundingClientRect()
 
@@ -510,15 +575,17 @@ export class SelectComponent extends ElementWithLabel {
                     }
                 }
 
-                // Close when clicking outside.
-                const closeHandler = (e: MouseEvent) => {
-                    if (!list.contains(e.target as Node) && e.target !== (this.strategy as any).display) {
+                const display = this.strategy.display
+                const closeHandler = (e: Event) => {
+                    if (!list.contains(e.target as Node) && e.target !== display) {
                         this.setStrategyPolyfillOpened(false)
-                        document.removeEventListener("mousedown", closeHandler, true)
                     }
                 }
+                this.polyfillOutsideCloseHandler = closeHandler
                 document.addEventListener("mousedown", closeHandler, true)
+                document.addEventListener("pointerdown", closeHandler, true)
             } else {
+                this.clearPolyfillOutsideCloseListener()
                 if (this.strategy.list.parentNode) {
                     this.strategy.list.parentNode.removeChild(this.strategy.list)
                 }
