@@ -82,6 +82,7 @@ function getVideoCodecHint(settings: Settings): VideoCodecSupport {
 
 export class Stream implements Component {
     private logger: Logger = new Logger()
+    private readonly minimalLogs = true
 
     private api: Api
 
@@ -296,6 +297,9 @@ export class Stream implements Component {
     }
 
     private debugLog(message: string, additional?: LogMessageInfo) {
+        if (this.minimalLogs && !this.shouldEmitLog(message, additional)) {
+            return
+        }
         for (const line of message.split("\n")) {
             const event: InfoEvent = new CustomEvent("stream-info", {
                 detail: { type: "addDebugLine", line, additional }
@@ -303,6 +307,21 @@ export class Stream implements Component {
 
             this.eventTarget.dispatchEvent(event)
         }
+    }
+    private shouldEmitLog(message: string, additional?: LogMessageInfo): boolean {
+        if (additional?.type) {
+            return true
+        }
+        const text = message.toLowerCase()
+        return (
+            text.includes("failed") ||
+            text.includes("error") ||
+            text.includes("terminated") ||
+            text.includes("fallback") ||
+            text.includes("connected") ||
+            text.includes("connection status") ||
+            text.includes("using transport")
+        )
     }
 
     private async onMessage(message: StreamServerMessage) {

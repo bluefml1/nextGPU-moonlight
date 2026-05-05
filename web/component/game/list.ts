@@ -38,9 +38,16 @@ export class GameList extends FetchListComponent<App, Game> {
     }
 
     async forceFetch() {
-        const apps = await apiGetApps(this.api, {
-            host_id: this.hostId,
-        })
+        this.beginLoadingState()
+        let apps
+        try {
+            apps = await apiGetApps(this.api, {
+                host_id: this.hostId,
+            })
+        } catch (e) {
+            this.setErrorState("Unable to load games.")
+            throw e
+        }
 
         this.updateCache(apps)
     }
