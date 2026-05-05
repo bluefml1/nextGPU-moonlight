@@ -21,10 +21,12 @@ export class ScreenKeyboard {
     private dragOffsetY = 0
     private dragged = false
     private keyboardPos: { left: number; top: number } | null = null
+    private readonly isTouchDevice: boolean
 
     constructor() {
+        this.isTouchDevice = ("maxTouchPoints" in navigator && navigator.maxTouchPoints > 0)
         this.root.style.cssText =
-            "position:fixed;left:0;right:0;bottom:0;z-index:100006;display:none;" +
+            "position:fixed;left:0;right:0;bottom:0;z-index:100120;display:none;" +
             "padding:8px 10px calc(env(safe-area-inset-bottom,0px) + 10px);" +
             "background:linear-gradient(180deg,color-mix(in srgb, var(--bg-1, #001a2e) 72%, black),color-mix(in srgb, var(--bg-2, #000d18) 88%, black));" +
             "backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);" +
@@ -49,6 +51,12 @@ export class ScreenKeyboard {
         this.header.appendChild(this.capsIndicator)
         this.shell.appendChild(this.header)
         this.installDragHandlers()
+        window.addEventListener("resize", () => {
+            if (!this.visible) return
+            // Orientation/viewport changes on tablets can invalidate previous drag position.
+            this.keyboardPos = null
+            this.applyKeyboardPosition()
+        })
 
         this.rowHost.style.cssText = "display:flex;flex-direction:column;gap:clamp(4px,1.2vw,8px)"
         this.shell.appendChild(this.rowHost)
@@ -61,8 +69,21 @@ export class ScreenKeyboard {
     }
 
     show() {
+        if (!this.root.parentElement && document.body) {
+            document.body.appendChild(this.root)
+        }
+        if (this.rowHost.childElementCount === 0) {
+            this.buildKeys()
+        }
         this.visible = true
         this.root.style.display = "block"
+        this.root.style.visibility = "visible"
+        this.root.style.opacity = "1"
+        this.root.style.pointerEvents = "auto"
+        // Tablet/iPad reliability: always start from a guaranteed visible docked position.
+        if (this.isTouchDevice) {
+            this.keyboardPos = null
+        }
         this.applyKeyboardPosition()
     }
     hide() {
@@ -74,6 +95,12 @@ export class ScreenKeyboard {
 
     isVisible(): boolean {
         return this.visible
+    }
+
+    isActuallyVisible(): boolean {
+        if (!this.root.isConnected) return false
+        const style = window.getComputedStyle(this.root)
+        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0"
     }
 
     addKeyDownListener(listener: (event: KeyboardEvent) => void) {
@@ -124,7 +151,31 @@ export class ScreenKeyboard {
             "padding:0 clamp(4px,1.4vw,10px);line-height:1;white-space:nowrap;" +
             "display:flex;align-items:center;justify-content:center;text-align:center;" +
             "overflow:hidden;text-overflow:clip;touch-action:manipulation;" +
-            "box-shadow:inset 0 -1px 0 rgba(0,0,0,.32), 0 0 8px rgba(0,212,255,.05)"
+            "box-shadow:inset 0 -1px 0 rgba(0,0,0,.32), 0 0 8px rgba(0,212,255,.05);" +
+            "transition:transform .06s ease, box-shadow .08s ease, background-color .08s ease, border-color .08s ease"
+        const setPressed = (pressed: boolean) => {
+            if (pressed) {
+                key.style.transform = "translateY(1px) scale(0.985)"
+                key.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,.10), 0 0 14px rgba(0,212,255,.20)"
+                key.style.borderColor = "color-mix(in srgb, var(--accent-cyan-light, #00ffff) 55%, rgba(255,255,255,.2))"
+                key.style.background = emphasized
+                    ? "color-mix(in srgb, var(--accent-cyan-light, #00ffff) 22%, var(--bg-2, #000d18))"
+                    : "color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 24%, var(--bg-2, #000d18))"
+            } else {
+                key.style.transform = "none"
+                key.style.boxShadow = "inset 0 -1px 0 rgba(0,0,0,.32), 0 0 8px rgba(0,212,255,.05)"
+                key.style.borderColor = emphasized
+                    ? "color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 52%, rgba(255,255,255,.20))"
+                    : "rgba(255,255,255,.12)"
+                key.style.background = emphasized
+                    ? "color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 16%, var(--bg-2, #000d18))"
+                    : "color-mix(in srgb, var(--bg-2, #000d18) 74%, rgba(255,255,255,.05))"
+            }
+        }
+        key.addEventListener("pointerdown", () => setPressed(true))
+        key.addEventListener("pointerup", () => setPressed(false))
+        key.addEventListener("pointercancel", () => setPressed(false))
+        key.addEventListener("pointerleave", () => setPressed(false))
         if (singleCharKey) {
             key.style.aspectRatio = "1 / 1"
         }
@@ -231,7 +282,11 @@ export class ScreenKeyboard {
             this.dragged = false
             this.dragOffsetX = event.clientX - rect.left
             this.dragOffsetY = event.clientY - rect.top
-            this.header.setPointerCapture(event.pointerId)
+            try {
+                this.header.setPointerCapture(event.pointerId)
+            } catch {
+                // iPad/tablet browsers can throw InvalidStateError intermittently.
+            }
         })
         this.header.addEventListener("pointermove", (event: PointerEvent) => {
             if (this.dragPointerId == null || event.pointerId !== this.dragPointerId) return
@@ -247,7 +302,11 @@ export class ScreenKeyboard {
         })
         const endDrag = (event: PointerEvent) => {
             if (this.dragPointerId == null || event.pointerId !== this.dragPointerId) return
-            if (this.header.hasPointerCapture(event.pointerId)) this.header.releasePointerCapture(event.pointerId)
+            try {
+                if (this.header.hasPointerCapture(event.pointerId)) this.header.releasePointerCapture(event.pointerId)
+            } catch {
+                // Ignore pointer capture state races on mobile browsers.
+            }
             this.dragPointerId = null
             if (this.dragged) {
                 event.preventDefault()
@@ -269,10 +328,17 @@ export class ScreenKeyboard {
             this.root.style.width = "auto"
             return
         }
-        this.root.style.left = `${Math.round(this.keyboardPos.left)}px`
-        this.root.style.top = `${Math.round(this.keyboardPos.top)}px`
+        const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+        const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+        const w = this.shell.offsetWidth || 360
+        const h = this.shell.offsetHeight || 240
+        const left = Math.max(8, Math.min(vw - w - 8, this.keyboardPos.left))
+        const top = Math.max(8, Math.min(vh - h - 8, this.keyboardPos.top))
+        this.keyboardPos = { left, top }
+        this.root.style.left = `${Math.round(left)}px`
+        this.root.style.top = `${Math.round(top)}px`
         this.root.style.right = "auto"
         this.root.style.bottom = "auto"
-        this.root.style.width = `${Math.round(this.shell.offsetWidth || 360)}px`
+        this.root.style.width = `${Math.round(w)}px`
     }
 }
