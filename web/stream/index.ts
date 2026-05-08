@@ -309,18 +309,11 @@ export class Stream implements Component {
         }
     }
     private shouldEmitLog(message: string, additional?: LogMessageInfo): boolean {
-        if (additional?.type) {
-            return true
-        }
         const text = message.toLowerCase()
         return (
-            text.includes("failed") ||
-            text.includes("error") ||
-            text.includes("terminated") ||
-            text.includes("fallback") ||
-            text.includes("connected") ||
+            text.includes("changing peer state to") ||
             text.includes("connection status") ||
-            text.includes("using transport")
+            text.includes("connection complete")
         )
     }
 
@@ -1076,7 +1069,15 @@ export class Stream implements Component {
         let pipelineCodecSupport
         const video = this.transport.getChannel(TransportChannelId.HOST_VIDEO)
         if (video.type == "videotrack") {
-            const { videoRenderer, supportedCodecs, error } = await buildVideoPipeline("videotrack", videoSettings, this.logger)
+            // WebRTC track mode is expected to be the most stable path for real-time gameplay.
+            // Force HTMLVideoElement renderer here to avoid canvas/frame-processor regressions
+            // that can manifest as "connected but black screen" on some browsers/devices.
+            const trackVideoSettings: VideoPipelineOptions = {
+                ...videoSettings,
+                canvasRenderer: false,
+                forceVideoElementRenderer: true,
+            }
+            const { videoRenderer, supportedCodecs, error } = await buildVideoPipeline("videotrack", trackVideoSettings, this.logger)
 
             if (error) {
                 return null
