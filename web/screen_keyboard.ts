@@ -22,43 +22,42 @@ export class ScreenKeyboard {
     private dragged = false
     private keyboardPos: { left: number; top: number } | null = null
     private readonly isTouchDevice: boolean
+    private readonly minViewportMarginPx = 8
 
     constructor() {
         this.isTouchDevice = ("maxTouchPoints" in navigator && navigator.maxTouchPoints > 0)
-        this.root.style.cssText =
-            "position:fixed;left:0;right:0;bottom:0;z-index:100120;display:none;" +
-            "padding:8px 10px calc(env(safe-area-inset-bottom,0px) + 10px);" +
-            "background:linear-gradient(180deg,color-mix(in srgb, var(--bg-1, #001a2e) 72%, black),color-mix(in srgb, var(--bg-2, #000d18) 88%, black));" +
-            "backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);" +
-            "box-shadow:0 -10px 34px rgba(0,0,0,.55), 0 0 14px rgba(0,212,255,.08)"
-
-        this.shell.style.cssText =
-            "max-width:760px;margin:0 auto;background:color-mix(in srgb, var(--bg-2, #000d18) 78%, rgba(0,0,0,.62));" +
-            "border:1px solid color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 40%, rgba(255,255,255,.18));" +
-            "border-radius:16px;padding:8px;box-sizing:border-box;" +
-            "max-height:min(42vh,320px);overflow:auto"
+        this.root.classList.add("ml-screen-keyboard")
+        this.shell.classList.add("ml-screen-keyboard-shell")
         this.root.appendChild(this.shell)
 
-        this.header.style.cssText =
-            "display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"
+        this.header.classList.add("ml-screen-keyboard-header")
         const title = document.createElement("span")
         title.textContent = "Keyboard"
-        title.style.cssText = "font:600 12px system-ui,sans-serif;letter-spacing:.02em;color:color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 72%, #ffffff)"
+        title.classList.add("ml-screen-keyboard-title")
         this.header.style.cursor = "grab"
         this.header.style.touchAction = "none"
-        this.capsIndicator.style.cssText = "font:600 12px system-ui,sans-serif;color:var(--text-2, #ffffff)"
+        this.capsIndicator.classList.add("ml-screen-keyboard-caps")
         this.header.appendChild(title)
         this.header.appendChild(this.capsIndicator)
         this.shell.appendChild(this.header)
         this.installDragHandlers()
         window.addEventListener("resize", () => {
             if (!this.visible) return
-            // Orientation/viewport changes on tablets can invalidate previous drag position.
-            this.keyboardPos = null
+            if (this.isTouchDevice) {
+                // Orientation/viewport changes on tablets can invalidate previous drag position.
+                this.keyboardPos = null
+            }
             this.applyKeyboardPosition()
         })
 
-        this.rowHost.style.cssText = "display:flex;flex-direction:column;gap:clamp(4px,1.2vw,8px)"
+        window.addEventListener("blur", () => this.forceStopInteractions())
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                this.forceStopInteractions()
+            }
+        })
+
+        this.rowHost.classList.add("ml-screen-keyboard-rows")
         this.shell.appendChild(this.rowHost)
         this.buildKeys()
         this.updateCapsUi()
@@ -125,60 +124,42 @@ export class ScreenKeyboard {
         this.eventTarget.dispatchEvent(up)
     }
 
-    private createRow(): HTMLDivElement {
+    private createRow(layoutClass: string): HTMLDivElement {
         const row = document.createElement("div")
-        row.style.cssText = "display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:clamp(4px,1.2vw,8px);align-items:stretch"
+        row.classList.add("ml-screen-keyboard-row", layoutClass)
         this.rowHost.appendChild(row)
         return row
     }
 
-    private createKey(label: string, onPress: () => void, options?: { flex?: number; emphasized?: boolean; small?: boolean }): HTMLButtonElement {
-        const flex = options?.flex ?? 1
+    private createKey(label: string, onPress: () => void, options?: {
+        span?: number
+        emphasized?: boolean
+        small?: boolean
+        action?: boolean
+    }): HTMLButtonElement {
+        const span = options?.span ?? 1
         const emphasized = options?.emphasized ?? false
         const small = options?.small ?? false
-        const singleCharKey = label.length === 1 && flex === 1
+        const action = options?.action ?? false
         const key = document.createElement("button")
         key.type = "button"
         key.textContent = label
-        key.style.gridColumn = `span ${flex}`
-        key.style.cssText =
-            `grid-column:span ${flex};height:${singleCharKey ? "clamp(34px,8.2vw,42px)" : (small ? "clamp(34px,8.2vw,40px)" : "clamp(36px,8.8vw,44px)")};` +
-            `min-width:0;border-radius:clamp(8px,2.2vw,10px);` +
-            `border:1px solid ${emphasized ? "color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 52%, rgba(255,255,255,.20))" : "rgba(255,255,255,.12)"};` +
-            `background:${emphasized ? "color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 16%, var(--bg-2, #000d18))" : "color-mix(in srgb, var(--bg-2, #000d18) 74%, rgba(255,255,255,.05))"};` +
-            `color:var(--text-2, #ffffff);` +
-            `font:600 ${small ? "clamp(11px,3vw,13px)" : "clamp(12px,3.4vw,15px)"} system-ui,sans-serif;` +
-            "padding:0 clamp(4px,1.4vw,10px);line-height:1;white-space:nowrap;" +
-            "display:flex;align-items:center;justify-content:center;text-align:center;" +
-            "overflow:hidden;text-overflow:clip;touch-action:manipulation;" +
-            "box-shadow:inset 0 -1px 0 rgba(0,0,0,.32), 0 0 8px rgba(0,212,255,.05);" +
-            "transition:transform .06s ease, box-shadow .08s ease, background-color .08s ease, border-color .08s ease"
+        key.classList.add("ml-screen-key")
+        if (emphasized) key.classList.add("ml-screen-key--emphasized")
+        if (small) key.classList.add("ml-screen-key--small")
+        if (action) key.classList.add("ml-screen-key--action")
+        key.style.gridColumn = `span ${span}`
         const setPressed = (pressed: boolean) => {
             if (pressed) {
-                key.style.transform = "translateY(1px) scale(0.985)"
-                key.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,.10), 0 0 14px rgba(0,212,255,.20)"
-                key.style.borderColor = "color-mix(in srgb, var(--accent-cyan-light, #00ffff) 55%, rgba(255,255,255,.2))"
-                key.style.background = emphasized
-                    ? "color-mix(in srgb, var(--accent-cyan-light, #00ffff) 22%, var(--bg-2, #000d18))"
-                    : "color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 24%, var(--bg-2, #000d18))"
+                key.classList.add("is-pressed")
             } else {
-                key.style.transform = "none"
-                key.style.boxShadow = "inset 0 -1px 0 rgba(0,0,0,.32), 0 0 8px rgba(0,212,255,.05)"
-                key.style.borderColor = emphasized
-                    ? "color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 52%, rgba(255,255,255,.20))"
-                    : "rgba(255,255,255,.12)"
-                key.style.background = emphasized
-                    ? "color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 16%, var(--bg-2, #000d18))"
-                    : "color-mix(in srgb, var(--bg-2, #000d18) 74%, rgba(255,255,255,.05))"
+                key.classList.remove("is-pressed")
             }
         }
         key.addEventListener("pointerdown", () => setPressed(true))
         key.addEventListener("pointerup", () => setPressed(false))
         key.addEventListener("pointercancel", () => setPressed(false))
         key.addEventListener("pointerleave", () => setPressed(false))
-        if (singleCharKey) {
-            key.style.aspectRatio = "1 / 1"
-        }
         key.addEventListener("click", (event) => {
             event.preventDefault()
             onPress()
@@ -186,8 +167,8 @@ export class ScreenKeyboard {
         return key
     }
 
-    private createRepeatBackspaceKey(): HTMLButtonElement {
-        const key = this.createKey("Bksp", () => this.emitKeyTap("Backspace", "Backspace"), { flex: 2, emphasized: true, small: true })
+    private createRepeatBackspaceKey(span = 1): HTMLButtonElement {
+        const key = this.createKey("⌫", () => this.emitKeyTap("Backspace", "Backspace"), { span, emphasized: true, small: true, action: true })
         const tapBackspace = () => this.emitKeyTap("Backspace", "Backspace")
         key.addEventListener("pointerdown", (event) => {
             event.preventDefault()
@@ -217,9 +198,7 @@ export class ScreenKeyboard {
     private updateCapsUi() {
         this.capsIndicator.textContent = this.symbolMode ? "Symbols" : (this.capsLock ? "Caps Lock: ON" : "Caps Lock: Off")
         if (this.capsKey) {
-            this.capsKey.style.background = this.capsLock
-                ? "color-mix(in srgb, var(--accent-cyan-light, #00ffff) 16%, var(--bg-2, #000d18))"
-                : "color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 14%, var(--bg-2, #000d18))"
+            this.capsKey.classList.toggle("is-toggled", this.capsLock)
             this.capsKey.textContent = this.capsLock ? "Caps On" : "Caps"
         }
     }
@@ -231,47 +210,47 @@ export class ScreenKeyboard {
                 row.appendChild(this.createKey(c, () => {
                     const out = this.capsLock ? c.toUpperCase() : c
                     this.emitText(out)
-                }, { small }))
+                }, { small, action: false }))
             }
         }
 
         if (!this.symbolMode) {
-            const row1 = this.createRow()
+            const row1 = this.createRow("ml-screen-keyboard-row--ten")
             appendChars(row1, "qwertyuiop")
 
-            const row2 = this.createRow()
+            const row2 = this.createRow("ml-screen-keyboard-row--nine")
             appendChars(row2, "asdfghjkl")
 
-            const row3 = this.createRow()
+            const row3 = this.createRow("ml-screen-keyboard-row--ten")
             this.capsKey = this.createKey("Caps", () => {
                 this.capsLock = !this.capsLock
                 this.updateCapsUi()
-            }, { flex: 2, emphasized: true })
+            }, { span: 2, emphasized: true, action: true })
             row3.appendChild(this.capsKey)
             appendChars(row3, "zxcvbnm")
-            row3.appendChild(this.createRepeatBackspaceKey())
+            row3.appendChild(this.createRepeatBackspaceKey(1))
         } else {
-            const row1 = this.createRow()
+            const row1 = this.createRow("ml-screen-keyboard-row--ten")
             appendChars(row1, "1234567890")
 
-            const row2 = this.createRow()
+            const row2 = this.createRow("ml-screen-keyboard-row--ten")
             appendChars(row2, "-/:;()$&@\"", true)
 
-            const row3 = this.createRow()
+            const row3 = this.createRow("ml-screen-keyboard-row--symbol")
             appendChars(row3, ".,?!'#+=%*", true)
-            row3.appendChild(this.createRepeatBackspaceKey())
+            row3.appendChild(this.createRepeatBackspaceKey(2))
             this.capsKey = null
         }
 
-        const row4 = this.createRow()
+        const row4 = this.createRow("ml-screen-keyboard-row--bottom")
         this.modeKey = this.createKey(this.symbolMode ? "ABC" : "123", () => {
             this.symbolMode = !this.symbolMode
             this.buildKeys()
-        }, { flex: 2, emphasized: true })
+        }, { span: 2, emphasized: true, action: true })
         row4.appendChild(this.modeKey)
-        row4.appendChild(this.createKey("Space", () => this.emitText(" "), { flex: 4 }))
-        row4.appendChild(this.createKey("Enter", () => this.emitKeyTap("Enter", "Enter"), { flex: 2, emphasized: true }))
-        row4.appendChild(this.createKey("Close", () => this.hide(), { flex: 2, emphasized: true }))
+        row4.appendChild(this.createKey("Space", () => this.emitText(" "), { span: 4 }))
+        row4.appendChild(this.createKey("Enter", () => this.emitKeyTap("Enter", "Enter"), { span: 2, emphasized: true, action: true }))
+        row4.appendChild(this.createKey("Close", () => this.hide(), { span: 2, emphasized: true, action: true }))
         this.updateCapsUi()
     }
 
@@ -290,12 +269,11 @@ export class ScreenKeyboard {
         })
         this.header.addEventListener("pointermove", (event: PointerEvent) => {
             if (this.dragPointerId == null || event.pointerId !== this.dragPointerId) return
-            const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
-            const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+            const [vw, vh] = this.getViewportSize()
             const w = this.shell.offsetWidth || 320
             const h = this.shell.offsetHeight || 220
-            const left = Math.max(8, Math.min(vw - w - 8, event.clientX - this.dragOffsetX))
-            const top = Math.max(8, Math.min(vh - h - 8, event.clientY - this.dragOffsetY))
+            const left = Math.max(this.minViewportMarginPx, Math.min(vw - w - this.minViewportMarginPx, event.clientX - this.dragOffsetX))
+            const top = Math.max(this.minViewportMarginPx, Math.min(vh - h - this.minViewportMarginPx, event.clientY - this.dragOffsetY))
             this.keyboardPos = { left, top }
             this.applyKeyboardPosition()
             this.dragged = true
@@ -319,6 +297,22 @@ export class ScreenKeyboard {
         this.header.addEventListener("pointercancel", endDrag)
     }
 
+    private forceStopInteractions() {
+        this.stopBackspaceRepeat()
+        this.dragPointerId = null
+    }
+
+    private getViewportSize(): [number, number] {
+        const viewport = window.visualViewport
+        if (viewport) {
+            return [Math.max(0, viewport.width), Math.max(0, viewport.height)]
+        }
+        return [
+            Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0),
+            Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+        ]
+    }
+
     private applyKeyboardPosition() {
         if (!this.keyboardPos) {
             this.root.style.left = "0"
@@ -328,12 +322,15 @@ export class ScreenKeyboard {
             this.root.style.width = "auto"
             return
         }
-        const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
-        const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
-        const w = this.shell.offsetWidth || 360
+        const [vw, vh] = this.getViewportSize()
+        const rootStyle = window.getComputedStyle(this.root)
+        const paddingLeft = Number.parseFloat(rootStyle.paddingLeft) || 0
+        const paddingRight = Number.parseFloat(rootStyle.paddingRight) || 0
+        const shellWidth = this.shell.offsetWidth || 360
+        const w = shellWidth + paddingLeft + paddingRight
         const h = this.shell.offsetHeight || 240
-        const left = Math.max(8, Math.min(vw - w - 8, this.keyboardPos.left))
-        const top = Math.max(8, Math.min(vh - h - 8, this.keyboardPos.top))
+        const left = Math.max(this.minViewportMarginPx, Math.min(vw - w - this.minViewportMarginPx, this.keyboardPos.left))
+        const top = Math.max(this.minViewportMarginPx, Math.min(vh - h - this.minViewportMarginPx, this.keyboardPos.top))
         this.keyboardPos = { left, top }
         this.root.style.left = `${Math.round(left)}px`
         this.root.style.top = `${Math.round(top)}px`

@@ -174,6 +174,7 @@ export function setSidebarExtended(extended: boolean): void {
         }
     }
     sidebarExtended = extended;
+    window.dispatchEvent(new CustomEvent("ml-sidebar-extended-change", { detail: { extended } }));
 }
 
 export function isSidebarExtended(): boolean {
