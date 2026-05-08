@@ -377,44 +377,41 @@ const MoonlightPointerLockOverlayImpl = (() => {
 
         #mlplo-overlay {
             position: fixed;
-            left: 50%;
-            bottom: 16px;
-            transform: translateX(-50%);
+            right: 12px;
+            bottom: 12px;
             z-index: 100;
             background: transparent;
             display: flex;
             align-items: flex-end;
-            justify-content: center;
+            justify-content: flex-end;
             user-select: none;
-            animation: mlplo-fadein .3s ease both;
+            animation: mlplo-fadein .24s ease both;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             pointer-events: none;
         }
 
         #mlplo-chip {
-            padding: 8px 11px;
-            border-radius: 9px;
-            background:
-                linear-gradient(135deg, rgba(74, 111, 255, 0.2), rgba(0, 200, 255, 0.14)),
-                rgba(12, 12, 16, 0.84);
-            border: 1px solid rgba(255, 255, 255, 0.14);
-            color: rgba(255, 255, 255, 0.94);
+            padding: 7px 10px;
+            border-radius: 8px;
+            background: rgba(10, 10, 12, 0.84);
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            color: rgba(255, 255, 255, 0.92);
             font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.03em;
-            text-transform: uppercase;
+            font-weight: 500;
+            letter-spacing: 0.01em;
             cursor: pointer;
             pointer-events: auto;
             touch-action: manipulation;
             -webkit-tap-highlight-color: transparent;
+            backdrop-filter: blur(3px);
             box-shadow:
-                0 2px 12px rgba(0, 0, 0, 0.45),
-                inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+                0 2px 8px rgba(0, 0, 0, 0.35),
+                inset 0 0 0 1px rgba(255, 255, 255, 0.03);
             text-align: center;
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            max-width: min(88vw, 560px);
+            gap: 6px;
+            max-width: min(78vw, 340px);
         }
 
         #mlplo-action {
@@ -424,22 +421,32 @@ const MoonlightPointerLockOverlayImpl = (() => {
             cursor: pointer;
             font: inherit;
             letter-spacing: inherit;
-            text-transform: inherit;
             padding: 0;
+            opacity: 0.96;
+        }
+
+        #mlplo-action:hover {
+            opacity: 1;
         }
 
         #mlplo-close {
             border: 0;
             border-radius: 6px;
-            width: 18px;
-            height: 18px;
-            line-height: 18px;
+            width: 16px;
+            height: 16px;
+            line-height: 16px;
             padding: 0;
-            background: rgba(255, 255, 255, 0.12);
-            color: rgba(255, 255, 255, 0.92);
+            background: rgba(255, 255, 255, 0.10);
+            color: rgba(255, 255, 255, 0.90);
             cursor: pointer;
-            font-size: 13px;
-            font-weight: 700;
+            font-size: 12px;
+            font-weight: 600;
+            opacity: 0.8;
+        }
+
+        #mlplo-close:hover {
+            opacity: 1;
+            background: rgba(255, 255, 255, 0.16);
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -469,7 +476,7 @@ const MoonlightPointerLockOverlayImpl = (() => {
         const action = document.createElement("button")
         action.id = "mlplo-action"
         action.type = "button"
-        action.textContent = "Tap, click, scroll, or press a key to lock mouse"
+        action.textContent = "Click to relock mouse"
         const close = document.createElement("button")
         close.id = "mlplo-close"
         close.type = "button"

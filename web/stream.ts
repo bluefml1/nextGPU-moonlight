@@ -1048,17 +1048,9 @@ class ViewerApp implements Component {
         return el
     }
 
-    private showPointerRelockNotice() {
-        if (MoonlightPointerLockOverlay.isVisible()) {
-            this.hidePointerRelockNotice()
-            return
-        }
-        this.ensurePointerRelockNotice().style.display = "block"
-    }
+    private showPointerRelockNotice() {}
 
-    private hidePointerRelockNotice() {
-        if (this.pointerRelockNoticeEl) this.pointerRelockNoticeEl.style.display = "none"
-    }
+    private hidePointerRelockNotice() {}
 
     private showAdaptivePointerRelockOverlay() {
         if (!this.canUseAdaptivePointerRelockOverlay()) {
@@ -1088,10 +1080,7 @@ class ViewerApp implements Component {
         MoonlightPointerLockOverlay.hide()
     }
 
-    private async attemptAdaptivePointerRelock(
-        trigger: "overlay-esc" | "click" | "touch" | "wheel" | "key",
-        withFullscreen = false
-    ) {
+    private async attemptAdaptivePointerRelock(trigger: "overlay-esc" | "click", withFullscreen = false) {
         this.adaptiveLog(`attempt pointer relock from ${trigger}`)
         try {
             if (withFullscreen && !this.isFullscreen()) {
@@ -1123,7 +1112,7 @@ class ViewerApp implements Component {
         )
     }
 
-    private tryAdaptivePointerRelockFromGesture(trigger: "click" | "touch" | "wheel" | "key"): boolean {
+    private tryAdaptivePointerRelockFromGesture(trigger: "click"): boolean {
         if (!this.canRelockFromGesture()) return false
         this.adaptiveLog(`${trigger} with armed auto-lock -> requestPointerLock() (mouseMode=${this.getInputConfig().mouseMode})`)
         void this.attemptAdaptivePointerRelock(trigger)
@@ -1595,12 +1584,6 @@ class ViewerApp implements Component {
         if (event.code === "Escape" && this.isFullscreen()) {
             this.startFullscreenExitEscHold()
         }
-        if (event.code !== "Escape" && this.tryAdaptivePointerRelockFromGesture("key")) {
-            event.preventDefault()
-            event.stopPropagation()
-            return
-        }
-
         if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.code === "KeyC") {
             if (this.isFileTransferProgressVisible() && this.fileTransferLastStatus) {
                 event.preventDefault()
@@ -1790,11 +1773,6 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onMouseWheel(event: WheelEvent) {
-        if (this.tryAdaptivePointerRelockFromGesture("wheel")) {
-            event.preventDefault()
-            event.stopPropagation()
-            return
-        }
         event.preventDefault()
         this.stream?.getInput().onMouseWheel(event)
 
@@ -1810,12 +1788,6 @@ class ViewerApp implements Component {
     onTouchStart(event: TouchEvent) {
         if (this.isStreamInputUiTarget(event.target)) return
         this.onUserInteraction()
-        if (this.tryAdaptivePointerRelockFromGesture("touch")) {
-            event.preventDefault()
-            event.stopPropagation()
-            return
-        }
-
         event.preventDefault()
         this.stream?.getInput().onTouchStart(event, this.getStreamRect())
 
@@ -2185,48 +2157,9 @@ class ViewerApp implements Component {
     }
 
     async requestFullscreen() {
-        const body = document.body
-        if (body) {
-            if (!this.canAttemptFullscreen()) {
-                await showMessage("Fullscreen is not supported by your browser!")
-
-                return
-            }
-
-            this.focusInput()
-
-            if (!this.isFullscreen()) {
-                try {
-                    await body.requestFullscreen({
-                        navigationUI: "hide"
-                    })
-                } catch (e) {
-                    console.warn("failed to request fullscreen", e)
-                }
-            }
-
-            if ("keyboard" in navigator && navigator.keyboard && "lock" in navigator.keyboard) {
-                await navigator.keyboard.lock()
-            }
-
-            if (this.getStream()?.getInput().getConfig().mouseMode == "relative") {
-                await this.requestPointerLock()
-            }
-
-            try {
-                if (screen && "orientation" in screen) {
-                    const orientation = screen.orientation
-
-                    if ("lock" in orientation && typeof orientation.lock == "function") {
-                        await orientation.lock("landscape")
-                    }
-                }
-            } catch (e) {
-                console.warn("failed to set orientation to landscape", e)
-            }
-        } else {
-            console.warn("root element not found")
-        }
+        // UX preference: avoid browser fullscreen prompts that can resize/reflow the page mid-game.
+        this.adaptiveLog("requestFullscreen suppressed to avoid browser popup/reflow")
+        return
     }
     async exitFullscreen() {
         if ("keyboard" in navigator && navigator.keyboard && "unlock" in navigator.keyboard) {
