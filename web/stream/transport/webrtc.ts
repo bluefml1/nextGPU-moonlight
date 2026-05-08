@@ -1,5 +1,5 @@
 import { StreamSignalingMessage, TransportChannelId } from "../../api_bindings.js";
-import { Logger } from "../log.js";
+import { Logger, LogMessageInfo } from "../log.js";
 import { StatValue } from "../stats.js";
 import { allVideoCodecs, CAPABILITIES_CODECS, emptyVideoCodecs, maybeVideoCodecs, VideoCodecSupport } from "../video.js";
 import { DataTransportChannel, Transport, TRANSPORT_CHANNEL_OPTIONS, TransportAudioSetup, TransportChannel, TransportChannelIdKey, TransportChannelIdValue, TransportVideoSetup, AudioTrackTransportChannel, VideoTrackTransportChannel, TrackTransportChannel, TransportShutdown } from "./index.js";
@@ -78,9 +78,20 @@ export class WebRTCTransport implements Transport {
     onIceRestartRequested: (() => void) | null = null
     private connectedOnce = false
     private readonly lockIceAfterConnected = true
+    /** When false (default), browser does not send initial SDP offers; streamer is the offerer. Set true only for exceptional browser-driven negotiation. */
+    private allowBrowserInitiatedNegotiation = false
+    /** When true (default), skip noisy logger.debug on hot paths; keep connection-state and error-adjacent logs. */
+    private readonly minimalLogs = true
 
     constructor(logger?: Logger) {
         this.logger = logger ?? null
+    }
+
+    private debugVerbose(message: string, info?: LogMessageInfo) {
+        if (this.minimalLogs) {
+            return
+        }
+        this.logger?.debug(message, info)
     }
 
     private normalizeIceServerUrls(urls: string | string[]): string[] {
@@ -137,10 +148,10 @@ export class WebRTCTransport implements Transport {
     }
 
     async initPeer(configuration?: RTCConfiguration, mode: WebRTCIceMode = "prefer-direct") {
-        this.logger?.debug(`Creating Client Peer`)
+        this.debugVerbose(`Creating Client Peer`)
 
         if (this.peer) {
-            this.logger?.debug(`Cannot create Peer because a Peer already exists`)
+            this.debugVerbose(`Cannot create Peer because a Peer already exists`)
             return
         }
 
@@ -192,7 +203,7 @@ export class WebRTCTransport implements Transport {
                     server.urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"))
                 )
                 : normalized
-            this.logger?.debug(`Normalized ICE servers (${this.iceMode}): ${before} -> ${baseConfig.iceServers.length}`)
+            this.debugVerbose(`Normalized ICE servers (${this.iceMode}): ${before} -> ${baseConfig.iceServers.length}`)
         }
 
         baseConfig.iceTransportPolicy = this.iceMode == "relay-only" ? "relay" : "all"
@@ -211,17 +222,16 @@ export class WebRTCTransport implements Transport {
         this.peer.addEventListener("track", this.onTrack.bind(this))
         this.peer.addEventListener("datachannel", this.onDataChannel.bind(this))
 
-        // Keep connect-time footprint small; create optional fileTransfer channel after connect.
-        this.fileTransferChannel = null
-
         this.initChannels()
+        // Pre-declare fileTransfer so it is in the first SDP (avoids post-connect renegotiation).
+        this.fileTransferChannel = this.setupFileSender(this.peer)
 
         // Maybe we already received data
         if (this.remoteDescription) {
             await this.handleRemoteDescription(this.remoteDescription)
         } else {
             this.syncStartTimer = window.setTimeout(() => {
-                this.logger?.debug(`Sync start timeout (${this.syncStartTimeoutMs}ms), starting negotiation locally`)
+                this.debugVerbose(`Sync start timeout (${this.syncStartTimeoutMs}ms), starting negotiation locally`)
                 void this.startSynchronizedNegotiation("local-timeout")
             }, this.syncStartTimeoutMs)
         }
@@ -242,10 +252,10 @@ export class WebRTCTransport implements Transport {
             this.relayBlockExtended = false
             this.relayBlockUntilMs = Date.now() + this.currentRelayBlockWindowMs
             this.scheduleRelayUnblock(this.currentRelayBlockWindowMs, `relay-block-window-${this.currentRelayBlockWindowMs}ms`)
-            this.logger?.debug(`Blocking relay candidates for adaptive initial ${this.currentRelayBlockWindowMs}ms window`)
+            this.debugVerbose(`Blocking relay candidates for adaptive initial ${this.currentRelayBlockWindowMs}ms window`)
         }
-        this.logger?.debug(`Starting synchronized negotiation (${reason})`)
-        await this.onNegotiationNeeded()
+        this.debugVerbose(`Starting synchronized negotiation (${reason})`)
+        // Streamer sends the offer after SyncReady; browser only flushes buffered ICE.
         if (this.bufferedLocalCandidates.length > 0) {
             for (const candidate of this.bufferedLocalCandidates.splice(0)) {
                 this.sendMessage({
@@ -261,11 +271,19 @@ export class WebRTCTransport implements Transport {
     }
 
     private scheduleRelayUnblock(delayMs: number, reason: string) {
+        if (this.lockIceAfterConnected && this.connectedOnce) {
+            return
+        }
         if (this.relayUnblockTimer != null) {
             clearTimeout(this.relayUnblockTimer)
         }
         this.relayUnblockTimer = window.setTimeout(() => {
             this.relayUnblockTimer = null
+            if (this.lockIceAfterConnected && this.connectedOnce) {
+                this.delayedLocalRelayCandidates.length = 0
+                this.delayedRemoteRelayCandidates.length = 0
+                return
+            }
             if (
                 this.iceMode == "prefer-direct" &&
                 !this.relayBlockExtended &&
@@ -279,7 +297,7 @@ export class WebRTCTransport implements Transport {
                     this.relayBlockExtended = true
                     this.currentRelayBlockWindowMs += extensionMs
                     this.relayBlockUntilMs = Date.now() + extensionMs
-                    this.logger?.debug(`Extending relay block by ${extensionMs}ms while waiting for srflx signals`)
+                    this.debugVerbose(`Extending relay block by ${extensionMs}ms while waiting for srflx signals`)
                     this.scheduleRelayUnblock(extensionMs, `relay-block-extension-${extensionMs}ms`)
                     return
                 }
@@ -316,19 +334,19 @@ export class WebRTCTransport implements Transport {
             return
         }
         if (this.peer?.connectionState == "connected") {
-            this.logger?.debug("Dropping delayed relay candidates because P2P already connected")
+            this.debugVerbose("Dropping delayed relay candidates because P2P already connected")
             this.delayedLocalRelayCandidates.length = 0
             this.delayedRemoteRelayCandidates.length = 0
             return
         }
         if (!this.peer || !this.peer.remoteDescription) {
-            this.logger?.debug("Remote description not ready; re-queueing delayed remote relay candidates")
+            this.debugVerbose("Remote description not ready; re-queueing delayed remote relay candidates")
             for (const candidate of this.delayedRemoteRelayCandidates.splice(0)) {
                 this.queueBufferedRemoteCandidate(candidate)
             }
             return
         }
-        this.logger?.debug(
+        this.debugVerbose(
             `Flushing delayed relay candidates (${reason}): local=${this.delayedLocalRelayCandidates.length}, remote=${this.delayedRemoteRelayCandidates.length}`
         )
         for (const candidate of this.delayedLocalRelayCandidates.splice(0)) {
@@ -345,7 +363,7 @@ export class WebRTCTransport implements Transport {
             try {
                 await this.peer.addIceCandidate(candidate)
             } catch (err) {
-                this.logger?.debug(`Failed to apply delayed remote relay candidate: ${err}`)
+                this.debugVerbose(`Failed to apply delayed remote relay candidate: ${err}`)
             }
         }
     }
@@ -365,7 +383,7 @@ export class WebRTCTransport implements Transport {
             for (let i = 0; i < this.remoteSrflxBurstPackets; i++) {
                 rtt.send(packet)
             }
-            this.logger?.debug(`Sent remote-srflx aggressive packet burst (${this.remoteSrflxBurstPackets} packets)`)
+            this.debugVerbose(`Sent remote-srflx aggressive packet burst (${this.remoteSrflxBurstPackets} packets)`)
             return true
         }
         try {
@@ -382,7 +400,7 @@ export class WebRTCTransport implements Transport {
                             this.remoteSrflxBurstRetryTimer = null
                         }
                         if (this.remoteSrflxBurstRetries >= this.maxRemoteSrflxBurstRetries) {
-                            this.logger?.debug("Remote srflx burst retries exhausted before RTT channel became usable")
+                            this.debugVerbose("Remote srflx burst retries exhausted before RTT channel became usable")
                         }
                     }
                 } catch (err) {
@@ -390,11 +408,11 @@ export class WebRTCTransport implements Transport {
                         clearInterval(this.remoteSrflxBurstRetryTimer)
                         this.remoteSrflxBurstRetryTimer = null
                     }
-                    this.logger?.debug(`Remote srflx burst retry failed: ${err}`)
+                    this.debugVerbose(`Remote srflx burst retry failed: ${err}`)
                 }
             }, 20)
         } catch (err) {
-            this.logger?.debug(`Failed to schedule remote-srflx packet burst: ${err}`)
+            this.debugVerbose(`Failed to schedule remote-srflx packet burst: ${err}`)
         }
     }
 
@@ -409,13 +427,13 @@ export class WebRTCTransport implements Transport {
         dc.binaryType = "arraybuffer"
         dc.bufferedAmountLowThreshold = this.FILE_TRANSFER_BUFFERED_LIMIT / 2
         dc.addEventListener("open", () => {
-            this.logger?.debug("fileTransfer channel open")
+            this.debugVerbose("fileTransfer channel open")
         })
         dc.addEventListener("close", () => {
-            this.logger?.debug("fileTransfer channel closed")
+            this.debugVerbose("fileTransfer channel closed")
         })
         dc.addEventListener("error", (event) => {
-            this.logger?.debug(`fileTransfer channel error: ${event}`)
+            this.debugVerbose(`fileTransfer channel error: ${event}`)
         })
         return dc
     }
@@ -438,10 +456,10 @@ export class WebRTCTransport implements Transport {
                         expectedFileSize = meta.size
                         receivedBytes = 0
                         chunks = []
-                        this.logger?.debug(`Receiving file over DataChannel: ${expectedFileName} (${expectedFileSize} bytes)`)
+                        this.debugVerbose(`Receiving file over DataChannel: ${expectedFileName} (${expectedFileSize} bytes)`)
                     }
                 } catch {
-                    this.logger?.debug("fileTransfer received invalid metadata JSON")
+                    this.debugVerbose("fileTransfer received invalid metadata JSON")
                 }
                 return
             }
@@ -454,11 +472,11 @@ export class WebRTCTransport implements Transport {
             receivedBytes += event.data.byteLength
             const progress = Math.min(100, Math.round((receivedBytes / expectedFileSize) * 100))
             this.onFileTransferProgress?.("receive", expectedFileName, progress)
-            this.logger?.debug(`fileTransfer receive progress: ${expectedFileName} ${progress}% (${receivedBytes}/${expectedFileSize})`)
+            this.debugVerbose(`fileTransfer receive progress: ${expectedFileName} ${progress}% (${receivedBytes}/${expectedFileSize})`)
 
             if (receivedBytes >= expectedFileSize) {
                 const file = new Blob(chunks)
-                this.logger?.debug(`fileTransfer receive complete: ${expectedFileName} (${receivedBytes} bytes)`)
+                this.debugVerbose(`fileTransfer receive complete: ${expectedFileName} (${receivedBytes} bytes)`)
                 this.onFileReceived?.(expectedFileName, file)
 
                 // reset receiver state for next file
@@ -511,13 +529,13 @@ export class WebRTCTransport implements Transport {
 
             const progress = Math.min(100, Math.round((sentBytes / file.size) * 100))
             this.onFileTransferProgress?.("send", file.name, progress)
-            this.logger?.debug(`fileTransfer send progress: ${file.name} ${progress}% (${sentBytes}/${file.size})`)
+            this.debugVerbose(`fileTransfer send progress: ${file.name} ${progress}% (${sentBytes}/${file.size})`)
 
             // Small pacing delay to avoid media starvation when network is tight
             await this.sleep(1)
         }
 
-        this.logger?.debug(`fileTransfer send complete: ${file.name} (${file.size} bytes)`)
+        this.debugVerbose(`fileTransfer send complete: ${file.name} (${file.size} bytes)`)
     }
 
     private onError(event: Event) {
@@ -531,7 +549,7 @@ export class WebRTCTransport implements Transport {
         if (this.onsendmessage) {
             this.onsendmessage(message)
         } else {
-            this.logger?.debug("Failed to call onicecandidate because no handler is set")
+            this.debugVerbose("Failed to call onicecandidate because no handler is set")
         }
     }
     async onReceiveMessage(message: StreamSignalingMessage) {
@@ -539,7 +557,7 @@ export class WebRTCTransport implements Transport {
             if (message == "SyncStart") {
                 await this.startSynchronizedNegotiation("remote-start")
             } else if (message == "SyncReady") {
-                this.logger?.debug("Received sync-ready from remote (ignored on browser side)")
+                this.debugVerbose("Received sync-ready from remote (ignored on browser side)")
             }
             return
         }
@@ -563,16 +581,24 @@ export class WebRTCTransport implements Transport {
     private async onNegotiationNeeded() {
         // We're polite
         if (!this.peer) {
-            this.logger?.debug("OnNegotiationNeeded without a peer")
+            this.debugVerbose("OnNegotiationNeeded without a peer")
+            return
+        }
+        if (this.lockIceAfterConnected && this.connectedOnce) {
+            this.debugVerbose("OnNegotiationNeeded ignored due to post-connect freeze")
+            return
+        }
+        if (!this.connectedOnce && this.iceMode !== "relay-only" && !this.allowBrowserInitiatedNegotiation) {
+            this.debugVerbose("OnNegotiationNeeded suppressed (streamer is offerer in prefer-direct)")
             return
         }
         if (this.iceMode == "prefer-direct" && !this.syncStarted) {
-            this.logger?.debug("OnNegotiationNeeded deferred until sync start")
+            this.debugVerbose("OnNegotiationNeeded deferred until sync start")
             return
         }
          // Avoid renegotiation spam: only allow one negotiation at a time
         if (this.isNegotiating || this.peer.signalingState !== "stable") {
-            this.logger?.debug("OnNegotiationNeeded ignored because negotiation is already in progress")
+            this.debugVerbose("OnNegotiationNeeded ignored because negotiation is already in progress")
             return
         }
 
@@ -582,7 +608,7 @@ export class WebRTCTransport implements Transport {
             await this.peer.setLocalDescription()
             const localDescription = this.peer.localDescription
             if (!localDescription) {
-                this.logger?.debug("Failed to set local description in OnNegotiationNeeded")
+                this.debugVerbose("Failed to set local description in OnNegotiationNeeded")
                 return
             }
 
@@ -590,7 +616,7 @@ export class WebRTCTransport implements Transport {
                 ? this.enforceRelayInSdp(localDescription.sdp ?? "")
                 : this.deprioritizeRelayInSdp(localDescription.sdp ?? "")
 
-            this.logger?.debug(`OnNegotiationNeeded: Sending local description (${this.iceMode}): ${localDescription.type}`)
+            this.debugVerbose(`OnNegotiationNeeded: Sending local description (${this.iceMode}): ${localDescription.type}`)
             this.sendMessage({
                 Description: {
                     ty: localDescription.type,
@@ -601,7 +627,7 @@ export class WebRTCTransport implements Transport {
                 this.initialOfferSent = true
             }
         } catch (err) {
-            this.logger?.debug(`OnNegotiationNeeded failed: ${err}`)
+            this.debugVerbose(`OnNegotiationNeeded failed: ${err}`)
             // In case of error, clear negotiation flag so we can recover
             this.isNegotiating = false
         }
@@ -609,7 +635,7 @@ export class WebRTCTransport implements Transport {
 
     private remoteDescription: RTCSessionDescriptionInit | null = null
     private async handleRemoteDescription(sdp: RTCSessionDescriptionInit | null) {
-        this.logger?.debug(`Received remote description: ${sdp?.type}`)
+        this.debugVerbose(`Received remote description: ${sdp?.type}`)
 
         const remoteDescription = sdp
         this.remoteDescription = remoteDescription
@@ -619,6 +645,10 @@ export class WebRTCTransport implements Transport {
         this.remoteDescription = null
 
         if (remoteDescription) {
+            if (this.lockIceAfterConnected && this.connectedOnce && remoteDescription.type == "offer") {
+                this.debugVerbose("Ignoring remote offer due to post-connect freeze")
+                return
+            }
             try {
                 // Remote description handling is part of negotiation; mark as negotiating to
                 // avoid conflicting local renegotiations until we reach a stable state again.
@@ -628,7 +658,7 @@ export class WebRTCTransport implements Transport {
                     remoteDescription.type == "offer" &&
                     this.peer.signalingState != "stable"
                 ) {
-                    this.logger?.debug(
+                    this.debugVerbose(
                         `Offer glare detected (state=${this.peer.signalingState}), rolling back local description`
                     )
                     await this.peer.setLocalDescription({ type: "rollback" })
@@ -649,7 +679,7 @@ export class WebRTCTransport implements Transport {
                     await this.peer.setLocalDescription()
                     const localDescription = this.peer.localDescription
                     if (!localDescription) {
-                        this.logger?.debug("Peer didn't have a localDescription whilst receiving an offer and trying to answer")
+                        this.debugVerbose("Peer didn't have a localDescription whilst receiving an offer and trying to answer")
                         return
                     }
 
@@ -657,7 +687,7 @@ export class WebRTCTransport implements Transport {
                         ? this.enforceRelayInSdp(localDescription.sdp ?? "")
                         : this.deprioritizeRelayInSdp(localDescription.sdp ?? "")
 
-                    this.logger?.debug(`Responding to offer description (${this.iceMode}): ${localDescription.type}`)
+                    this.debugVerbose(`Responding to offer description (${this.iceMode}): ${localDescription.type}`)
                     this.sendMessage({
                         Description: {
                             ty: localDescription.type,
@@ -666,7 +696,7 @@ export class WebRTCTransport implements Transport {
                     })
                 }
             } catch (err) {
-                this.logger?.debug(`handleRemoteDescription failed: ${err}`)
+                this.debugVerbose(`handleRemoteDescription failed: ${err}`)
                 // On error, clear negotiation flag so we can recover
                 this.isNegotiating = false
             }
@@ -684,7 +714,7 @@ export class WebRTCTransport implements Transport {
             const isPriorityCandidate = candidateType == "srflx" || candidateType == "prflx" || candidateType == "relay"
 
             if (this.shouldDropLocalCandidate(candidateLine)) {
-                this.logger?.debug(`Dropping ICE candidate (${this.iceMode}): ${candidateLine}`)
+                this.debugVerbose(`Dropping ICE candidate (${this.iceMode}): ${candidateLine}`)
                 return
             }
 
@@ -694,14 +724,14 @@ export class WebRTCTransport implements Transport {
                 candidateType == "host" &&
                 this.emittedIceCandidateCount >= this.maxHostCandidatesBeforeSrflx
             ) {
-                this.logger?.debug(
+                this.debugVerbose(
                     `Dropping excess host candidate before srflx (${this.maxHostCandidatesBeforeSrflx}): ${candidateLine}`
                 )
                 return
             }
 
             if (!isPriorityCandidate && this.emittedIceCandidateCount >= this.maxLocalIceCandidates) {
-                this.logger?.debug(`Dropping ICE candidate due to local cap (${this.maxLocalIceCandidates})`)
+                this.debugVerbose(`Dropping ICE candidate due to local cap (${this.maxLocalIceCandidates})`)
                 return
             }
 
@@ -710,7 +740,7 @@ export class WebRTCTransport implements Transport {
                 for (const wake of this.srflxWaiters.splice(0)) {
                     wake()
                 }
-                this.logger?.debug(`Observed srflx candidate in ${this.iceMode}: ${candidateLine}`)
+                this.debugVerbose(`Observed srflx candidate in ${this.iceMode}: ${candidateLine}`)
             }
 
             if (candidate.candidate && this.iceMode == "prefer-direct") {
@@ -731,7 +761,7 @@ export class WebRTCTransport implements Transport {
             }
 
             this.emittedIceCandidateCount += 1
-            this.logger?.debug(`Sending ICE candidate (${this.iceMode}): ${candidate.candidate}`)
+            this.debugVerbose(`Sending ICE candidate (${this.iceMode}): ${candidate.candidate}`)
 
             if (this.iceMode == "prefer-direct" && candidateType == "relay") {
                 if (Date.now() < this.relayBlockUntilMs) {
@@ -741,7 +771,7 @@ export class WebRTCTransport implements Transport {
                         sdpMLineIndex: candidate.sdpMLineIndex ?? null,
                         usernameFragment: candidate.usernameFragment ?? null,
                     })
-                    this.logger?.debug("Blocking local relay candidate during initial P2P-first window")
+                    this.debugVerbose("Blocking local relay candidate during initial P2P-first window")
                     return
                 }
             }
@@ -753,7 +783,7 @@ export class WebRTCTransport implements Transport {
                     sdpMLineIndex: candidate.sdpMLineIndex ?? null,
                     usernameFragment: candidate.usernameFragment ?? null
                 })
-                this.logger?.debug("Buffering local ICE candidate until synchronized start")
+                this.debugVerbose("Buffering local ICE candidate until synchronized start")
             } else {
                 this.sendMessage({
                     AddIceCandidate: {
@@ -765,7 +795,7 @@ export class WebRTCTransport implements Transport {
                 })
             }
         } else {
-            this.logger?.debug("No new ice candidates")
+            this.debugVerbose("No new ice candidates")
         }
     }
 
@@ -831,16 +861,16 @@ export class WebRTCTransport implements Transport {
         if (this.lockIceAfterConnected && this.connectedOnce) {
             return
         }
-        this.logger?.debug(`Received ice candidate: ${candidate.candidate}`)
+        this.debugVerbose(`Received ice candidate: ${candidate.candidate}`)
         const candidateLine = (candidate.candidate ?? "").toLowerCase()
         if (candidateLine.includes(" tcp ")) {
-            this.logger?.debug("Ignoring remote TCP ICE candidate")
+            this.debugVerbose("Ignoring remote TCP ICE candidate")
             return
         }
         if (this.iceMode == "prefer-direct" && candidateLine.includes(" typ relay ")) {
             if (Date.now() < this.relayBlockUntilMs) {
                 this.queueDelayedRelayCandidate("remote", candidate)
-                this.logger?.debug("Blocking remote relay candidate during initial P2P-first window")
+                this.debugVerbose("Blocking remote relay candidate during initial P2P-first window")
                 return
             }
         }
@@ -849,7 +879,7 @@ export class WebRTCTransport implements Transport {
             this.triggerRemoteSrflxPacketBurst()
         }
         if (!this.peer || !this.peer.remoteDescription) {
-            this.logger?.debug("Buffering ice candidate")
+            this.debugVerbose("Buffering ice candidate")
             this.queueBufferedRemoteCandidate(candidate)
             return
         }
@@ -859,11 +889,11 @@ export class WebRTCTransport implements Transport {
     }
     private async tryDequeueIceCandidates() {
         if (!this.peer) {
-            this.logger?.debug("called tryDequeueIceCandidates without a peer")
+            this.debugVerbose("called tryDequeueIceCandidates without a peer")
             return
         }
         if (!this.peer.remoteDescription) {
-            this.logger?.debug("Deferring queued ICE candidate apply until remote description is set")
+            this.debugVerbose("Deferring queued ICE candidate apply until remote description is set")
             return
         }
 
@@ -882,7 +912,7 @@ export class WebRTCTransport implements Transport {
             return
         }
         if (this.restartAttempts >= this.maxRestartAttempts) {
-            this.logger?.debug(`Skipping ICE restart (${reason}): max retries reached`)
+            this.debugVerbose(`Skipping ICE restart (${reason}): max retries reached`)
             return
         }
         if (this.restartTimer != null) {
@@ -895,7 +925,7 @@ export class WebRTCTransport implements Transport {
             if (!this.peer || this.peer.connectionState == "closed") {
                 return
             }
-            this.logger?.debug(`Running ICE restart attempt #${this.restartAttempts} (${reason})`)
+            this.debugVerbose(`Running ICE restart attempt #${this.restartAttempts} (${reason})`)
             this.onIceRestartRequested?.()
             this.peer.restartIce()
             void this.onNegotiationNeeded()
@@ -904,7 +934,7 @@ export class WebRTCTransport implements Transport {
 
     private onConnectionStateChange() {
         if (!this.peer) {
-            this.logger?.debug("OnConnectionStateChange without a peer")
+            this.debugVerbose("OnConnectionStateChange without a peer")
             return
         }
 
@@ -915,26 +945,26 @@ export class WebRTCTransport implements Transport {
             type = "recover"
             this.delayedLocalRelayCandidates.length = 0
             this.delayedRemoteRelayCandidates.length = 0
+            if (this.relayUnblockTimer != null) {
+                clearTimeout(this.relayUnblockTimer)
+                this.relayUnblockTimer = null
+            }
             if (this.restartTimer != null) {
                 clearTimeout(this.restartTimer)
                 this.restartTimer = null
             }
-            if (!this.fileTransferChannel) {
-                this.fileTransferChannel = this.setupFileSender(this.peer)
-            }
-
             if (this.onconnect) {
                 this.onconnect()
 
                 // Log selected ICE candidate pair details once the connection is established
                 this.logSelectedCandidatePairDetails().catch(err => {
-                    this.logger?.debug(`Failed to log ICE candidate pair details: ${err}`)
+                    this.debugVerbose(`Failed to log ICE candidate pair details: ${err}`)
                 })
             }
             if (this.selectedPairLogTimer == null) {
                 this.selectedPairLogTimer = window.setInterval(() => {
                     void this.logSelectedCandidatePairDetails()
-                }, 2000)
+                }, 10000)
             }
             this.wasConnected = true
         } else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "closed") && this.peer.iceGatheringState == "complete") {
@@ -987,7 +1017,7 @@ export class WebRTCTransport implements Transport {
             }
 
             if (!selectedPair) {
-                this.logger?.debug("No nominated ICE candidate pair found in stats")
+                this.debugVerbose("No nominated ICE candidate pair found in stats")
                 return
             }
 
@@ -1031,30 +1061,36 @@ export class WebRTCTransport implements Transport {
 
             const pairSignature = `${details.pair.id}:${details.pair.state}:${details.localCandidate?.candidateType}:${details.remoteCandidate?.candidateType}`
             const mappingSignature = `${details.localCandidate?.address}:${details.localCandidate?.port}:${details.remoteCandidate?.address}:${details.remoteCandidate?.port}`
+            const pairSigChanged = this.lastLoggedPairSignature !== pairSignature
             if (this.lastLoggedPairSignature != pairSignature) {
                 if (this.lastLoggedPairSignature) {
-                    this.logger?.debug(`ICE pair transition: ${this.lastLoggedPairSignature} -> ${pairSignature}`)
+                    this.debugVerbose(`ICE pair transition: ${this.lastLoggedPairSignature} -> ${pairSignature}`)
                 }
                 this.lastLoggedPairSignature = pairSignature
             }
             if (this.lastLoggedMappingSignature != mappingSignature) {
                 if (this.lastLoggedMappingSignature) {
-                    this.logger?.debug(`NAT mapping change detected: ${this.lastLoggedMappingSignature} -> ${mappingSignature}`)
+                    this.debugVerbose(`NAT mapping change detected: ${this.lastLoggedMappingSignature} -> ${mappingSignature}`)
                 } else {
-                    this.logger?.debug(`Initial NAT mapping: ${mappingSignature}`)
+                    this.debugVerbose(`Initial NAT mapping: ${mappingSignature}`)
                 }
                 this.lastLoggedMappingSignature = mappingSignature
             }
             const pathScore = this.computePathScore(details)
-            if (Date.now() - this.lastPathScoreLogAt >= this.pathScoreLogCooldownMs) {
+            if (
+                (!this.minimalLogs || pairSigChanged) &&
+                Date.now() - this.lastPathScoreLogAt >= this.pathScoreLogCooldownMs
+            ) {
                 this.lastPathScoreLogAt = Date.now()
-                this.logger?.debug(`ICE path score: ${JSON.stringify(pathScore)}`)
+                this.debugVerbose(`ICE path score: ${JSON.stringify(pathScore)}`)
             }
             this.maybeEscapeHatchRelayUnblock(pathScore, details)
             this.maybeApplyRelaySuppressionBias(details, pathScore)
-            this.logger?.debug(`Selected ICE candidate pair: ${JSON.stringify(details)}`)
+            if (!this.minimalLogs || pairSigChanged) {
+                this.debugVerbose(`Selected ICE candidate pair: ${JSON.stringify(details)}`)
+            }
         } catch (err) {
-            this.logger?.debug(`Error while collecting ICE candidate stats: ${err}`)
+            this.debugVerbose(`Error while collecting ICE candidate stats: ${err}`)
         }
     }
 
@@ -1232,7 +1268,7 @@ export class WebRTCTransport implements Transport {
             return
         }
         this.relayBlockUntilMs = Date.now()
-        this.logger?.debug(
+        this.debugVerbose(
             `Relay escape hatch: unblocking relay candidates (hardFail=${hardFail}, budgetExhausted=${budgetExhausted}, ` +
             `cumulativeSuppressionMs=${this.cumulativeRelaySuppressionMs})`
         )
@@ -1312,14 +1348,14 @@ export class WebRTCTransport implements Transport {
             this.relaySuppressionBiasApplied = true
         }
         this.relayBlockUntilMs = Math.max(this.relayBlockUntilMs, Date.now() + extraSuppressMs)
-        this.logger?.debug(
+        this.debugVerbose(
             `Relay suppression bias (L3): +${extraSuppressMs}ms block (optimizationScore=${score.optimizationScore}, ` +
             `cumulativeSuppressionMs=${this.cumulativeRelaySuppressionMs}/${this.maxCumulativeRelaySuppressionMs})`
         )
     }
     private onSignalingStateChange() {
         if (!this.peer) {
-            this.logger?.debug("OnSignalingStateChange without a peer")
+            this.debugVerbose("OnSignalingStateChange without a peer")
             return
         }
         // Once we return to a stable signaling state, allow new negotiations
@@ -1329,10 +1365,10 @@ export class WebRTCTransport implements Transport {
     }
     private onIceConnectionStateChange() {
         if (!this.peer) {
-            this.logger?.debug("OnIceConnectionStateChange without a peer")
+            this.debugVerbose("OnIceConnectionStateChange without a peer")
             return
         }
-        this.logger?.debug(`Changing Peer Ice State to ${this.peer.iceConnectionState}`)
+        this.debugVerbose(`Changing Peer Ice State to ${this.peer.iceConnectionState}`)
         if (this.peer.iceConnectionState == "connected" || this.peer.iceConnectionState == "completed") {
             this.restartAttempts = 0
             if (this.relayRaceStartedAtMs == 0) {
@@ -1352,13 +1388,13 @@ export class WebRTCTransport implements Transport {
     }
     private onIceGatheringStateChange() {
         if (!this.peer) {
-            this.logger?.debug("OnIceGatheringStateChange without a peer")
+            this.debugVerbose("OnIceGatheringStateChange without a peer")
             return
         }
         if (this.lockIceAfterConnected && this.connectedOnce) {
             return
         }
-        this.logger?.debug(`Changing Peer Ice Gathering State to ${this.peer.iceGatheringState}`)
+        this.debugVerbose(`Changing Peer Ice Gathering State to ${this.peer.iceGatheringState}`)
 
         if (this.peer.iceConnectionState == "new" && this.peer.iceGatheringState == "complete") {
             // we failed without connection
@@ -1371,11 +1407,11 @@ export class WebRTCTransport implements Transport {
     private channels: Array<TransportChannel | null> = []
     private initChannels() {
         if (!this.peer) {
-            this.logger?.debug("Failed to initialize channel without peer")
+            this.debugVerbose("Failed to initialize channel without peer")
             return
         }
         if (this.channels.length > 0) {
-            this.logger?.debug("Already initialized channels")
+            this.debugVerbose("Already initialized channels")
             return
         }
 
@@ -1385,7 +1421,7 @@ export class WebRTCTransport implements Transport {
 
             // Channel not configured in our minimal set
             if (!options) {
-                this.logger?.debug(`Skipping unconfigured transport channel: ${channel}`)
+                this.debugVerbose(`Skipping unconfigured transport channel: ${channel}`)
                 continue
             }
 
@@ -1428,7 +1464,7 @@ export class WebRTCTransport implements Transport {
             receiver.playoutDelayHint = 0
         }
 
-        this.logger?.debug(`Adding receiver: ${track.kind}, ${track.id}, ${track.label}`)
+        this.debugVerbose(`Adding receiver: ${track.kind}, ${track.id}, ${track.label}`)
 
         if (track.kind == "video") {
             if ("contentHint" in track) {
@@ -1454,7 +1490,7 @@ export class WebRTCTransport implements Transport {
         const remoteChannel = event.channel
         const label = remoteChannel.label
 
-        this.logger?.debug(`Received remote data channel: ${label}`)
+        this.debugVerbose(`Received remote data channel: ${label}`)
 
         if (label === "fileTransfer") {
             this.fileTransferChannel = remoteChannel
@@ -1471,14 +1507,14 @@ export class WebRTCTransport implements Transport {
             // If we already have a channel for this ID, replace its underlying RTCDataChannel
             // with the remote one so we can receive messages from the server
             if (existingChannel && existingChannel.type === "data") {
-                this.logger?.debug(`Replacing underlying channel for ${label} with remote channel`);
+                this.debugVerbose(`Replacing underlying channel for ${label} with remote channel`);
                 (existingChannel as WebRTCDataTransportChannel).replaceChannel(remoteChannel)
             } else {
-                this.logger?.debug(`Creating new channel for ${label}`)
+                this.debugVerbose(`Creating new channel for ${label}`)
                 this.channels[id] = new WebRTCDataTransportChannel(label, remoteChannel)
             }
         } else {
-            this.logger?.debug(`Unknown remote data channel: ${label}`)
+            this.debugVerbose(`Unknown remote data channel: ${label}`)
         }
     }
 
@@ -1528,7 +1564,7 @@ export class WebRTCTransport implements Transport {
     getChannel(id: TransportChannelIdValue): TransportChannel {
         const channel = this.channels[id]
         if (!channel) {
-            this.logger?.debug("Failed to setup video without peer")
+            this.debugVerbose("Failed to setup video without peer")
             throw `Failed to get channel because it is not yet initialized, Id: ${id}`
         }
 
@@ -1539,7 +1575,7 @@ export class WebRTCTransport implements Transport {
 
     onclose: ((shutdown: TransportShutdown) => void) | null = null
     async close(): Promise<void> {
-        this.logger?.debug("Closing WebRTC Peer")
+        this.debugVerbose("Closing WebRTC Peer")
         for (const wake of this.srflxWaiters.splice(0)) {
             wake()
         }
@@ -1576,10 +1612,15 @@ export class WebRTCTransport implements Transport {
         }
         const stats = await this.videoReceiver.getStats()
 
-        console.debug("----------------- raw video stats -----------------")
+        let firstRawLog = true
         for (const [key, value] of stats.entries()) {
-            console.debug("raw video stats", key, value)
-
+            if (!this.minimalLogs) {
+                if (firstRawLog) {
+                    console.debug("----------------- raw video stats -----------------")
+                    firstRawLog = false
+                }
+                console.debug("raw video stats", key, value)
+            }
             if ("decoderImplementation" in value && value.decoderImplementation != null) {
                 statsData.decoderImplementation = value.decoderImplementation
             }
@@ -1673,7 +1714,7 @@ export class WebRTCTransport implements Transport {
                     }
                 }
             } catch (err) {
-                this.logger?.debug(`Error while collecting live ICE stats: ${err}`)
+                this.debugVerbose(`Error while collecting live ICE stats: ${err}`)
             }
         }
 

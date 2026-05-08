@@ -20,7 +20,7 @@ import { LogMessageType, StreamCapabilities, StreamKeys, StreamKeyModifiers } fr
 import { ScreenKeyboard, TextEvent } from "./screen_keyboard.js";
 import { FormModal } from "./component/modal/form.js";
 import { StreamStatsData } from "./stream/stats.js";
-import { MoonlightFullscreenOverlay, MoonlightLoadingScreen, MoonlightPointerLockOverlay } from "./stream_overlays.js";
+import { MoonlightLoadingScreen, MoonlightPointerLockOverlay } from "./stream_overlays.js";
 import { runStreamProfileGate } from "./component/stream_profile_gate.js";
 
 /** Persisted stream viewer mouse/touch mode (separate from `mlSettings`). */
@@ -438,11 +438,10 @@ class ViewerApp implements Component {
     private adaptivePointerLockReleaseTimer: ReturnType<typeof setTimeout> | null = null
     private latestHostCursorHidden = false
     private pendingEscRelockPrompt = false
-    private fullscreenIntroSuppressed = false
     private pointerRelockNoticeEl: HTMLDivElement | null = null
-    private waitingForFullscreenGesture = false
     private loadingShownForCurrentStart = false
     private startupConnectionResolved = false
+    private hasConnectedOnce = false
 
     private devConnectionLog: DevStreamConnectionLog | null = null
     private devConnectionLogPoll: ReturnType<typeof setInterval> | null = null
@@ -728,40 +727,19 @@ class ViewerApp implements Component {
 
     private activateLoadingOverlayOnce() {
         if (this.loadingShownForCurrentStart || this.startupConnectionResolved) return
-        // Keep startup overlays mutually exclusive; loading starts only after fullscreen intro is gone.
-        if (MoonlightFullscreenOverlay.isVisible()) {
-            window.setTimeout(() => this.activateLoadingOverlayOnce(), 0)
-            return
-        }
         MoonlightLoadingScreen.show()
         this.loadingShownForCurrentStart = true
     }
 
     private beginStartupOverlays() {
-        this.waitingForFullscreenGesture = false
         this.loadingShownForCurrentStart = false
         this.startupConnectionResolved = false
-
-        if (this.canAttemptFullscreen() && !this.fullscreenIntroSuppressed) {
-            this.waitingForFullscreenGesture = true
-            MoonlightFullscreenOverlay.show(() => {
-                this.waitingForFullscreenGesture = false
-                this.activateLoadingOverlayOnce()
-                void this.requestFullscreen().catch((error) => {
-                    console.debug("startup fullscreen request failed", error)
-                })
-            })
-            return
-        }
-
         this.activateLoadingOverlayOnce()
     }
 
     private cleanupStartupOverlaysOnAbortOrUnmount() {
-        this.waitingForFullscreenGesture = false
         this.loadingShownForCurrentStart = false
         this.startupConnectionResolved = true
-        MoonlightFullscreenOverlay.hide()
         MoonlightLoadingScreen.hide()
     }
 
@@ -815,15 +793,14 @@ class ViewerApp implements Component {
             )
             return
         }
-        if (MoonlightFullscreenOverlay.isVisible()) {
-            this.adaptiveLog("esc relock overlay takes priority -> hide fullscreen intro")
-            MoonlightFullscreenOverlay.hide()
-            this.fullscreenIntroSuppressed = true
-        }
         getSidebarRoot()?.classList.add("sidebar-esc-relock-priority")
         this.adaptiveLog("show esc relock overlay")
         MoonlightPointerLockOverlay.show(() => {
             void this.attemptAdaptivePointerRelock("overlay-esc", false)
+        }, () => {
+            this.pendingEscRelockPrompt = false
+            this.hidePointerRelockNotice()
+            this.adaptiveLog("esc relock overlay dismissed by user")
         })
     }
 
@@ -906,6 +883,7 @@ class ViewerApp implements Component {
         this.statsCloseButton.addEventListener("click", () => {
             this.statsClosed = true
             this.statsDiv.hidden = true
+            this.getStream()?.getStats().setEnabled(false)
         })
         this.statsSummaryDiv.classList.add("video-stats-summary")
         this.statsDetailsDiv.classList.add("video-stats-details")
@@ -1035,12 +1013,12 @@ class ViewerApp implements Component {
         this.recoveryOverlay.hide()
         this.recoveryShown = false
         this.latestConnectionState = "Connecting"
+        this.hasConnectedOnce = false
 
         this.stream = new Stream(this.api, hostId, appId, settings, browserSize)
         // Apply viewer input config immediately (phone default touch mode, persisted modes, etc.)
         // so users don't need to manually reselect modes in the sidebar.
         this.stream.getInput().setConfig(this.inputConfig)
-        this.stream.getStats().setEnabled(true)
 
         // Add app info listener
         this.stream.addInfoListener(this.onInfo.bind(this))
@@ -1084,9 +1062,7 @@ class ViewerApp implements Component {
         if (this.recoveryShown) return
         this.recoveryShown = true
         this.startupConnectionResolved = true
-        this.waitingForFullscreenGesture = false
         this.cleanupStartupOverlaysOnAbortOrUnmount()
-        MoonlightFullscreenOverlay.hide()
         MoonlightLoadingScreen.hide()
         this.recoveryOverlay.show(message)
     }
@@ -1107,7 +1083,6 @@ class ViewerApp implements Component {
             this.adaptivePointerLockActive = false
             this.latestHostCursorHidden = false
             this.pendingEscRelockPrompt = false
-            this.fullscreenIntroSuppressed = false
             this.cleanupStartupOverlaysOnAbortOrUnmount()
             this.hideAdaptivePointerRelockOverlay()
             this.hidePointerRelockNotice()
@@ -1138,8 +1113,8 @@ class ViewerApp implements Component {
             document.title = `Stream: ${app.title}`
         } else if (data.type == "connectionComplete") {
             this.latestConnectionState = "Connected"
+            this.hasConnectedOnce = true
             this.startupConnectionResolved = true
-            this.waitingForFullscreenGesture = false
             this.sidebar.onCapabilitiesChange(data.capabilities)
             MoonlightLoadingScreen.hide()
             this.recoveryOverlay.hide()
@@ -1186,26 +1161,38 @@ class ViewerApp implements Component {
             }
         } else if (data.type == "addDebugLine") {
             const message = data.line.trim()
+            const isTerminalFatal =
+                message.startsWith("ConnectionTerminated") ||
+                message.includes("transport closed (failed)") ||
+                message.includes("transport closed (disconnect)")
             if (
                 message &&
                 data.additional &&
                 (data.additional.type === "fatal" || data.additional.type === "fatalDescription")
             ) {
-                showErrorPopup(message)
-                this.latestConnectionState = "Failed"
-                this.showConnectionRecovery("The stream could not be established or was terminated. Retry to reconnect using the current configuration.")
+                if (!this.hasConnectedOnce || isTerminalFatal) {
+                    showErrorPopup(message)
+                    this.latestConnectionState = "Failed"
+                    this.showConnectionRecovery("The stream could not be established or was terminated. Retry to reconnect using the current configuration.")
+                }
             } else if (data.additional?.type === "informError") {
                 showErrorPopup(data.line)
             } else if (message === "Web Socket Closed" || message === "Web Socket or WebRtcPeer Error") {
-                this.latestConnectionState = "Disconnected"
-                this.showConnectionRecovery("Connection was lost. Retry to reconnect, or open stream settings to adjust transport and quality.")
+                if (!this.hasConnectedOnce) {
+                    this.latestConnectionState = "Disconnected"
+                    this.showConnectionRecovery("Connection was lost. Retry to reconnect, or open stream settings to adjust transport and quality.")
+                }
             }
         } else if (data.type == "serverMessage") {
             MoonlightLoadingScreen.setSubtitle(`Server: ${data.message}`)
         } else if (data.type == "connectionStatus") {
             const statusText = String(data.status).toLowerCase()
             this.latestConnectionState = String(data.status)
-            if (statusText.includes("terminated") || statusText.includes("failed") || statusText.includes("disconnected")) {
+            const shouldShowRecovery =
+                statusText.includes("terminated") ||
+                statusText.includes("failed") ||
+                (!this.hasConnectedOnce && statusText.includes("disconnected"))
+            if (shouldShowRecovery) {
                 this.showConnectionRecovery("The session has been disconnected. Retry to reconnect or close this page.")
             }
         } else if (data.type == "fileTransferProgress") {
@@ -1474,7 +1461,7 @@ class ViewerApp implements Component {
         if (targetElement.closest("button, input, select, textarea, label, a, [role='button'], [role='slider'], [contenteditable='true']")) {
             return true
         }
-        if (targetElement.closest("#mlfso-overlay, #mlplo-overlay")) return true
+        if (targetElement.closest("#mlplo-overlay")) return true
         if (targetElement.closest(".sidebar-stream")) return true
         const modal = getModalBackground()
         if (modal && !modal.classList.contains("modal-disabled") && modal.contains(targetElement)) return true
@@ -1970,11 +1957,6 @@ class ViewerApp implements Component {
             this.cancelFullscreenExitEscHold()
             this.releaseAllKeys("fullscreen exited")
         } else {
-            MoonlightFullscreenOverlay.hide()
-            if (this.waitingForFullscreenGesture) {
-                this.waitingForFullscreenGesture = false
-                this.activateLoadingOverlayOnce()
-            }
             this.releaseAllKeys("fullscreen entered")
         }
     }
@@ -2063,7 +2045,6 @@ class ViewerApp implements Component {
                 this.getInputConfig().mouseMode !== "pointAndDrag"
             ) {
                 this.adaptivePointerLockArmed = true
-                this.fullscreenIntroSuppressed = true
                 this.showAdaptivePointerRelockOverlay()
                 this.showPointerRelockNotice()
                 this.adaptiveLog("pointer lock exited while host cursor hidden -> rearm and prompt relock")
@@ -2114,7 +2095,6 @@ class ViewerApp implements Component {
         this.adaptivePointerLockActive = false
         this.latestHostCursorHidden = false
         this.pendingEscRelockPrompt = false
-        this.fullscreenIntroSuppressed = false
         this.hideAdaptivePointerRelockOverlay()
         this.hidePointerRelockNotice()
         if (this.adaptivePointerLockReleaseTimer != null) {

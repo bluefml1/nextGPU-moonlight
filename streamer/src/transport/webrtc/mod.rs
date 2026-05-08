@@ -80,6 +80,7 @@ struct WebRtcInner {
     audio: Mutex<WebRtcAudio>,
     // Timeout / Terminate
     pub timeout_terminate_request: Mutex<Option<Instant>>,
+    connected_once: Mutex<bool>,
 }
 
 pub async fn new(
@@ -171,6 +172,7 @@ pub async fn new(
             audio_sample_queue_size,
         )),
         timeout_terminate_request: Mutex::new(None),
+        connected_once: Mutex::new(false),
     });
 
     // don't forget to register the general channel created by us
@@ -284,6 +286,10 @@ impl WebRtcInner {
     // -- Handle Connection State
     async fn on_ice_connection_state_change(self: &Arc<Self>, _state: RTCIceConnectionState) {}
     async fn on_peer_connection_state_change(self: Arc<Self>, state: RTCPeerConnectionState) {
+        if matches!(state, RTCPeerConnectionState::Connected) {
+            let mut connected_once = self.connected_once.lock().await;
+            *connected_once = true;
+        }
         #[allow(clippy::collapsible_if)]
         if matches!(state, RTCPeerConnectionState::Closed) {
             if let Err(err) = self.event_sender.send(TransportEvent::Closed).await {
@@ -313,7 +319,6 @@ impl WebRtcInner {
         }
     }
 
-    #[allow(unused)]
     async fn send_answer(&self) -> bool {
         let local_description = match self.peer.create_answer(None).await {
             Err(err) => {
@@ -465,9 +470,11 @@ impl WebRtcInner {
                 let remote_ty = description.sdp_type;
 
                 if remote_ty == RTCSdpType::Offer {
-                    // Send an offer if we got an offer because we want to make the offer
-                    // This makes negotiation more stable and consistant
-                    self.send_offer().await;
+                    if let Err(err) = self.peer.set_remote_description(description).await {
+                        error!("[Signaling]: failed to set remote description (offer): {err:?}");
+                        return;
+                    }
+                    self.send_answer().await;
                 } else {
                     if let Err(err) = self.peer.set_remote_description(description).await {
                         error!("[Signaling]: failed to set remote description: {err:?}");
@@ -475,6 +482,10 @@ impl WebRtcInner {
                 }
             }
             StreamClientMessage::WebRtc(StreamSignalingMessage::AddIceCandidate(description)) => {
+                if *self.connected_once.lock().await {
+                    debug!("[Signaling] Ignoring late browser ICE candidate after stable connection");
+                    return;
+                }
                 debug!("[Signaling] Received Ice Candidate");
 
                 if let Err(err) = self
@@ -503,6 +514,10 @@ impl WebRtcInner {
     }
 
     async fn on_ice_candidate(&self, candidate: Option<RTCIceCandidate>) {
+        if *self.connected_once.lock().await {
+            debug!("[Signaling] Skipping outgoing ICE candidate after stable connection");
+            return;
+        }
         let Some(candidate) = candidate else {
             return;
         };
