@@ -447,7 +447,27 @@ class ViewerApp implements Component {
     private devConnectionLogPoll: ReturnType<typeof setInterval> | null = null
     private lastSidebarAnchorKey = ""
     private settingsQuickButton: HTMLButtonElement | null = null
+    /** Viewport `right` offset (px) for #ml-settings-quick-button; shifts left when the right sidebar panel is open so the button stays outside the panel. */
+    private settingsQuickButtonDockRightPx = 12
+    private quickDockPostTransitionTimer: ReturnType<typeof setTimeout> | null = null
+    private readonly windowResizeForQuickDock = () => {
+        this.scheduleSyncSettingsQuickButtonDock()
+    }
+    private readonly sidebarBackgroundTransitionDock = (ev: Event) => {
+        const te = ev as TransitionEvent
+        if (!(ev.target instanceof HTMLElement) || !ev.target.classList.contains("sidebar-background")) {
+            return
+        }
+        if (te.propertyName !== "transform") {
+            return
+        }
+        this.syncSettingsQuickButtonDockPosition()
+    }
     private keyboardFallbackButton: HTMLButtonElement | null = null
+    private fullscreenToggleButton: HTMLButtonElement | null = null
+    private statsControlsGroup: HTMLDivElement | null = null
+    private fullscreenToggleButtonManualPosition = false
+    private fullscreenToggleButtonDragging = false
 
     private readonly streamConnectionConsoleLogger = new StreamConnectionInfoConsoleLogger()
 
@@ -476,6 +496,62 @@ class ViewerApp implements Component {
         // In fullscreen, keep arrow above any overlay layers so taps always reach it.
         button.style.zIndex = this.isFullscreen() ? "200000" : "200000"
         this.syncKeyboardFallbackButtonVisibility()
+        this.scheduleSyncSettingsQuickButtonDock()
+    }
+
+    private scheduleSyncSettingsQuickButtonDock() {
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                this.syncSettingsQuickButtonDockPosition()
+            })
+        })
+        if (this.quickDockPostTransitionTimer != null) {
+            clearTimeout(this.quickDockPostTransitionTimer)
+            this.quickDockPostTransitionTimer = null
+        }
+        this.quickDockPostTransitionTimer = setTimeout(() => {
+            this.quickDockPostTransitionTimer = null
+            this.syncSettingsQuickButtonDockPosition()
+        }, 280)
+    }
+
+    private syncSettingsQuickButtonDockPosition() {
+        const button = this.settingsQuickButton
+        if (!button || isPhoneLikeDevice()) return
+        const root = getSidebarRoot()
+        const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+        const gapPx = 16
+        if (!root || !root.classList.contains("sidebar-edge-right") || !root.classList.contains("sidebar-show")) {
+            this.settingsQuickButtonDockRightPx = 12
+            if (button.style.display !== "none") {
+                button.style.right = "12px"
+            }
+            return
+        }
+        const bg = root.querySelector(".sidebar-background") as HTMLElement | null
+        const parent = document.getElementById("sidebar-parent")
+        const pr = parent?.getBoundingClientRect()
+        const br = bg?.getBoundingClientRect()
+        const candidates: number[] = []
+        if (pr && pr.width > 2) {
+            candidates.push(pr.left)
+        }
+        if (br && br.width > 2) {
+            candidates.push(br.left)
+        }
+        const leftEdge = candidates.length ? Math.min(...candidates) : Number.NaN
+        if (!Number.isFinite(leftEdge)) {
+            this.settingsQuickButtonDockRightPx = 12
+            if (button.style.display !== "none") {
+                button.style.right = "12px"
+            }
+            return
+        }
+        const dockRight = Math.round(Math.max(12, viewportWidth - leftEdge + gapPx))
+        this.settingsQuickButtonDockRightPx = dockRight
+        if (button.style.display !== "none") {
+            button.style.right = `${dockRight}px`
+        }
     }
 
     private syncKeyboardFallbackButtonVisibility() {
@@ -483,6 +559,206 @@ class ViewerApp implements Component {
         if (!button) return
         const show = isPhoneLikeDevice()
         button.style.display = show ? "flex" : "none"
+    }
+
+    private syncFullscreenToggleButtonLabel() {
+        const button = this.fullscreenToggleButton
+        if (!button) return
+        button.textContent = this.isFullscreen() ? "⤢" : "⛶"
+    }
+
+    private ensureStatsControlsGroup() {
+        if (this.statsControlsGroup) return
+        const group = document.createElement("div")
+        group.classList.add("video-stats-controls-group")
+        document.body.appendChild(group)
+        this.statsControlsGroup = group
+    }
+
+    private async toggleFullscreenFromButton() {
+        if (this.isFullscreen()) {
+            await this.exitFullscreen()
+            return
+        }
+        await this.requestFullscreen()
+    }
+
+    private syncFullscreenToggleButtonPosition() {
+        const button = this.fullscreenToggleButton
+        if (!button) return
+        if (isPhoneLikeDevice()) {
+            button.style.display = "none"
+            return
+        }
+        button.style.display = "inline-flex"
+        const statsVisible = !this.statsDiv.hidden && !this.statsClosed
+        const topBarHeight = this.statsTopBar.getBoundingClientRect().height
+        const targetSize = statsVisible
+            ? Math.round(Math.min(56, Math.max(28, topBarHeight || 36)))
+            : 36
+        button.style.width = `${targetSize}px`
+        button.style.minWidth = `${targetSize}px`
+        button.style.maxWidth = `${targetSize}px`
+        button.style.height = `${targetSize}px`
+        button.style.minHeight = `${targetSize}px`
+        button.style.maxHeight = `${targetSize}px`
+        button.style.fontSize = `${Math.round(targetSize * 0.44)}px`
+        if (this.fullscreenToggleButtonDragging) {
+            return
+        }
+        if (!statsVisible && this.fullscreenToggleButtonManualPosition) {
+            const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+            const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+            const buttonWidth = button.offsetWidth || 36
+            const buttonHeight = button.offsetHeight || 36
+            const left = Number.parseFloat(button.style.left || "0")
+            const top = Number.parseFloat(button.style.top || "0")
+            const maxLeft = Math.max(8, viewportWidth - buttonWidth - 8)
+            const maxTop = Math.max(8, viewportHeight - buttonHeight - 8)
+            const nextLeft = Math.min(Math.max(8, Number.isFinite(left) ? left : 12), maxLeft)
+            const nextTop = Math.min(Math.max(8, Number.isFinite(top) ? top : 12), maxTop)
+            button.style.right = "auto"
+            button.style.left = `${Math.round(nextLeft)}px`
+            button.style.top = `${Math.round(nextTop)}px`
+            return
+        }
+        if (statsVisible) {
+            this.fullscreenToggleButtonManualPosition = false
+        }
+        if (!statsVisible) {
+            button.style.left = "auto"
+            button.style.top = "12px"
+            button.style.right = "12px"
+            return
+        }
+        const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+        const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+        const statsRect = this.statsDiv.getBoundingClientRect()
+        const statsTopBarRect = this.statsTopBar.getBoundingClientRect()
+        const buttonWidth = button.offsetWidth || 36
+        const buttonHeight = button.offsetHeight || 36
+        const unclampedLeft = statsRect.left - buttonWidth - 8
+        const unclampedTop = statsTopBarRect.top + ((statsTopBarRect.height - buttonHeight) / 2)
+        const maxLeft = Math.max(8, viewportWidth - buttonWidth - 8)
+        const maxTop = Math.max(8, viewportHeight - buttonHeight - 8)
+        const nextLeft = Math.min(Math.max(8, unclampedLeft), maxLeft)
+        const nextTop = Math.min(Math.max(8, unclampedTop), maxTop)
+        button.style.right = "auto"
+        button.style.left = `${Math.round(nextLeft)}px`
+        button.style.top = `${Math.round(nextTop)}px`
+    }
+
+    private ensureFullscreenToggleButton() {
+        if (this.fullscreenToggleButton) return
+        this.ensureStatsControlsGroup()
+        const button = document.createElement("button")
+        button.type = "button"
+        button.classList.add("video-fullscreen-toggle-btn")
+        button.setAttribute("aria-label", "Toggle fullscreen")
+        button.title = "Toggle fullscreen"
+        let dragPointerId: number | null = null
+        let dragStartX = 0
+        let dragStartY = 0
+        let dragOffsetX = 0
+        let dragOffsetY = 0
+        let statsTopBarCenterOffsetY = 0
+        let syncStatsWithButton = false
+        let dragged = false
+        let suppressClickUntilMs = 0
+        const DRAG_THRESHOLD = 6
+        const onDocumentPointerMove = (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            event.preventDefault()
+            event.stopPropagation()
+            const dx = event.clientX - dragStartX
+            const dy = event.clientY - dragStartY
+            if (!dragged && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
+                dragged = true
+                this.fullscreenToggleButtonManualPosition = true
+            }
+            if (!dragged) return
+            const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+            const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+            const buttonWidth = button.offsetWidth || 36
+            const buttonHeight = button.offsetHeight || 36
+            const nextLeft = Math.max(8, Math.min(viewportWidth - buttonWidth - 8, event.clientX - dragOffsetX))
+            const nextTop = Math.max(8, Math.min(viewportHeight - buttonHeight - 8, event.clientY - dragOffsetY))
+            button.style.right = "auto"
+            button.style.left = `${Math.round(nextLeft)}px`
+            button.style.top = `${Math.round(nextTop)}px`
+            if (syncStatsWithButton) {
+                const statsRect = this.statsDiv.getBoundingClientRect()
+                const statsTopBarRect = this.statsTopBar.getBoundingClientRect()
+                const statsWidth = statsRect.width
+                const statsHeight = statsRect.height
+                const desiredStatsLeft = nextLeft + buttonWidth + 8
+                const nextStatsLeft = Math.max(8, Math.min(viewportWidth - statsWidth - 8, desiredStatsLeft))
+                const desiredStatsTopBarCenterY = nextTop + (buttonHeight / 2) + statsTopBarCenterOffsetY
+                const unclampedStatsTop = desiredStatsTopBarCenterY - (statsTopBarRect.height / 2)
+                const nextStatsTop = Math.max(8, Math.min(viewportHeight - statsHeight - 8, unclampedStatsTop))
+                this.statsDiv.style.left = `${Math.round(nextStatsLeft)}px`
+                this.statsDiv.style.right = "auto"
+                this.statsDiv.style.top = `${Math.round(nextStatsTop)}px`
+                this.statsDiv.style.transform = "none"
+            }
+        }
+        const onDocumentPointerEnd = (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            event.preventDefault()
+            event.stopPropagation()
+            if (button.hasPointerCapture(event.pointerId)) {
+                button.releasePointerCapture(event.pointerId)
+            }
+            dragPointerId = null
+            this.fullscreenToggleButtonDragging = false
+            syncStatsWithButton = false
+            document.removeEventListener("pointermove", onDocumentPointerMove)
+            document.removeEventListener("pointerup", onDocumentPointerEnd)
+            document.removeEventListener("pointercancel", onDocumentPointerEnd)
+            if (dragged) {
+                event.preventDefault()
+                event.stopImmediatePropagation()
+                dragged = false
+                suppressClickUntilMs = Date.now() + 500
+            }
+        }
+        button.addEventListener("pointerdown", (event: PointerEvent) => {
+            event.preventDefault()
+            event.stopPropagation()
+            dragPointerId = event.pointerId
+            dragged = false
+            this.fullscreenToggleButtonDragging = true
+            this.fullscreenToggleButtonManualPosition = true
+            const rect = button.getBoundingClientRect()
+            dragStartX = event.clientX
+            dragStartY = event.clientY
+            dragOffsetX = event.clientX - rect.left
+            dragOffsetY = event.clientY - rect.top
+            const statsVisible = !this.statsDiv.hidden && !this.statsClosed
+            if (statsVisible) {
+                const statsTopBarRect = this.statsTopBar.getBoundingClientRect()
+                statsTopBarCenterOffsetY = (statsTopBarRect.top + (statsTopBarRect.height / 2)) - (rect.top + (rect.height / 2))
+                syncStatsWithButton = true
+            } else {
+                syncStatsWithButton = false
+            }
+            button.style.right = "auto"
+            button.style.left = `${Math.round(rect.left)}px`
+            button.style.top = `${Math.round(rect.top)}px`
+            button.setPointerCapture(event.pointerId)
+            document.addEventListener("pointermove", onDocumentPointerMove)
+            document.addEventListener("pointerup", onDocumentPointerEnd)
+            document.addEventListener("pointercancel", onDocumentPointerEnd)
+        })
+        button.addEventListener("click", () => {
+            if (dragged) return
+            if (Date.now() < suppressClickUntilMs) return
+            void this.toggleFullscreenFromButton()
+        })
+        this.statsControlsGroup?.appendChild(button)
+        this.fullscreenToggleButton = button
+        this.syncFullscreenToggleButtonLabel()
+        this.syncFullscreenToggleButtonPosition()
     }
 
     private ensureKeyboardFallbackButton() {
@@ -633,6 +909,7 @@ class ViewerApp implements Component {
             } else {
                 setSidebarExtended(true)
             }
+            this.scheduleSyncSettingsQuickButtonDock()
         }
         const triggerToggleFromButton = () => toggleFromQuickButton()
         const onDocumentPointerMove = (event: PointerEvent) => {
@@ -648,7 +925,7 @@ class ViewerApp implements Component {
             // Constrain dragging to vertical movement on the right side only.
             button.style.left = "auto"
             button.style.bottom = "auto"
-            button.style.right = "12px"
+            button.style.right = `${this.settingsQuickButtonDockRightPx}px`
             button.style.top = `${nextTop}px`
         }
         const onDocumentPointerEnd = (event: PointerEvent) => {
@@ -662,6 +939,7 @@ class ViewerApp implements Component {
                 event.stopImmediatePropagation()
                 dragged = false
                 suppressClickUntilMs = Date.now() + 500
+                this.scheduleSyncSettingsQuickButtonDock()
                 return
             }
             suppressClickUntilMs = Date.now() + 500
@@ -861,10 +1139,14 @@ class ViewerApp implements Component {
         this.sidebar = new ViewerSidebar(this)
         setSidebar(this.sidebar)
         this.ensureSettingsQuickButton()
+        window.addEventListener("resize", this.windowResizeForQuickDock)
+        getSidebarRoot()?.addEventListener("transitionend", this.sidebarBackgroundTransitionDock)
 
         // Configure stats element
+        this.ensureStatsControlsGroup()
         this.statsDiv.hidden = true
         this.statsDiv.classList.add("video-stats")
+        this.ensureFullscreenToggleButton()
         this.statsMinimized = localStorage.getItem("streamStatsMinimized") === "1"
         this.statsTopBar.classList.add("video-stats-topbar")
         this.statsTopBar.addEventListener("pointerdown", this.onStatsPointerDown.bind(this))
@@ -884,6 +1166,7 @@ class ViewerApp implements Component {
             this.statsClosed = true
             this.statsDiv.hidden = true
             this.getStream()?.getStats().setEnabled(false)
+            this.syncFullscreenToggleButtonPosition()
         })
         this.statsSummaryDiv.classList.add("video-stats-summary")
         this.statsDetailsDiv.classList.add("video-stats-details")
@@ -911,8 +1194,12 @@ class ViewerApp implements Component {
                 this.lastIceBytesTsMs = null
                 this.lastBitrateMbps = null
             }
+            this.syncFullscreenToggleButtonPosition()
         }, 500)
-        this.div.appendChild(this.statsDiv)
+        this.statsControlsGroup?.appendChild(this.statsDiv)
+        if (this.fullscreenToggleButton) {
+            this.statsControlsGroup?.appendChild(this.fullscreenToggleButton)
+        }
 
         this.recoveryOverlay = new StreamRecoveryOverlay(
             () => { void this.retryAfterConnectionIssue() },
@@ -961,6 +1248,7 @@ class ViewerApp implements Component {
         })
         window.addEventListener("ml-sidebar-extended-change", () => {
             this.releaseAllKeys("sidebar expanded or collapsed")
+            this.scheduleSyncSettingsQuickButtonDock()
         })
 
         document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this))
@@ -1450,6 +1738,7 @@ class ViewerApp implements Component {
                 : null
         if (!targetElement) return false
         if (targetElement.closest(".video-stats")) return true
+        if (targetElement.closest(".video-fullscreen-toggle-btn")) return true
         if (targetElement.closest(".modal-video-connect")) return true
         if (targetElement.closest(".modal-settings-panel")) return true
         if (targetElement.closest("#sidebar-button")) return true
@@ -1494,6 +1783,7 @@ class ViewerApp implements Component {
         event.stopPropagation()
     }
     onMouseMove(event: MouseEvent) {
+        if (this.isStreamInputUiTarget(event.target)) return
         event.preventDefault()
         this.stream?.getInput().onMouseMove(event, this.getStreamRect())
 
@@ -1953,6 +2243,8 @@ class ViewerApp implements Component {
     private async onFullscreenChange() {
         this.checkFullyImmersed()
         this.syncSettingsQuickButtonVisibility()
+        this.syncFullscreenToggleButtonLabel()
+        this.syncFullscreenToggleButtonPosition()
         if (!this.isFullscreen()) {
             this.cancelFullscreenExitEscHold()
             this.releaseAllKeys("fullscreen exited")
@@ -2074,14 +2366,30 @@ class ViewerApp implements Component {
         parent.appendChild(this.div)
     }
     unmount(parent: HTMLElement): void {
+        window.removeEventListener("resize", this.windowResizeForQuickDock)
+        getSidebarRoot()?.removeEventListener("transitionend", this.sidebarBackgroundTransitionDock)
+        if (this.quickDockPostTransitionTimer != null) {
+            clearTimeout(this.quickDockPostTransitionTimer)
+            this.quickDockPostTransitionTimer = null
+        }
         if (this.settingsQuickButton?.parentElement) {
             this.settingsQuickButton.parentElement.removeChild(this.settingsQuickButton)
         }
         if (this.keyboardFallbackButton?.parentElement) {
             this.keyboardFallbackButton.parentElement.removeChild(this.keyboardFallbackButton)
         }
+        if (this.fullscreenToggleButton?.parentElement) {
+            this.fullscreenToggleButton.parentElement.removeChild(this.fullscreenToggleButton)
+        }
+        if (this.statsControlsGroup?.parentElement) {
+            this.statsControlsGroup.parentElement.removeChild(this.statsControlsGroup)
+        }
         this.settingsQuickButton = null
         this.keyboardFallbackButton = null
+        this.fullscreenToggleButton = null
+        this.statsControlsGroup = null
+        this.fullscreenToggleButtonManualPosition = false
+        this.fullscreenToggleButtonDragging = false
         if (this.keyWatchdogInterval != null) {
             clearInterval(this.keyWatchdogInterval)
             this.keyWatchdogInterval = null
@@ -2191,6 +2499,8 @@ class ViewerApp implements Component {
         if (target && target.closest(".video-stats-action-btn")) {
             return
         }
+        // When dragging stats, keep fullscreen button coupled to stats positioning.
+        this.fullscreenToggleButtonManualPosition = false
         const rect = this.statsDiv.getBoundingClientRect()
         this.statsDragging = true
         this.statsDragOffsetX = event.clientX - rect.left
@@ -2202,8 +2512,12 @@ class ViewerApp implements Component {
         const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
         const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
         const rect = this.statsDiv.getBoundingClientRect()
+        const fullscreenButtonWidth = this.fullscreenToggleButton?.offsetWidth || 36
+        const minStatsLeft = isPhoneLikeDevice()
+            ? 8
+            : Math.max(8, fullscreenButtonWidth + 16)
         const nextLeft = Math.min(
-            Math.max(8, event.clientX - this.statsDragOffsetX),
+            Math.max(minStatsLeft, event.clientX - this.statsDragOffsetX),
             Math.max(8, viewportWidth - rect.width - 8)
         )
         const nextTop = Math.min(
@@ -2214,11 +2528,13 @@ class ViewerApp implements Component {
         this.statsDiv.style.right = "auto"
         this.statsDiv.style.top = `${nextTop}px`
         this.statsDiv.style.transform = "none"
+        this.syncFullscreenToggleButtonPosition()
     }
     private onStatsPointerUp() {
         if (!this.statsDragging) return
         this.statsDragging = false
         this.statsDiv.classList.remove("video-stats-dragging")
+        this.syncFullscreenToggleButtonPosition()
     }
     toggleStatsWidgetVisibility() {
         const stats = this.getStream()?.getStats()
@@ -2229,9 +2545,11 @@ class ViewerApp implements Component {
             if (!stats.isEnabled()) {
                 stats.setEnabled(true)
             }
+            this.syncFullscreenToggleButtonPosition()
             return
         }
         stats.toggle()
+        this.syncFullscreenToggleButtonPosition()
     }
     private connectionStatusLabel(statsData: StreamStatsData): string {
         const latency = this.getConnectionLatencyMs(statsData)
@@ -3336,7 +3654,10 @@ class ViewerSidebar implements Component, Sidebar {
         fullscreenIcon.alt = ""
         fullscreenIcon.className = "sidebar-btn-icon"
         this.fullscreenButton.appendChild(fullscreenIcon)
-        this.fullscreenButton.appendChild(document.createTextNode("Fullscreen"))
+        const fullscreenLabel = document.createElement("span")
+        fullscreenLabel.className = "sidebar-btn-label"
+        fullscreenLabel.textContent = "Fullscreen"
+        this.fullscreenButton.appendChild(fullscreenLabel)
         this.fullscreenButton.addEventListener("click", async () => {
             if (this.app.isFullscreen()) await this.app.exitFullscreen()
             else await this.app.requestFullscreen()
@@ -3361,7 +3682,10 @@ class ViewerSidebar implements Component, Sidebar {
         exitIcon.alt = ""
         exitIcon.className = "sidebar-btn-icon"
         this.exitStreamButton.appendChild(exitIcon)
-        this.exitStreamButton.appendChild(document.createTextNode("Exit"))
+        const exitLabel = document.createElement("span")
+        exitLabel.className = "sidebar-btn-label"
+        exitLabel.textContent = "Exit"
+        this.exitStreamButton.appendChild(exitLabel)
         this.exitStreamButton.addEventListener("click", async () => {
             await this.app.exitToLibrary()
         })
