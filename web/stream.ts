@@ -18,6 +18,7 @@ import { setStyle as setPageStyle } from "./styles/index.js";
 import { SelectComponent } from "./component/input.js";
 import { LogMessageType, StreamCapabilities, StreamKeys, StreamKeyModifiers } from "./api_bindings.js";
 import { ScreenKeyboard, TextEvent } from "./screen_keyboard.js";
+import { VirtualControllerOverlay } from "./virtual_controller_overlay.js";
 import { FormModal } from "./component/modal/form.js";
 import { StreamStatsData } from "./stream/stats.js";
 import { MoonlightLoadingScreen, MoonlightPointerLockOverlay } from "./stream_overlays.js";
@@ -464,6 +465,8 @@ class ViewerApp implements Component {
         this.syncSettingsQuickButtonDockPosition()
     }
     private keyboardFallbackButton: HTMLButtonElement | null = null
+    private controllerFallbackButton: HTMLButtonElement | null = null
+    private virtualControllerOverlay: VirtualControllerOverlay
     private fullscreenToggleButton: HTMLButtonElement | null = null
     private statsControlsGroup: HTMLDivElement | null = null
     private fullscreenToggleButtonManualPosition = false
@@ -555,10 +558,15 @@ class ViewerApp implements Component {
     }
 
     private syncKeyboardFallbackButtonVisibility() {
-        const button = this.keyboardFallbackButton
-        if (!button) return
         const show = isPhoneLikeDevice()
-        button.style.display = show ? "flex" : "none"
+        const kb = this.keyboardFallbackButton
+        if (kb) {
+            kb.style.display = show ? "flex" : "none"
+        }
+        const ctl = this.controllerFallbackButton
+        if (ctl) {
+            ctl.style.display = show ? "flex" : "none"
+        }
     }
 
     private syncFullscreenToggleButtonLabel() {
@@ -860,6 +868,106 @@ class ViewerApp implements Component {
         this.syncKeyboardFallbackButtonVisibility()
     }
 
+    private ensureControllerFallbackButton() {
+        if (this.controllerFallbackButton) return
+        const button = document.createElement("button")
+        button.type = "button"
+        button.id = "ml-controller-fallback-button"
+        button.setAttribute("aria-label", "Toggle on-screen controller")
+        button.title = "On-screen controller"
+        const icon = document.createElement("img")
+        icon.src = "resources/game-controller.svg"
+        icon.alt = ""
+        icon.setAttribute("aria-hidden", "true")
+        icon.style.width = "15px"
+        icon.style.height = "15px"
+        icon.style.display = "block"
+        icon.style.filter = "brightness(0) invert(1)"
+        button.appendChild(icon)
+        button.style.cssText =
+            "position:fixed;right:108px;bottom:72px;z-index:210000;display:none;" +
+            "width:32px;height:32px;padding:0;border-radius:8px;border:1px solid rgba(255,255,255,.78);" +
+            "background:rgba(0,0,0,.92);" +
+            "box-shadow:0 12px 24px rgba(0,0,0,.48),0 0 0 1px rgba(255,255,255,.08) inset;" +
+            "align-items:center;justify-content:center;cursor:pointer;touch-action:none"
+        const toggleController = () => {
+            const vc = this.virtualControllerOverlay
+            if (vc.isVisible()) {
+                vc.hide()
+            } else {
+                setSidebarExtended(false)
+                vc.show()
+            }
+        }
+        let dragPointerId: number | null = null
+        let dragStartX = 0
+        let dragStartY = 0
+        let dragOffsetX = 0
+        let dragOffsetY = 0
+        let dragged = false
+        let suppressClickUntilMs = 0
+        const DRAG_THRESHOLD = 6
+        const onDocumentPointerMove = (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            const dx = event.clientX - dragStartX
+            const dy = event.clientY - dragStartY
+            if (!dragged && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
+                dragged = true
+            }
+            if (!dragged) return
+            const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+            const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+            const nextLeft = Math.max(8, Math.min(vw - button.offsetWidth - 8, event.clientX - dragOffsetX))
+            const nextTop = Math.max(8, Math.min(vh - button.offsetHeight - 8, event.clientY - dragOffsetY))
+            button.style.right = "auto"
+            button.style.bottom = "auto"
+            button.style.left = `${nextLeft}px`
+            button.style.top = `${nextTop}px`
+        }
+        const onDocumentPointerEnd = (event: PointerEvent) => {
+            if (dragPointerId == null || event.pointerId !== dragPointerId) return
+            dragPointerId = null
+            document.removeEventListener("pointermove", onDocumentPointerMove)
+            document.removeEventListener("pointerup", onDocumentPointerEnd)
+            document.removeEventListener("pointercancel", onDocumentPointerEnd)
+            if (dragged) {
+                event.preventDefault()
+                event.stopImmediatePropagation()
+                dragged = false
+                suppressClickUntilMs = Date.now() + 500
+                return
+            }
+            suppressClickUntilMs = Date.now() + 500
+            toggleController()
+        }
+        button.addEventListener("pointerdown", (event: PointerEvent) => {
+            dragPointerId = event.pointerId
+            dragged = false
+            const rect = button.getBoundingClientRect()
+            dragStartX = event.clientX
+            dragStartY = event.clientY
+            dragOffsetX = event.clientX - rect.left
+            dragOffsetY = event.clientY - rect.top
+            document.addEventListener("pointermove", onDocumentPointerMove)
+            document.addEventListener("pointerup", onDocumentPointerEnd)
+            document.addEventListener("pointercancel", onDocumentPointerEnd)
+        })
+        button.addEventListener("keydown", (event: KeyboardEvent) => {
+            if (event.key !== "Enter" && event.key !== " ") return
+            event.preventDefault()
+            toggleController()
+        })
+        button.addEventListener("click", (event: MouseEvent) => {
+            if (dragged) return
+            if (Date.now() < suppressClickUntilMs) return
+            event.preventDefault()
+            toggleController()
+        })
+        document.body.appendChild(button)
+        this.controllerFallbackButton = button
+        this.syncKeyboardFallbackButtonVisibility()
+    }
+
     private ensureSettingsQuickButton() {
         if (this.settingsQuickButton) return
         const button = document.createElement("button")
@@ -972,6 +1080,7 @@ class ViewerApp implements Component {
         document.body.appendChild(button)
         this.settingsQuickButton = button
         this.ensureKeyboardFallbackButton()
+        this.ensureControllerFallbackButton()
         this.syncSettingsQuickButtonVisibility()
     }
 
@@ -1126,6 +1235,10 @@ class ViewerApp implements Component {
 
         // Configure sidebar
         this.sidebar = new ViewerSidebar(this)
+        this.virtualControllerOverlay = new VirtualControllerOverlay({
+            getStreamInput: () => this.getStream()?.getInput() ?? null,
+            getScreenKeyboard: () => this.sidebar.getScreenKeyboard(),
+        })
         setSidebar(this.sidebar)
         this.ensureSettingsQuickButton()
         window.addEventListener("resize", this.windowResizeForQuickDock)
@@ -1393,6 +1506,7 @@ class ViewerApp implements Component {
             this.hasConnectedOnce = true
             this.startupConnectionResolved = true
             this.sidebar.onCapabilitiesChange(data.capabilities)
+            this.virtualControllerOverlay.onStreamConnected()
             MoonlightLoadingScreen.hide()
             this.recoveryOverlay.hide()
             this.recoveryShown = false
@@ -1720,6 +1834,7 @@ class ViewerApp implements Component {
                 ? target.parentElement
                 : null
         if (!targetElement) return false
+        if (targetElement.closest(".ml-virtual-controller")) return true
         if (targetElement.closest(".video-stats")) return true
         if (targetElement.closest(".video-fullscreen-toggle-btn")) return true
         if (targetElement.closest(".modal-video-connect")) return true
@@ -2311,6 +2426,10 @@ class ViewerApp implements Component {
         if (this.keyboardFallbackButton?.parentElement) {
             this.keyboardFallbackButton.parentElement.removeChild(this.keyboardFallbackButton)
         }
+        if (this.controllerFallbackButton?.parentElement) {
+            this.controllerFallbackButton.parentElement.removeChild(this.controllerFallbackButton)
+        }
+        this.virtualControllerOverlay.hide()
         if (this.fullscreenToggleButton?.parentElement) {
             this.fullscreenToggleButton.parentElement.removeChild(this.fullscreenToggleButton)
         }
@@ -2319,6 +2438,7 @@ class ViewerApp implements Component {
         }
         this.settingsQuickButton = null
         this.keyboardFallbackButton = null
+        this.controllerFallbackButton = null
         this.fullscreenToggleButton = null
         this.statsControlsGroup = null
         this.fullscreenToggleButtonManualPosition = false
@@ -2673,6 +2793,10 @@ class ViewerApp implements Component {
     }
     getStream(): Stream | null {
         return this.stream
+    }
+
+    getVirtualControllerOverlay(): VirtualControllerOverlay {
+        return this.virtualControllerOverlay
     }
 }
 
@@ -3254,6 +3378,7 @@ class ViewerSidebar implements Component, Sidebar {
     private commonSection: HTMLDivElement
     private sendKeycodeButton: HTMLButtonElement
     private keyboardButton: HTMLButtonElement
+    private controllerButton: HTMLButtonElement
     private fullscreenButton: HTMLButtonElement
     private statsButton: HTMLButtonElement
     private exitStreamButton: HTMLButtonElement
@@ -3424,10 +3549,24 @@ class ViewerSidebar implements Component, Sidebar {
             this.screenKeyboard.show()
         })
 
+        this.controllerButton = document.createElement("button")
+        this.controllerButton.classList.add("sidebar-btn-with-icon")
+        const controllerIcon = document.createElement("img")
+        controllerIcon.src = "resources/game-controller.svg"
+        controllerIcon.alt = ""
+        controllerIcon.className = "sidebar-btn-icon"
+        this.controllerButton.appendChild(controllerIcon)
+        this.controllerButton.appendChild(document.createTextNode("Controller"))
+        this.controllerButton.addEventListener("click", () => {
+            setSidebarExtended(false)
+            this.app.getVirtualControllerOverlay().show()
+        })
+
         const sendKeycodeKeyboardRow = document.createElement("div")
-        sendKeycodeKeyboardRow.classList.add("sidebar-touch-mode-row")
+        sendKeycodeKeyboardRow.classList.add("sidebar-touch-mode-row", "sidebar-stream-buttons-row-triple")
         sendKeycodeKeyboardRow.appendChild(touchModeContainer)
         sendKeycodeKeyboardRow.appendChild(this.keyboardButton)
+        sendKeycodeKeyboardRow.appendChild(this.controllerButton)
 
         phonePanelContent.appendChild(settingsTouchModeRow)
         phonePanelContent.appendChild(sendKeycodeKeyboardRow)
