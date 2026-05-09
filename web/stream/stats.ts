@@ -86,11 +86,14 @@ streamer to browser rtt (ws only): ${num(statsData.browserRtt, "ms")}
 export class StreamStats {
 
     private logger: Logger | null = null
+    /** When true (default), skip console.debug on hot paths in stats polling. */
+    private readonly minimalLogs = true
 
     private enabled: boolean = false
     private transport: Transport | null = null
     private statsChannel: DataTransportChannel | null = null
     private updateIntervalId: number | null = null
+    private statsUpdateInFlight = false
 
     private videoPipe: Pipe | null = null
     private audioPipe: Pipe | null = null
@@ -116,6 +119,8 @@ export class StreamStats {
         audio: {}
     }
 
+    private readonly onRawDataBound = this.onRawData.bind(this)
+
     constructor(logger?: Logger) {
         if (logger) {
             this.logger = logger
@@ -130,7 +135,7 @@ export class StreamStats {
     private checkEnabled() {
         if (this.enabled) {
             if (this.statsChannel) {
-                this.statsChannel.removeReceiveListener(this.onRawData.bind(this))
+                this.statsChannel.removeReceiveListener(this.onRawDataBound)
                 this.statsChannel = null
             }
 
@@ -140,7 +145,7 @@ export class StreamStats {
                     this.logger?.debug(`Failed initialize debug transport channel because type is "${channel.type}" and not "data"`)
                     return
                 }
-                channel.addReceiveListener(this.onRawData.bind(this))
+                channel.addReceiveListener(this.onRawDataBound)
                 this.statsChannel = channel
             }
             if (this.updateIntervalId == null) {
@@ -150,6 +155,10 @@ export class StreamStats {
             if (this.updateIntervalId != null) {
                 clearInterval(this.updateIntervalId)
                 this.updateIntervalId = null
+            }
+            if (this.statsChannel) {
+                this.statsChannel.removeReceiveListener(this.onRawDataBound)
+                this.statsChannel = null
             }
         }
     }
@@ -203,15 +212,25 @@ export class StreamStats {
     }
 
     private async updateLocalStats() {
-        Promise.all([
-            this.updateTransportStats(),
-            this.updateVideoStats(),
-            this.updateAudioStats(),
-        ])
+        if (this.statsUpdateInFlight) {
+            return
+        }
+        this.statsUpdateInFlight = true
+        try {
+            await Promise.all([
+                this.updateTransportStats(),
+                this.updateVideoStats(),
+                this.updateAudioStats(),
+            ])
+        } finally {
+            this.statsUpdateInFlight = false
+        }
     }
     private async updateTransportStats() {
         if (!this.transport) {
-            console.debug("Cannot query stats without transport")
+            if (!this.minimalLogs) {
+                console.debug("Cannot query stats without transport")
+            }
             return
         }
 

@@ -77,7 +77,7 @@ export class WebRTCTransport implements Transport {
     private readonly pathScoreLogCooldownMs = 1500
     onIceRestartRequested: (() => void) | null = null
     private connectedOnce = false
-    private readonly lockIceAfterConnected = true
+    private readonly lockIceAfterConnected = false
 
     constructor(logger?: Logger) {
         this.logger = logger ?? null
@@ -566,6 +566,10 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug("OnNegotiationNeeded without a peer")
             return
         }
+        if (this.connectedOnce) {
+            this.logger?.debug("OnNegotiationNeeded ignored after first successful connection")
+            return
+        }
         if (this.iceMode == "prefer-direct" && !this.syncStarted) {
             this.logger?.debug("OnNegotiationNeeded deferred until sync start")
             return
@@ -934,7 +938,7 @@ export class WebRTCTransport implements Transport {
             if (this.selectedPairLogTimer == null) {
                 this.selectedPairLogTimer = window.setInterval(() => {
                     void this.logSelectedCandidatePairDetails()
-                }, 2000)
+                }, 10000)
             }
             this.wasConnected = true
         } else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "closed") && this.peer.iceGatheringState == "complete") {
@@ -1576,10 +1580,7 @@ export class WebRTCTransport implements Transport {
         }
         const stats = await this.videoReceiver.getStats()
 
-        console.debug("----------------- raw video stats -----------------")
         for (const [key, value] of stats.entries()) {
-            console.debug("raw video stats", key, value)
-
             if ("decoderImplementation" in value && value.decoderImplementation != null) {
                 statsData.decoderImplementation = value.decoderImplementation
             }
@@ -1770,14 +1771,11 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
 
     private sendQueue: Array<ArrayBuffer> = []
     send(message: ArrayBuffer): void {
-        console.debug(this.label, message)
-
         if (!this.channel) {
             throw `Failed to send message on channel ${this.label}`
         }
 
         if (this.channel.readyState != "open") {
-            console.debug(`Tried sending packet to ${this.label} with readyState ${this.channel.readyState}. Buffering it for the future.`)
             this.sendQueue.push(message)
         } else {
             this.tryDequeueSendQueue()

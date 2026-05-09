@@ -111,6 +111,7 @@ export class Stream implements Component {
     private stats: StreamStats
     private lastCursorSignature: string | null = null
     private lastEmittedHostCursorHidden: boolean | null = null
+    private readonly pointerLockChangeHandler = () => this.syncHiddenCursorForPointerLockState()
 
     private streamerSize: [number, number]
     private dragOverHandler = (event: DragEvent) => this.onDragOver(event)
@@ -161,6 +162,14 @@ export class Stream implements Component {
         this.stats = new StreamStats()
 
         this.setupFileDropUpload()
+        document.addEventListener("pointerlockchange", this.pointerLockChangeHandler)
+    }
+
+    private syncHiddenCursorForPointerLockState() {
+        if (this.lastEmittedHostCursorHidden !== true) return
+        const locked = !!document.pointerLockElement
+        this.divElement.style.cursor = locked ? "none" : "auto"
+        this.lastCursorSignature = locked ? "hidden-locked" : "hidden-unlocked"
     }
 
     private setupFileDropUpload() {
@@ -309,18 +318,11 @@ export class Stream implements Component {
         }
     }
     private shouldEmitLog(message: string, additional?: LogMessageInfo): boolean {
-        if (additional?.type) {
-            return true
-        }
         const text = message.toLowerCase()
         return (
-            text.includes("failed") ||
-            text.includes("error") ||
-            text.includes("terminated") ||
-            text.includes("fallback") ||
-            text.includes("connected") ||
+            text.includes("changing peer state to") ||
             text.includes("connection status") ||
-            text.includes("using transport")
+            text.includes("connection complete")
         )
     }
 
@@ -454,8 +456,7 @@ export class Stream implements Component {
         }
 
         if (hostCursorHidden) {
-            this.divElement.style.cursor = "none"
-            this.lastCursorSignature = "hidden"
+            this.syncHiddenCursorForPointerLockState()
             this.debugLog("[CursorShape] applied hidden cursor")
             return
         }
@@ -1076,7 +1077,15 @@ export class Stream implements Component {
         let pipelineCodecSupport
         const video = this.transport.getChannel(TransportChannelId.HOST_VIDEO)
         if (video.type == "videotrack") {
-            const { videoRenderer, supportedCodecs, error } = await buildVideoPipeline("videotrack", videoSettings, this.logger)
+            // WebRTC track mode is expected to be the most stable path for real-time gameplay.
+            // Force HTMLVideoElement renderer here to avoid canvas/frame-processor regressions
+            // that can manifest as "connected but black screen" on some browsers/devices.
+            const trackVideoSettings: VideoPipelineOptions = {
+                ...videoSettings,
+                canvasRenderer: false,
+                forceVideoElementRenderer: true,
+            }
+            const { videoRenderer, supportedCodecs, error } = await buildVideoPipeline("videotrack", trackVideoSettings, this.logger)
 
             if (error) {
                 return null
@@ -1212,6 +1221,7 @@ export class Stream implements Component {
     unmount(parent: HTMLElement): void {
         this.stopRttKeepalive()
         this.resetKeyboardState("stream unmount")
+        document.removeEventListener("pointerlockchange", this.pointerLockChangeHandler)
         this.divElement.removeEventListener("dragover", this.dragOverHandler)
         this.divElement.removeEventListener("drop", this.dropHandler)
         parent.removeChild(this.divElement)

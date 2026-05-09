@@ -59,6 +59,7 @@ export class VideoElementRenderer implements TrackVideoRenderer, VideoRenderer {
     private videoElement = document.createElement("video")
     private oldTrack: MediaStreamTrack | null = null
     private stream = new MediaStream()
+    private playRetryTimer: number | null = null
 
     private size: [number, number] | null = null
     private hdrEnabled: boolean = false
@@ -88,10 +89,36 @@ export class VideoElementRenderer implements TrackVideoRenderer, VideoRenderer {
         addPipePassthrough(this)
     }
 
+    private schedulePlayRetry() {
+        if (this.playRetryTimer != null) {
+            clearTimeout(this.playRetryTimer)
+            this.playRetryTimer = null
+        }
+        this.playRetryTimer = window.setTimeout(() => {
+            this.playRetryTimer = null
+            this.ensurePlayback()
+        }, 120)
+    }
+
+    private ensurePlayback() {
+        if (!this.videoElement.paused) {
+            return
+        }
+        this.videoElement.play().catch(error => {
+            // Autoplay policies or transient ready-state transitions can reject play().
+            // Keep retrying from user interaction / track events instead of hard-failing.
+            console.debug(`VideoElementRenderer play() retry failed: ${error?.message || error}`)
+        })
+    }
+
     async setup(setup: VideoRendererSetup) {
         this.size = [setup.width, setup.height]
     }
     cleanup(): void {
+        if (this.playRetryTimer != null) {
+            clearTimeout(this.playRetryTimer)
+            this.playRetryTimer = null
+        }
         if (this.oldTrack) {
             this.stream.removeTrack(this.oldTrack)
         }
@@ -105,6 +132,11 @@ export class VideoElementRenderer implements TrackVideoRenderer, VideoRenderer {
 
         this.stream.addTrack(track)
         this.oldTrack = track
+
+        // Track swaps can leave the element paused in some browsers; re-kick playback.
+        this.ensurePlayback()
+        track.addEventListener("unmute", () => this.schedulePlayRetry())
+        track.addEventListener("ended", () => this.schedulePlayRetry())
     }
 
     pollRequestIdr(): boolean {
@@ -119,13 +151,7 @@ export class VideoElementRenderer implements TrackVideoRenderer, VideoRenderer {
     }
 
     onUserInteraction(): void {
-        if (this.videoElement.paused) {
-            this.videoElement.play().then(() => {
-                // Playing
-            }).catch(error => {
-                console.error(`Failed to play videoElement: ${error.message || error}`);
-            })
-        }
+        this.ensurePlayback()
     }
     getStreamRect(): DOMRect {
         if (!this.size) {
