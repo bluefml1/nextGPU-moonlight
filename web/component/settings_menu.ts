@@ -97,6 +97,15 @@ export function getLocalStreamSettings(): Settings | null {
     if (settings?.pageStyle == "old") {
         settings.pageStyle = "moonlight"
     }
+    if (settings) {
+        // Backend expects integer FPS (u32); sanitize legacy/invalid float values.
+        const rawFps = Number((settings as any).fps)
+        if (Number.isFinite(rawFps)) {
+            settings.fps = Math.max(1, Math.round(rawFps))
+        } else {
+            settings.fps = defaultSettings().fps
+        }
+    }
 
     return settings
 }

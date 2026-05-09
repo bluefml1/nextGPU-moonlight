@@ -13,7 +13,7 @@ const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
     performance: {
         bitrate: 10000,
         packetSize: 1024,
-        fps: 60,
+        fps: 59,
         videoCodec: "h265",
         videoFrameQueueSize: 2,
         videoSize: "1080p",
@@ -29,7 +29,7 @@ const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
     balance: {
         bitrate: 10000,
         packetSize: 1024,
-        fps: 60,
+        fps: 59,
         videoCodec: "h265",
         videoSize: "1440p",
         videoSizeCustom: { width: 2560, height: 1440 },
@@ -45,7 +45,7 @@ const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
     quality: {
         bitrate: 10000,
         packetSize: 1024,
-        fps: 60,
+        fps: 59,
         videoCodec: "h265",
         videoSize: "4k",
         videoSizeCustom: { width: 3840, height: 2160 },

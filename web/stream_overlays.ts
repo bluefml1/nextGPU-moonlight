@@ -350,13 +350,15 @@ export const MoonlightLoadingScreen = (() => {
     }
 })()
 
-/** Fullscreen intro overlay is disabled; keep API as no-op for compatibility. */
+/** Deprecated runtime no-op: fullscreen is user-driven via sidebar controls only. */
 const MoonlightFullscreenOverlayImpl = (() => {
     return {
-        show(onFullscreen?: () => void) {
-            onFullscreen?.()
+        show(_onFullscreen?: () => void) {
+            // Intentionally no-op.
         },
-        hide(_fadeMs = 280) {},
+        hide(_fadeMs = 280) {
+            // Intentionally no-op.
+        },
         isVisible() {
             return false
         },
@@ -365,13 +367,9 @@ const MoonlightFullscreenOverlayImpl = (() => {
 
 export const MoonlightFullscreenOverlay = MoonlightFullscreenOverlayImpl
 
-/** Overlay that asks for a user gesture before re-acquiring pointer lock. */
+/** Passive chip prompting pointer-lock re-acquire without intercepting stream input. */
 const MoonlightPointerLockOverlayImpl = (() => {
     const CSS = `
-        @keyframes mlplo-pulse {
-            0%,100% { opacity: .55; transform: scale(1); }
-            50%      { opacity: 1;   transform: scale(1.1); }
-        }
         @keyframes mlplo-fadein {
             from { opacity: 0; }
             to   { opacity: 1; }
@@ -379,44 +377,87 @@ const MoonlightPointerLockOverlayImpl = (() => {
 
         #mlplo-overlay {
             position: fixed;
-            inset: 0;
-            z-index: 99999;
+            right: 12px;
+            bottom: 12px;
+            z-index: 100;
             background: transparent;
             display: flex;
-            align-items: center;
-            justify-content: center;
+            align-items: flex-end;
+            justify-content: flex-end;
             user-select: none;
-            animation: mlplo-fadein .3s ease both;
+            animation: mlplo-fadein .24s ease both;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            pointer-events: auto;
-            cursor: pointer;
-            touch-action: manipulation;
-            -webkit-tap-highlight-color: transparent;
+            pointer-events: none;
         }
 
-        #mlplo-notice {
-            padding: 8px 11px;
-            border-radius: 9px;
-            background:
-                linear-gradient(135deg, rgba(74, 111, 255, 0.2), rgba(0, 200, 255, 0.14)),
-                rgba(12, 12, 16, 0.84);
-            border: 1px solid rgba(255, 255, 255, 0.14);
-            color: rgba(255, 255, 255, 0.94);
+        #mlplo-chip {
+            padding: 7px 10px;
+            border-radius: 8px;
+            background: rgba(10, 10, 12, 0.84);
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            color: rgba(255, 255, 255, 0.92);
             font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.03em;
-            text-transform: uppercase;
+            font-weight: 500;
+            letter-spacing: 0.01em;
             cursor: pointer;
             pointer-events: auto;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+            backdrop-filter: blur(3px);
             box-shadow:
-                0 2px 12px rgba(0, 0, 0, 0.45),
-                inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+                0 2px 8px rgba(0, 0, 0, 0.35),
+                inset 0 0 0 1px rgba(255, 255, 255, 0.03);
             text-align: center;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            max-width: min(78vw, 340px);
+        }
+
+        #mlplo-action {
+            border: 0;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            letter-spacing: inherit;
+            padding: 0;
+            opacity: 0.96;
+        }
+
+        #mlplo-action:hover {
+            opacity: 1;
+        }
+
+        #mlplo-close {
+            border: 0;
+            border-radius: 6px;
+            width: 16px;
+            height: 16px;
+            line-height: 16px;
+            padding: 0;
+            background: rgba(255, 255, 255, 0.10);
+            color: rgba(255, 255, 255, 0.90);
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            opacity: 0.8;
+        }
+
+        #mlplo-close:hover {
+            opacity: 1;
+            background: rgba(255, 255, 255, 0.16);
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            #mlplo-overlay {
+                animation: none;
+            }
         }
     `
 
     let overlayEl: HTMLDivElement | null = null
-    let keyHandler: ((e: KeyboardEvent) => void) | null = null
+    let showId = 0
 
     function injectStyles() {
         if (document.getElementById("mlplo-styles")) return
@@ -429,70 +470,60 @@ const MoonlightPointerLockOverlayImpl = (() => {
     function buildOverlay() {
         const root = document.createElement("div")
         root.id = "mlplo-overlay"
-        const notice = document.createElement("div")
-        notice.id = "mlplo-notice"
-        notice.textContent = "Tap, click, scroll, or press a key to lock mouse"
-        root.appendChild(notice)
+        const chip = document.createElement("div")
+        chip.id = "mlplo-chip"
+        chip.setAttribute("aria-live", "polite")
+        const action = document.createElement("button")
+        action.id = "mlplo-action"
+        action.type = "button"
+        action.textContent = "Click to relock mouse"
+        const close = document.createElement("button")
+        close.id = "mlplo-close"
+        close.type = "button"
+        close.setAttribute("aria-label", "Dismiss lock mouse hint")
+        close.textContent = "x"
+        chip.appendChild(action)
+        chip.appendChild(close)
+        root.appendChild(chip)
         return root
     }
 
     const api = {
-        show(onRelock?: () => void) {
-            if (overlayEl) return
+        show(onRelock?: () => void, onDismiss?: () => void) {
+            const thisShowId = ++showId
+            if (overlayEl) api.hide(0)
             console.info("[Overlay:EscRelock] show")
             injectStyles()
             overlayEl = buildOverlay()
+            const action = overlayEl.querySelector("#mlplo-action") as HTMLButtonElement | null
+            const close = overlayEl.querySelector("#mlplo-close") as HTMLButtonElement | null
 
-            let finished = false
-            const detachKey = () => {
-                if (keyHandler) {
-                    document.removeEventListener("keydown", keyHandler, true)
-                    keyHandler = null
-                }
-            }
             const go = () => {
-                if (finished) return
-                finished = true
+                if (!overlayEl || thisShowId !== showId) return
                 console.info("[Overlay:EscRelock] user gesture -> relock")
-                detachKey()
                 api.hide()
                 onRelock?.()
             }
-
-            keyHandler = (e: KeyboardEvent) => {
-                if (finished || !overlayEl) return
-                e.preventDefault()
-                e.stopImmediatePropagation()
-                go()
+            const dismiss = () => {
+                if (!overlayEl || thisShowId !== showId) return
+                console.info("[Overlay:EscRelock] dismissed")
+                api.hide()
+                onDismiss?.()
             }
-            document.addEventListener("keydown", keyHandler, { capture: true })
 
-            const cap = { capture: true } as const
-            // Full-viewport gestures; capture runs before stream's document listeners. Wheel must be non-passive
-            // so preventDefault can run (user activation + no accidental page scroll).
-            const onWheel = (e: WheelEvent) => {
-                if (finished || !overlayEl) return
-                e.preventDefault()
-                go()
-            }
-            overlayEl.addEventListener("pointerdown", go, { once: true, ...cap })
-            overlayEl.addEventListener("touchstart", go, { once: true, passive: true, ...cap })
-            overlayEl.addEventListener("touchend", go, { once: true, passive: true, ...cap })
-            overlayEl.addEventListener("wheel", onWheel, { once: true, passive: false, ...cap })
-            overlayEl.addEventListener("click", go, { once: true, ...cap })
+            action?.addEventListener("click", go)
+            close?.addEventListener("click", (event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                dismiss()
+            })
 
             document.body.appendChild(overlayEl)
-            document.body.classList.add("ml-pointer-lock-overlay-active")
-            overlayEl.querySelector("#mlplo-notice")?.setAttribute("aria-live", "polite")
         },
         hide(fadeMs = 220) {
             if (!overlayEl) return
             console.info("[Overlay:EscRelock] hide", { fadeMs })
-            document.body.classList.remove("ml-pointer-lock-overlay-active")
-            if (keyHandler) {
-                document.removeEventListener("keydown", keyHandler, true)
-                keyHandler = null
-            }
+            overlayEl.style.pointerEvents = "none"
             overlayEl.style.transition = `opacity ${fadeMs}ms ease`
             overlayEl.style.opacity = "0"
             const target = overlayEl
