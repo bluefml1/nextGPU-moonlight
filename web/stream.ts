@@ -2272,9 +2272,15 @@ class ViewerApp implements Component {
     }
 
     async requestFullscreen() {
-        // UX preference: avoid browser fullscreen prompts that can resize/reflow the page mid-game.
-        this.adaptiveLog("requestFullscreen suppressed to avoid browser popup/reflow")
-        return
+        try {
+            this.focusInput()
+            await document.documentElement.requestFullscreen()
+            if ("keyboard" in navigator && navigator.keyboard && "lock" in navigator.keyboard) {
+                await navigator.keyboard.lock()
+            }
+        } catch (e) {
+            this.adaptiveLog(`requestFullscreen failed: ${String(e)}`)
+        }
     }
     async exitFullscreen() {
         if ("keyboard" in navigator && navigator.keyboard && "unlock" in navigator.keyboard) {
@@ -2654,6 +2660,8 @@ class ViewerApp implements Component {
             ? `${statsData.videoWidth}x${statsData.videoHeight}`
             : "N/A"
         const codec = this.safeText(statsData.videoCodec)
+        const bitrate = this.computeBitrateMbps(statsData)
+        const formattedBitrate = this.formatWithUnit(bitrate, "Mbps", 2)
         this.statsMinimizeButton.textContent = this.statsMinimized ? "▢" : "—"
         this.statsTopBar.classList.toggle("video-stats-topbar-mini", this.statsMinimized)
         this.statsDetailsDiv.classList.remove("video-stats-mini", "video-stats-details-visible")
@@ -2664,6 +2672,7 @@ class ViewerApp implements Component {
                 <span class="video-stats-chip"><span class="video-stats-label">FPS</span>${this.formatWithUnit(fps, "fps", 0)}</span>
                 <span class="video-stats-chip"><span class="video-stats-label">Latency</span>${this.formatWithUnit(latency, "ms", 0)}</span>
                 <span class="video-stats-chip"><span class="video-stats-label">Status</span>${connectionStatusLabel}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">Bitrate</span>${formattedBitrate}</span>
             `
             this.statsSummaryDiv.hidden = true
             this.statsSummaryDiv.innerHTML = ""
@@ -2681,6 +2690,7 @@ class ViewerApp implements Component {
             <span class="video-stats-row"><span class="video-stats-label">Resolution</span><span>${resolution}</span></span>
             <span class="video-stats-row"><span class="video-stats-label">Jitter</span><span>${this.formatWithUnit(jitter, "ms", 2)}</span></span>
             <span class="video-stats-row"><span class="video-stats-label">Loss</span><span>${packetLossPercent != null ? `${packetLossPercent.toFixed(2)}%` : "N/A"}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">Bitrate</span><span>${formattedBitrate}</span></span>
         `
         this.statsDetailsDiv.classList.remove("video-stats-details-visible")
     }
@@ -3395,7 +3405,13 @@ class ViewerSidebar implements Component, Sidebar {
         this.div = document.createElement("div")
 
         this.div.classList.add("sidebar-stream")
-        this.screenKeyboard = new ScreenKeyboard()
+        this.screenKeyboard = new ScreenKeyboard({
+            onVisibilityChange: (visible: boolean) => {
+                this.app.getVirtualControllerOverlay().releaseAllTouchInteraction(
+                    visible ? "screenKeyboard:show" : "screenKeyboard:hide"
+                )
+            },
+        })
 
         this.screenKeyboard.addKeyDownListener(this.onKeyDown.bind(this))
         this.screenKeyboard.addKeyUpListener(this.onKeyUp.bind(this))

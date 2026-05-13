@@ -762,6 +762,35 @@ export class StreamInput {
         return this.touchMouseAction
     }
 
+    /**
+     * Clears in-progress touch→mouse gesture state (e.g. after opening the on-screen keyboard or virtual
+     * controller, where stream `touchend` may not fire for a finger that moved onto overlay UI).
+     * Releases a touch-drag left button if we were in {@link PredictedTouchAction} `"drag"`.
+     */
+    resetTouchGestureState(reason = "unspecified"): void {
+        const hadTouches = this.touchTracker.size > 0 || this.primaryTouch != null || this.touchMouseAction !== "default" || this.nextTouchDoubleTap
+        if (hadTouches) {
+            console.debug(
+                `[Touch] reset touch gesture state (${reason})`,
+                {
+                    action: this.touchMouseAction,
+                    primaryTouch: this.primaryTouch,
+                    trackedTouches: this.touchTracker.size,
+                    nextTouchDoubleTap: this.nextTouchDoubleTap,
+                }
+            )
+        }
+        if (this.config.touchMode == "mouseRelative" || this.config.touchMode == "pointAndDrag") {
+            if (this.touchMouseAction == "drag") {
+                this.sendMouseButton(false, StreamMouseButton.LEFT)
+            }
+        }
+        this.touchTracker.clear()
+        this.primaryTouch = null
+        this.touchMouseAction = "default"
+        this.nextTouchDoubleTap = false
+    }
+
     // -- Controller
     // Wait for stream to connect and then send controllers
     private bufferedControllers: Array<number> = []

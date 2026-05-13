@@ -5,6 +5,7 @@ import type { StreamInput } from "./stream/input.js"
 import { ScreenKeyboard, TextEvent } from "./screen_keyboard.js"
 
 const STORAGE_KEY = "ml.virtualController.layout.v1"
+const SETTINGS_FAB_POS_KEY = "ml.virtualController.settingsFab.v1"
 const DRAG_THRESHOLD_PX = 6
 const LISTEN_CANCEL_KEYS = new Set(["Escape"])
 const STICK_KEY_DEADZONE = 0.2
@@ -26,6 +27,9 @@ export type VirtualControlRole =
     | "r2"
     | "stickL"
     | "stickR"
+    | "start"
+    | "select"
+    | "special"
     /** WASD-style stick: sends keyboard keys via dominant direction */
     | "stickWasd"
     | "custom"
@@ -84,9 +88,9 @@ function defaultStickKeys(): VirtualStickKeys {
 function roleToGamepadFlag(role: VirtualControlRole): number {
     switch (role) {
         case "cross":
-            return StreamControllerButton.BUTTON_B
-        case "circle":
             return StreamControllerButton.BUTTON_A
+        case "circle":
+            return StreamControllerButton.BUTTON_B
         case "triangle":
             return StreamControllerButton.BUTTON_Y
         case "square":
@@ -100,11 +104,19 @@ function roleToGamepadFlag(role: VirtualControlRole): number {
         case "dpad-right":
             return StreamControllerButton.BUTTON_RIGHT
         case "l1":
-            return StreamControllerButton.BUTTON_LB
         case "r1":
-            return StreamControllerButton.BUTTON_RB
+            /* L1/R1 are triggers in buildGamepadState; L2/R2 are bumpers (LB/RB). */
+            return 0
         case "l2":
+            return StreamControllerButton.BUTTON_LB
         case "r2":
+            return StreamControllerButton.BUTTON_RB
+        case "start":
+            return StreamControllerButton.BUTTON_PLAY
+        case "select":
+            return StreamControllerButton.BUTTON_BACK
+        case "special":
+            return StreamControllerButton.BUTTON_SPECIAL
         case "stickL":
         case "stickR":
         case "stickWasd":
@@ -143,6 +155,12 @@ function roleLabel(role: VirtualControlRole): string {
             return "L2"
         case "r2":
             return "R2"
+        case "start":
+            return "▶"
+        case "select":
+            return "◀"
+        case "special":
+            return "⊙"
         case "stickL":
             return "L"
         case "stickR":
@@ -176,6 +194,9 @@ function defaultLayout(): VirtualLayoutFile {
             { id: "cx", role: "cross", rect: { x: 0.81, y: 0.42, w: 0.09, h: 0.09 }, enabled: true },
             { id: "sl", role: "stickL", rect: { x: 0.22, y: 0.62, w: 0.18, h: 0.2 }, enabled: true },
             { id: "sr", role: "stickR", rect: { x: 0.6, y: 0.62, w: 0.18, h: 0.2 }, enabled: true },
+            { id: "sel", role: "select", rect: { x: 0.06, y: 0.68, w: 0.10, h: 0.07 }, enabled: true },
+            { id: "spec", role: "special", rect: { x: 0.44, y: 0.68, w: 0.10, h: 0.07 }, enabled: true },
+            { id: "sta", role: "start", rect: { x: 0.84, y: 0.68, w: 0.10, h: 0.07 }, enabled: true },
         ],
     }
 }
@@ -193,6 +214,9 @@ const KNOWN_ROLES = new Set<VirtualControlRole>([
     "r1",
     "l2",
     "r2",
+    "start",
+    "select",
+    "special",
     "stickL",
     "stickR",
     "stickWasd",
@@ -395,6 +419,16 @@ export class VirtualControllerOverlay {
     private moveDrag: null | { id: string, rect0: VirtualControlRect, ptr0X: number, ptr0Y: number } = null
     private resizeDrag: null | { id: string, startW: number, startH: number, ptrX: number, ptrY: number } = null
 
+    private settingsFabDragPointerId: number | null = null
+    private settingsFabDragStartX = 0
+    private settingsFabDragStartY = 0
+    private settingsFabDragOffsetX = 0
+    private settingsFabDragOffsetY = 0
+    private settingsFabDragged = false
+    private settingsFabSuppressClickUntilMs = 0
+    private settingsFabDocMove: ((event: PointerEvent) => void) | null = null
+    private settingsFabDocEnd: ((event: PointerEvent) => void) | null = null
+
     private readonly screenKbTextHandler = (ev: Event) => this.onScreenKbText(ev)
     private readonly screenKbKeyHandler = (ev: KeyboardEvent) => this.onScreenKbKey(ev)
 
@@ -448,7 +482,7 @@ export class VirtualControllerOverlay {
         this.root.appendChild(this.settingsBar)
         this.root.appendChild(this.listenHint)
 
-        this.settingsBtn.addEventListener("click", () => this.toggleSettings())
+        this.installSettingsFabDrag()
         this.addBtn.addEventListener("click", () => {
             this.addMenuOpen = !this.addMenuOpen
             this.syncAddMenu()
@@ -474,6 +508,144 @@ export class VirtualControllerOverlay {
         this.applyBtn.addEventListener("click", () => this.applySettings())
     }
 
+    private applyStoredSettingsFabPosition(): void {
+        let saved: { left: number, top: number } | null = null
+        try {
+            const raw = localStorage.getItem(SETTINGS_FAB_POS_KEY)
+            if (raw) saved = JSON.parse(raw) as { left: number, top: number }
+        } catch {
+            /* ignore */
+        }
+        const fab = this.settingsBtn
+        if (saved && typeof saved.left === "number" && typeof saved.top === "number") {
+            fab.style.right = "auto"
+            fab.style.bottom = "auto"
+            fab.style.left = `${Math.round(saved.left)}px`
+            fab.style.top = `${Math.round(saved.top)}px`
+        }
+    }
+
+    private clampSettingsFabToViewport(): void {
+        const fab = this.settingsBtn
+        const m = 8
+        const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+        const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+        const w = fab.offsetWidth || 40
+        const h = fab.offsetHeight || 40
+        const r = fab.getBoundingClientRect()
+        let left = r.left
+        let top = r.top
+        left = Math.max(m, Math.min(vw - w - m, left))
+        top = Math.max(m, Math.min(vh - h - m, top))
+        fab.style.right = "auto"
+        fab.style.bottom = "auto"
+        fab.style.left = `${Math.round(left)}px`
+        fab.style.top = `${Math.round(top)}px`
+    }
+
+    private persistSettingsFabPosition(): void {
+        const r = this.settingsBtn.getBoundingClientRect()
+        try {
+            localStorage.setItem(SETTINGS_FAB_POS_KEY, JSON.stringify({ left: Math.round(r.left), top: Math.round(r.top) }))
+        } catch {
+            /* ignore */
+        }
+    }
+
+    private installSettingsFabDrag(): void {
+        this.applyStoredSettingsFabPosition()
+        const fab = this.settingsBtn
+        this.settingsFabDocMove = (event: PointerEvent) => {
+            if (this.settingsFabDragPointerId == null || event.pointerId !== this.settingsFabDragPointerId) return
+            const dx = event.clientX - this.settingsFabDragStartX
+            const dy = event.clientY - this.settingsFabDragStartY
+            if (!this.settingsFabDragged && (Math.abs(dx) > DRAG_THRESHOLD_PX || Math.abs(dy) > DRAG_THRESHOLD_PX)) {
+                this.settingsFabDragged = true
+            }
+            if (!this.settingsFabDragged) return
+            event.preventDefault()
+            const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+            const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+            const m = 8
+            const w = fab.offsetWidth || 40
+            const h = fab.offsetHeight || 40
+            let left = event.clientX - this.settingsFabDragOffsetX
+            let top = event.clientY - this.settingsFabDragOffsetY
+            left = Math.max(m, Math.min(vw - w - m, left))
+            top = Math.max(m, Math.min(vh - h - m, top))
+            fab.style.right = "auto"
+            fab.style.bottom = "auto"
+            fab.style.left = `${Math.round(left)}px`
+            fab.style.top = `${Math.round(top)}px`
+        }
+        this.settingsFabDocEnd = (event: PointerEvent) => {
+            if (this.settingsFabDragPointerId == null || event.pointerId !== this.settingsFabDragPointerId) return
+            this.settingsFabDragPointerId = null
+            const move = this.settingsFabDocMove!
+            const end = this.settingsFabDocEnd!
+            document.removeEventListener("pointermove", move)
+            document.removeEventListener("pointerup", end)
+            document.removeEventListener("pointercancel", end)
+            if (this.settingsFabDragged) {
+                event.preventDefault()
+                event.stopImmediatePropagation()
+                this.settingsFabDragged = false
+                this.settingsFabSuppressClickUntilMs = Date.now() + 500
+                this.persistSettingsFabPosition()
+                return
+            }
+            this.settingsFabSuppressClickUntilMs = Date.now() + 500
+            this.toggleSettings()
+        }
+        fab.addEventListener("pointerdown", (event: PointerEvent) => {
+            event.preventDefault()
+            event.stopPropagation()
+            this.settingsFabDragPointerId = event.pointerId
+            this.settingsFabDragged = false
+            this.settingsFabDragStartX = event.clientX
+            this.settingsFabDragStartY = event.clientY
+            const rect = fab.getBoundingClientRect()
+            this.settingsFabDragOffsetX = event.clientX - rect.left
+            this.settingsFabDragOffsetY = event.clientY - rect.top
+            const opts: AddEventListenerOptions = { passive: false }
+            document.addEventListener("pointermove", this.settingsFabDocMove!, opts)
+            document.addEventListener("pointerup", this.settingsFabDocEnd!, opts)
+            document.addEventListener("pointercancel", this.settingsFabDocEnd!, opts)
+        })
+        fab.addEventListener("keydown", (event: KeyboardEvent) => {
+            if (event.key !== "Enter" && event.key !== " ") return
+            event.preventDefault()
+            this.toggleSettings()
+        })
+        fab.addEventListener("click", (event: MouseEvent) => {
+            if (this.settingsFabDragged) return
+            if (Date.now() < this.settingsFabSuppressClickUntilMs) {
+                event.preventDefault()
+                event.stopPropagation()
+                return
+            }
+            event.preventDefault()
+            this.toggleSettings()
+        })
+        window.addEventListener("resize", () => {
+            if (!this.visible) return
+            this.clampSettingsFabToViewport()
+        })
+    }
+
+    private releaseSettingsFabDocumentDrag(): void {
+        if (this.settingsFabDragPointerId == null || !this.settingsFabDocMove || !this.settingsFabDocEnd) return
+        document.removeEventListener("pointermove", this.settingsFabDocMove)
+        document.removeEventListener("pointerup", this.settingsFabDocEnd)
+        document.removeEventListener("pointercancel", this.settingsFabDocEnd)
+        if (this.settingsFabDragged) {
+            this.persistSettingsFabPosition()
+        }
+        this.settingsFabDragPointerId = null
+        this.settingsFabDragged = false
+        this.settingsFabSuppressClickUntilMs = Date.now() + 500
+    }
+
     private readonly onWindowKeyWhileListening = (ev: KeyboardEvent) => {
         if (!this.listenCtx) return
         if (LISTEN_CANCEL_KEYS.has(ev.key)) {
@@ -489,6 +661,43 @@ export class VirtualControllerOverlay {
 
     private syncAddMenu(): void {
         this.addMenu.classList.toggle("ml-virtual-controller-add-menu--open", this.addMenuOpen && this.settingsMode)
+    }
+
+    private resetTouchGestureState(reason: string): void {
+        this.deps.getStreamInput()?.resetTouchGestureState(reason)
+    }
+
+    /**
+     * Clears stream touch→mouse gesture state and any in-progress controller presses/drags.
+     * Call when toggling the on-screen keyboard or virtual controller so touches that moved onto overlays
+     * cannot leave a stale drag/button state.
+     */
+    releaseAllTouchInteraction(reason: string): void {
+        console.debug(`[Touch] released all touch-action (${reason})`)
+        this.resetTouchGestureState(reason)
+        if (!this.visible) {
+            return
+        }
+        this.releaseSettingsFabDocumentDrag()
+        this.releaseAllStickKeyDirections()
+        const pressedIds = [...this.activePress]
+        for (const id of pressedIds) {
+            const def = this.layout.controls.find((c) => c.id === id)
+            if (def) {
+                this.sendDigitalUp(def)
+            }
+        }
+        this.activePress.clear()
+        this.pointerDownOnControl.clear()
+        this.stickDrag = null
+        this.moveDrag = null
+        this.resizeDrag = null
+        this.stickL = { x: 0, y: 0 }
+        this.stickR = { x: 0, y: 0 }
+        this.stickKeyVisual.clear()
+        for (const el of this.hudLayer.querySelectorAll(".ml-virtual-controller-face")) {
+            el.classList.remove(FACE_PRESSED_CLASS)
+        }
     }
 
     getElement(): HTMLElement {
@@ -510,25 +719,21 @@ export class VirtualControllerOverlay {
         if (input?.isConnected()) {
             input.enableVirtualController()
         }
+        this.releaseAllTouchInteraction("virtualController:show")
         this.startRaf()
     }
 
     hide(): void {
-        this.releaseAllStickKeyDirections()
+        this.releaseAllTouchInteraction("virtualController:hide")
         this.visible = false
         this.stopListening()
         window.removeEventListener("keydown", this.onWindowKeyWhileListening)
         this.settingsMode = false
         this.addMenuOpen = false
         this.root.style.display = "none"
-        this.deps.getStreamInput()?.disableVirtualController()
+        const input = this.deps.getStreamInput()
+        input?.disableVirtualController()
         this.stopRaf()
-        this.activePress.clear()
-        this.pointerDownOnControl.clear()
-        this.stickDrag = null
-        this.moveDrag = null
-        this.resizeDrag = null
-        this.stickKeyVisual.clear()
     }
 
     isVisible(): boolean {
@@ -582,22 +787,23 @@ export class VirtualControllerOverlay {
             if (!def.enabled) continue
             const flag =
                 def.role === "custom" ? (def.gamepadFlag ?? StreamControllerButton.BUTTON_A) : roleToGamepadFlag(def.role)
-            if (def.role === "l2" && this.activePress.has(def.id)) {
+            if (def.role === "l1" && this.activePress.has(def.id)) {
                 s.leftTrigger = 1
-            } else if (def.role === "r2" && this.activePress.has(def.id)) {
+            } else if (def.role === "r1" && this.activePress.has(def.id)) {
                 s.rightTrigger = 1
             } else if (
                 flag !== 0 &&
-                (def.role === "custom" || ["l2", "r2", "stickL", "stickR", "stickWasd"].indexOf(def.role) < 0) &&
+                (def.role === "custom" || ["l1", "r1", "stickL", "stickR", "stickWasd"].indexOf(def.role) < 0) &&
                 this.activePress.has(def.id)
             ) {
                 s.buttonFlags |= flag
             }
         }
+        /* Match W3C gamepad axis 1 (positive down); sendController negates Y for wire. */
         s.leftStickX = this.stickL.x
-        s.leftStickY = this.stickL.y
+        s.leftStickY = -this.stickL.y
         s.rightStickX = this.stickR.x
-        s.rightStickY = this.stickR.y
+        s.rightStickY = -this.stickR.y
         return s
     }
 
@@ -912,6 +1118,10 @@ export class VirtualControllerOverlay {
         /* Combos: each control id can be in activePress; each face captures its pointer — multiple buttons, multiple pointers. Same face + two fingers still one capture target. */
         face.addEventListener("lostpointercapture", () => {
             face.classList.remove(FACE_PRESSED_CLASS)
+        })
+
+        face.addEventListener("contextmenu", (e) => {
+            e.preventDefault()
         })
 
         face.addEventListener("pointerdown", (e) => {

@@ -1,6 +1,11 @@
 
 export type TextEvent = CustomEvent<{ text: string }>
 
+export type ScreenKeyboardOptions = {
+    /** Called whenever the keyboard is shown or hidden (stream touch gestures may be stale). */
+    onVisibilityChange?: (visible: boolean) => void
+}
+
 export class ScreenKeyboard {
 
     private eventTarget = new EventTarget()
@@ -23,8 +28,15 @@ export class ScreenKeyboard {
     private keyboardPos: { left: number; top: number } | null = null
     private readonly isTouchDevice: boolean
     private readonly minViewportMarginPx = 8
+    private readonly onVisibilityChange?: (visible: boolean) => void
+    private readonly onOutsidePointer = (e: PointerEvent) => {
+        if (!this.visible) return
+        if (this.shell.contains(e.target as Node)) return
+        this.hide()
+    }
 
-    constructor() {
+    constructor(opts?: ScreenKeyboardOptions) {
+        this.onVisibilityChange = opts?.onVisibilityChange
         this.isTouchDevice = ("maxTouchPoints" in navigator && navigator.maxTouchPoints > 0)
         this.root.classList.add("ml-screen-keyboard")
         this.shell.classList.add("ml-screen-keyboard-shell")
@@ -91,12 +103,16 @@ export class ScreenKeyboard {
             this.keyboardPos = null
         }
         this.applyKeyboardPosition()
+        document.addEventListener("pointerdown", this.onOutsidePointer, true)
+        this.onVisibilityChange?.(true)
     }
     hide() {
         this.visible = false
         this.root.style.display = "none"
         this.stopBackspaceRepeat()
         this.symbolMode = false
+        document.removeEventListener("pointerdown", this.onOutsidePointer, true)
+        this.onVisibilityChange?.(false)
     }
 
     isVisible(): boolean {
