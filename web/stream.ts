@@ -24,6 +24,9 @@ import { StreamStatsData } from "./stream/stats.js";
 import { MoonlightLoadingScreen, MoonlightPointerLockOverlay } from "./stream_overlays.js";
 import { runStreamProfileGate } from "./component/stream_profile_gate.js";
 
+/** Matches stream index.ts — host bitrate POST feedback from streamer. */
+const MOONLIGHT_BITRATE_LOG_PREFIX = "[Moonlight][Bitrate]"
+
 /** Persisted stream viewer mouse/touch mode (separate from `mlSettings`). */
 const ML_STREAM_INPUT_MODES_KEY = "mlStreamInputModes"
 
@@ -468,6 +471,8 @@ class ViewerApp implements Component {
     private controllerFallbackButton: HTMLButtonElement | null = null
     private virtualControllerOverlay: VirtualControllerOverlay
     private fullscreenToggleButton: HTMLButtonElement | null = null
+    private overlayHudTray: HTMLDivElement | null = null
+    private overlayBitrateRange: HTMLInputElement | null = null
     private statsControlsGroup: HTMLDivElement | null = null
     private fullscreenToggleButtonManualPosition = false
     private fullscreenToggleButtonDragging = false
@@ -593,12 +598,26 @@ class ViewerApp implements Component {
 
     private syncFullscreenToggleButtonPosition() {
         const button = this.fullscreenToggleButton
+        const tray = this.overlayHudTray
         if (!button) return
-        if (isPhoneLikeDevice()) {
-            button.style.display = "none"
+        if (!tray) {
+            if (isPhoneLikeDevice()) {
+                button.style.display = "none"
+                return
+            }
+            button.style.display = "inline-flex"
             return
         }
-        button.style.display = "inline-flex"
+        tray.style.position = "fixed"
+        tray.style.zIndex = "70"
+        tray.style.alignItems = "center"
+        tray.style.flexDirection = "row"
+        tray.style.gap = "6px"
+        if (isPhoneLikeDevice()) {
+            tray.style.display = "none"
+            return
+        }
+        tray.style.display = "flex"
         const statsVisible = !this.statsDiv.hidden && !this.statsClosed
         const topBarHeight = this.statsTopBar.getBoundingClientRect().height
         const targetSize = statsVisible
@@ -614,51 +633,79 @@ class ViewerApp implements Component {
         if (this.fullscreenToggleButtonDragging) {
             return
         }
+        const trayWidth = tray.offsetWidth || 200
+        const trayHeight = tray.offsetHeight || targetSize
         if (!statsVisible && this.fullscreenToggleButtonManualPosition) {
             const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
             const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
-            const buttonWidth = button.offsetWidth || 36
-            const buttonHeight = button.offsetHeight || 36
-            const left = Number.parseFloat(button.style.left || "0")
-            const top = Number.parseFloat(button.style.top || "0")
-            const maxLeft = Math.max(8, viewportWidth - buttonWidth - 8)
-            const maxTop = Math.max(8, viewportHeight - buttonHeight - 8)
+            const left = Number.parseFloat(tray.style.left || "0")
+            const top = Number.parseFloat(tray.style.top || "0")
+            const maxLeft = Math.max(8, viewportWidth - trayWidth - 8)
+            const maxTop = Math.max(8, viewportHeight - trayHeight - 8)
             const nextLeft = Math.min(Math.max(8, Number.isFinite(left) ? left : 12), maxLeft)
             const nextTop = Math.min(Math.max(8, Number.isFinite(top) ? top : 12), maxTop)
-            button.style.right = "auto"
-            button.style.left = `${Math.round(nextLeft)}px`
-            button.style.top = `${Math.round(nextTop)}px`
+            tray.style.right = "auto"
+            tray.style.left = `${Math.round(nextLeft)}px`
+            tray.style.top = `${Math.round(nextTop)}px`
             return
         }
         if (statsVisible) {
             this.fullscreenToggleButtonManualPosition = false
         }
         if (!statsVisible) {
-            button.style.left = "auto"
-            button.style.top = "12px"
-            button.style.right = "12px"
+            tray.style.left = "auto"
+            tray.style.top = "12px"
+            tray.style.right = "12px"
             return
         }
         const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
         const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
         const statsRect = this.statsDiv.getBoundingClientRect()
         const statsTopBarRect = this.statsTopBar.getBoundingClientRect()
-        const buttonWidth = button.offsetWidth || 36
-        const buttonHeight = button.offsetHeight || 36
-        const unclampedLeft = statsRect.left - buttonWidth - 8
-        const unclampedTop = statsTopBarRect.top + ((statsTopBarRect.height - buttonHeight) / 2)
-        const maxLeft = Math.max(8, viewportWidth - buttonWidth - 8)
-        const maxTop = Math.max(8, viewportHeight - buttonHeight - 8)
+        const unclampedLeft = statsRect.left - trayWidth - 8
+        const unclampedTop = statsTopBarRect.top + ((statsTopBarRect.height - trayHeight) / 2)
+        const maxLeft = Math.max(8, viewportWidth - trayWidth - 8)
+        const maxTop = Math.max(8, viewportHeight - trayHeight - 8)
         const nextLeft = Math.min(Math.max(8, unclampedLeft), maxLeft)
         const nextTop = Math.min(Math.max(8, unclampedTop), maxTop)
-        button.style.right = "auto"
-        button.style.left = `${Math.round(nextLeft)}px`
-        button.style.top = `${Math.round(nextTop)}px`
+        tray.style.right = "auto"
+        tray.style.left = `${Math.round(nextLeft)}px`
+        tray.style.top = `${Math.round(nextTop)}px`
+    }
+
+    private syncOverlayBitrateRangeFromSettings(): void {
+        const r = this.overlayBitrateRange
+        if (!r) return
+        const s = getSettingsForApp(this.getAppId())
+        if (s && Number.isFinite(s.bitrate)) {
+            r.value = String(s.bitrate)
+        }
     }
 
     private ensureFullscreenToggleButton() {
         if (this.fullscreenToggleButton) return
         this.ensureStatsControlsGroup()
+
+        const hudTray = document.createElement("div")
+        hudTray.classList.add("video-overlay-hud-tray")
+        const range = document.createElement("input")
+        range.type = "range"
+        range.classList.add("video-overlay-bitrate-range")
+        range.min = "1000"
+        range.max = "120000"
+        range.step = "500"
+        range.title = "Stream bitrate (kbps)"
+        range.setAttribute("aria-label", "Stream bitrate while streaming")
+        range.disabled = true
+        const st = getSettingsForApp(this.getAppId())
+        range.value = String(st?.bitrate ?? 10000)
+        range.addEventListener("input", () => {
+            const v = Number.parseInt(range.value, 10)
+            if (!Number.isFinite(v)) return
+            this.getStream()?.requestVideoBitrateKbps(v, "overlaySlider")
+        })
+        hudTray.appendChild(range)
+
         const button = document.createElement("button")
         button.type = "button"
         button.classList.add("video-fullscreen-toggle-btn")
@@ -687,21 +734,21 @@ class ViewerApp implements Component {
             if (!dragged) return
             const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
             const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
-            const buttonWidth = button.offsetWidth || 36
-            const buttonHeight = button.offsetHeight || 36
-            const nextLeft = Math.max(8, Math.min(viewportWidth - buttonWidth - 8, event.clientX - dragOffsetX))
-            const nextTop = Math.max(8, Math.min(viewportHeight - buttonHeight - 8, event.clientY - dragOffsetY))
-            button.style.right = "auto"
-            button.style.left = `${Math.round(nextLeft)}px`
-            button.style.top = `${Math.round(nextTop)}px`
+            const trayW = hudTray.offsetWidth || 200
+            const trayH = hudTray.offsetHeight || 36
+            const nextLeft = Math.max(8, Math.min(viewportWidth - trayW - 8, event.clientX - dragOffsetX))
+            const nextTop = Math.max(8, Math.min(viewportHeight - trayH - 8, event.clientY - dragOffsetY))
+            hudTray.style.right = "auto"
+            hudTray.style.left = `${Math.round(nextLeft)}px`
+            hudTray.style.top = `${Math.round(nextTop)}px`
             if (syncStatsWithButton) {
                 const statsRect = this.statsDiv.getBoundingClientRect()
                 const statsTopBarRect = this.statsTopBar.getBoundingClientRect()
                 const statsWidth = statsRect.width
                 const statsHeight = statsRect.height
-                const desiredStatsLeft = nextLeft + buttonWidth + 8
+                const desiredStatsLeft = nextLeft + trayW + 8
                 const nextStatsLeft = Math.max(8, Math.min(viewportWidth - statsWidth - 8, desiredStatsLeft))
-                const desiredStatsTopBarCenterY = nextTop + (buttonHeight / 2) + statsTopBarCenterOffsetY
+                const desiredStatsTopBarCenterY = nextTop + (trayH / 2) + statsTopBarCenterOffsetY
                 const unclampedStatsTop = desiredStatsTopBarCenterY - (statsTopBarRect.height / 2)
                 const nextStatsTop = Math.max(8, Math.min(viewportHeight - statsHeight - 8, unclampedStatsTop))
                 this.statsDiv.style.left = `${Math.round(nextStatsLeft)}px`
@@ -737,7 +784,7 @@ class ViewerApp implements Component {
             dragged = false
             this.fullscreenToggleButtonDragging = true
             this.fullscreenToggleButtonManualPosition = true
-            const rect = button.getBoundingClientRect()
+            const rect = hudTray.getBoundingClientRect()
             dragStartX = event.clientX
             dragStartY = event.clientY
             dragOffsetX = event.clientX - rect.left
@@ -750,9 +797,9 @@ class ViewerApp implements Component {
             } else {
                 syncStatsWithButton = false
             }
-            button.style.right = "auto"
-            button.style.left = `${Math.round(rect.left)}px`
-            button.style.top = `${Math.round(rect.top)}px`
+            hudTray.style.right = "auto"
+            hudTray.style.left = `${Math.round(rect.left)}px`
+            hudTray.style.top = `${Math.round(rect.top)}px`
             button.setPointerCapture(event.pointerId)
             document.addEventListener("pointermove", onDocumentPointerMove)
             document.addEventListener("pointerup", onDocumentPointerEnd)
@@ -763,7 +810,10 @@ class ViewerApp implements Component {
             if (Date.now() < suppressClickUntilMs) return
             void this.toggleFullscreenFromButton()
         })
-        this.statsControlsGroup?.appendChild(button)
+        hudTray.appendChild(button)
+        this.statsControlsGroup?.appendChild(hudTray)
+        this.overlayHudTray = hudTray
+        this.overlayBitrateRange = range
         this.fullscreenToggleButton = button
         this.syncFullscreenToggleButtonLabel()
         this.syncFullscreenToggleButtonPosition()
@@ -1299,7 +1349,9 @@ class ViewerApp implements Component {
             this.syncFullscreenToggleButtonPosition()
         }, 500)
         this.statsControlsGroup?.appendChild(this.statsDiv)
-        if (this.fullscreenToggleButton) {
+        if (this.overlayHudTray) {
+            this.statsControlsGroup?.appendChild(this.overlayHudTray)
+        } else if (this.fullscreenToggleButton) {
             this.statsControlsGroup?.appendChild(this.fullscreenToggleButton)
         }
 
@@ -1498,9 +1550,7 @@ class ViewerApp implements Component {
         const data = event.detail
 
         if (data.type == "app") {
-            const app = data.app
-
-            document.title = `Stream: ${app.title}`
+            document.title = "NextGPU"
         } else if (data.type == "connectionComplete") {
             this.latestConnectionState = "Connected"
             this.hasConnectedOnce = true
@@ -1510,6 +1560,10 @@ class ViewerApp implements Component {
             MoonlightLoadingScreen.hide()
             this.recoveryOverlay.hide()
             this.recoveryShown = false
+            if (this.overlayBitrateRange) {
+                this.syncOverlayBitrateRangeFromSettings()
+                this.overlayBitrateRange.disabled = false
+            }
         } else if (data.type == "hostCursorHidden") {
             this.latestHostCursorHidden = data.hidden
             if (data.hidden) {
@@ -1565,13 +1619,24 @@ class ViewerApp implements Component {
                     showErrorPopup(message)
                     this.latestConnectionState = "Failed"
                     this.showConnectionRecovery("The stream could not be established or was terminated. Retry to reconnect using the current configuration.")
+                    if (this.overlayBitrateRange) {
+                        this.overlayBitrateRange.disabled = true
+                    }
                 }
             } else if (data.additional?.type === "informError") {
-                showErrorPopup(data.line)
+                const line = data.line
+                if (line.includes(MOONLIGHT_BITRATE_LOG_PREFIX)) {
+                    console.warn(line)
+                } else {
+                    showErrorPopup(line)
+                }
             } else if (message === "Web Socket Closed" || message === "Web Socket or WebRtcPeer Error") {
                 if (!this.hasConnectedOnce) {
                     this.latestConnectionState = "Disconnected"
                     this.showConnectionRecovery("Connection was lost. Retry to reconnect, or open stream settings to adjust transport and quality.")
+                }
+                if (this.overlayBitrateRange) {
+                    this.overlayBitrateRange.disabled = true
                 }
             }
         } else if (data.type == "serverMessage") {
@@ -1584,6 +1649,9 @@ class ViewerApp implements Component {
                 statusText.includes("failed") ||
                 (!this.hasConnectedOnce && statusText.includes("disconnected"))
             if (shouldShowRecovery) {
+                if (this.hasConnectedOnce && this.overlayBitrateRange) {
+                    this.overlayBitrateRange.disabled = true
+                }
                 this.showConnectionRecovery("The session has been disconnected. Retry to reconnect or close this page.")
             }
         } else if (data.type == "fileTransferProgress") {
@@ -2436,7 +2504,9 @@ class ViewerApp implements Component {
             this.controllerFallbackButton.parentElement.removeChild(this.controllerFallbackButton)
         }
         this.virtualControllerOverlay.hide()
-        if (this.fullscreenToggleButton?.parentElement) {
+        if (this.overlayHudTray?.parentElement) {
+            this.overlayHudTray.parentElement.removeChild(this.overlayHudTray)
+        } else if (this.fullscreenToggleButton?.parentElement) {
             this.fullscreenToggleButton.parentElement.removeChild(this.fullscreenToggleButton)
         }
         if (this.statsControlsGroup?.parentElement) {
@@ -2446,6 +2516,8 @@ class ViewerApp implements Component {
         this.keyboardFallbackButton = null
         this.controllerFallbackButton = null
         this.fullscreenToggleButton = null
+        this.overlayHudTray = null
+        this.overlayBitrateRange = null
         this.statsControlsGroup = null
         this.fullscreenToggleButtonManualPosition = false
         this.fullscreenToggleButtonDragging = false
@@ -2805,6 +2877,11 @@ class ViewerApp implements Component {
         return this.stream
     }
 
+    /** Keep floating bitrate HUD in sync with persisted settings (e.g. settings modal). */
+    refreshStreamOverlayBitrate(): void {
+        this.syncOverlayBitrateRangeFromSettings()
+    }
+
     getVirtualControllerOverlay(): VirtualControllerOverlay {
         return this.virtualControllerOverlay
     }
@@ -3033,10 +3110,16 @@ class SettingsPanelModal implements Component, Modal<null> {
 
         // Stream settings UI (per-app)
         this.settingsComponent = new StreamSettingsComponent(getSettingsForApp(this.app.getAppId()) ?? undefined)
+        let prevBitrateForRealtime: number | undefined
         this.settingsComponent.addChangeListener(() => {
             const s = this.settingsComponent.getStreamSettings()
             setSettingsForApp(this.app.getAppId(), s)
             setPageStyle(s.pageStyle)
+            this.app.refreshStreamOverlayBitrate()
+            if (prevBitrateForRealtime !== s.bitrate) {
+                prevBitrateForRealtime = s.bitrate
+                this.app.getStream()?.requestVideoBitrateKbps(s.bitrate, "settings")
+            }
         })
 
         // Body: sidebar + content area with 4 panels (Video includes speed test)

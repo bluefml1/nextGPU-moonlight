@@ -388,6 +388,8 @@ pub enum StreamClientMessage {
         video_color_range_full: bool,
         hdr: bool,
     },
+    /// Change host video encoding bitrate during an active stream (requires Sunshine fork + streamer HTTP config).
+    SetVideoBitrate { bitrate_kbps: u32 },
 }
 
 #[derive(Serialize, Deserialize, Debug, TS, Clone, Default)]

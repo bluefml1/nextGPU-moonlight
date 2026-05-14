@@ -1832,6 +1832,36 @@ canvas.video-stream {
     justify-content: center;
 }
 
+.video-overlay-hud-tray {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px 4px 8px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    background: rgba(0, 0, 0, 0.88);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    z-index: 70;
+    box-sizing: border-box;
+}
+
+.video-overlay-hud-tray .video-fullscreen-toggle-btn {
+    position: relative;
+    top: auto;
+    right: auto;
+    left: auto;
+}
+
+.video-overlay-bitrate-range {
+    width: min(160px, 28vw);
+    min-width: 96px;
+    height: 6px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: rgba(120, 170, 255, 0.95);
+}
+
 .video-stats-summary {
     display: grid;
     grid-template-columns: 1fr;

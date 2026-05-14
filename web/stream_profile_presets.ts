@@ -11,9 +11,9 @@ export type StreamProfileId = "performance" | "balance" | "quality"
 /** Product presets — see DetailDesign/stream_profile_presets_a4b71cf8.plan.md */
 const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
     performance: {
-        bitrate: 10000,
+        bitrate: 20000,
         packetSize: 1024,
-        fps: 59,
+        fps: 120,
         videoCodec: "h265",
         videoFrameQueueSize: 2,
         videoSize: "1080p",
@@ -27,9 +27,9 @@ const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
         hdr: false,
     },
     balance: {
-        bitrate: 10000,
+        bitrate: 40000,
         packetSize: 1024,
-        fps: 59,
+        fps: 120,
         videoCodec: "h265",
         videoSize: "1440p",
         videoSizeCustom: { width: 2560, height: 1440 },
@@ -43,9 +43,9 @@ const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
         hdr: false,
     },
     quality: {
-        bitrate: 10000,
+        bitrate: 80000,
         packetSize: 1024,
-        fps: 59,
+        fps: 120,
         videoCodec: "h265",
         videoSize: "4k",
         videoSizeCustom: { width: 3840, height: 2160 },

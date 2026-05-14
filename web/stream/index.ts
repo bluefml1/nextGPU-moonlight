@@ -22,6 +22,10 @@ export type ExecutionEnvironment = {
     worker: boolean
 }
 
+export type VideoBitrateChangeSource = "slider" | "preset" | "settings" | "overlaySlider"
+
+const MOONLIGHT_BITRATE_LOG_PREFIX = "[Moonlight][Bitrate]"
+
 export type InfoEvent = CustomEvent<
     { type: "app", app: App } |
     { type: "serverMessage", message: string } |
@@ -83,6 +87,12 @@ function getVideoCodecHint(settings: Settings): VideoCodecSupport {
 export class Stream implements Component {
     private logger: Logger = new Logger()
     private readonly minimalLogs = true
+
+    /** Moonlight video path is active (received ConnectionComplete). */
+    private streamingVideoActive = false
+    private lastAppliedBitrateKbps: number | null = null
+    private bitrateRequestDebounceTimer: ReturnType<typeof setTimeout> | null = null
+    private readonly bitrateDebounceMs = 320
 
     private api: Api
 
@@ -322,7 +332,8 @@ export class Stream implements Component {
         return (
             text.includes("changing peer state to") ||
             text.includes("connection status") ||
-            text.includes("connection complete")
+            text.includes("connection complete") ||
+            message.includes(MOONLIGHT_BITRATE_LOG_PREFIX)
         )
     }
 
@@ -333,6 +344,9 @@ export class Stream implements Component {
             this.debugLog(debugLog.message, {
                 type: debugLog.ty ?? undefined
             })
+            if (debugLog.message.includes(MOONLIGHT_BITRATE_LOG_PREFIX)) {
+                console.info(debugLog.message)
+            }
         } else if ("UpdateApp" in message) {
             const event: InfoEvent = new CustomEvent("stream-info", {
                 detail: { type: "app", app: message.UpdateApp.app }
@@ -400,8 +414,17 @@ export class Stream implements Component {
                     mapping: audioMapping,
                 })
             ])
+            this.streamingVideoActive = true
+            this.lastAppliedBitrateKbps = this.settings.bitrate
         } else if ("ConnectionTerminated" in message) {
             const code = message.ConnectionTerminated.error_code
+
+            this.streamingVideoActive = false
+            this.lastAppliedBitrateKbps = null
+            if (this.bitrateRequestDebounceTimer != null) {
+                clearTimeout(this.bitrateRequestDebounceTimer)
+                this.bitrateRequestDebounceTimer = null
+            }
 
             this.debugLog(`ConnectionTerminated with code ${code}`, { type: "fatalDescription" })
         }
@@ -1246,6 +1269,12 @@ export class Stream implements Component {
     }
     private onWsClose() {
         this.debugLog(`Web Socket Closed`)
+        this.streamingVideoActive = false
+        this.lastAppliedBitrateKbps = null
+        if (this.bitrateRequestDebounceTimer != null) {
+            clearTimeout(this.bitrateRequestDebounceTimer)
+            this.bitrateRequestDebounceTimer = null
+        }
         this.resetKeyboardState("websocket closed")
     }
     private onError(event: Event) {
@@ -1274,6 +1303,12 @@ export class Stream implements Component {
 
     stop(): Promise<boolean> {
         this.resetKeyboardState("before stream stop")
+        this.streamingVideoActive = false
+        this.lastAppliedBitrateKbps = null
+        if (this.bitrateRequestDebounceTimer != null) {
+            clearTimeout(this.bitrateRequestDebounceTimer)
+            this.bitrateRequestDebounceTimer = null
+        }
         if (!this.sendGeneralMessage("Stop")) {
             return Promise.resolve(false)
         }
@@ -1292,11 +1327,65 @@ export class Stream implements Component {
         this.eventTarget.removeEventListener("stream-info", listener as EventListenerOrEventListenerObject)
     }
 
+    isStreamingVideoActive(): boolean {
+        return this.streamingVideoActive
+    }
+
     getInput(): StreamInput {
         return this.input
     }
     getStats(): StreamStats {
         return this.stats
+    }
+
+    /**
+     * While streaming, send realtime bitrate to the host (debounced for slider-like sources).
+     */
+    requestVideoBitrateKbps(kbps: number, source: VideoBitrateChangeSource, opts?: { immediate?: boolean }): void {
+        const immediate = opts?.immediate === true
+        const rounded = Math.round(kbps)
+        if (!Number.isFinite(rounded) || rounded < 500) {
+            return
+        }
+
+        if (!this.streamingVideoActive) {
+            console.info(
+                `${MOONLIGHT_BITRATE_LOG_PREFIX} request: not streaming; skip send from=${this.lastAppliedBitrateKbps ?? "n/a"} to=${rounded} source=${source}`
+            )
+            return
+        }
+
+        const fromKbps = this.lastAppliedBitrateKbps ?? this.settings.bitrate
+        const doSend = () => {
+            this.lastAppliedBitrateKbps = rounded
+            console.info(`${MOONLIGHT_BITRATE_LOG_PREFIX} request: from=${fromKbps} to=${rounded} source=${source}`)
+            this.sendWsMessage({ SetVideoBitrate: { bitrate_kbps: rounded } })
+        }
+
+        if (immediate || source === "preset") {
+            if (this.bitrateRequestDebounceTimer != null) {
+                clearTimeout(this.bitrateRequestDebounceTimer)
+                this.bitrateRequestDebounceTimer = null
+            }
+            doSend()
+            return
+        }
+
+        if (this.bitrateRequestDebounceTimer != null) {
+            clearTimeout(this.bitrateRequestDebounceTimer)
+        }
+        this.bitrateRequestDebounceTimer = setTimeout(() => {
+            this.bitrateRequestDebounceTimer = null
+            doSend()
+        }, this.bitrateDebounceMs)
+    }
+
+    /** Update last-known bitrate for UI/logging when settings change locally (e.g. overlay slider value). */
+    noteLocalBitrateKbps(kbps: number): void {
+        const r = Math.round(kbps)
+        if (Number.isFinite(r) && r >= 500) {
+            this.lastAppliedBitrateKbps = r
+        }
     }
 
     getStreamerSize(): [number, number] {

@@ -660,6 +660,8 @@ impl OutboundPacket {
 #[derive(Debug)]
 pub enum TransportEvent {
     StartStream { settings: StreamSettings },
+    /// Realtime host bitrate (Sunshine fork HTTP API).
+    SetVideoBitrate { bitrate_kbps: u32 },
     RecvPacket(InboundPacket),
     SendIpc(StreamerIpcMessage),
     Closed,
