@@ -1,1 +1,1 @@
-VERSION:Beta2.3.5
+VERSION:Beta2.3.6
