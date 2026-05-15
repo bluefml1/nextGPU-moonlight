@@ -1,6 +1,11 @@
 
 export type TextEvent = CustomEvent<{ text: string }>
 
+export type ScreenKeyboardOptions = {
+    /** Called whenever the keyboard is shown or hidden (stream touch gestures may be stale). */
+    onVisibilityChange?: (visible: boolean) => void
+}
+
 export class ScreenKeyboard {
 
     private eventTarget = new EventTarget()
@@ -23,21 +28,35 @@ export class ScreenKeyboard {
     private keyboardPos: { left: number; top: number } | null = null
     private readonly isTouchDevice: boolean
     private readonly minViewportMarginPx = 8
+    private readonly onVisibilityChange?: (visible: boolean) => void
+    private readonly onOutsidePointer = (e: PointerEvent) => {
+        if (!this.visible) return
+        if (this.shell.contains(e.target as Node)) return
+        this.hide()
+    }
 
-    constructor() {
+    constructor(opts?: ScreenKeyboardOptions) {
+        this.onVisibilityChange = opts?.onVisibilityChange
         this.isTouchDevice = ("maxTouchPoints" in navigator && navigator.maxTouchPoints > 0)
         this.root.classList.add("ml-screen-keyboard")
         this.shell.classList.add("ml-screen-keyboard-shell")
         this.root.appendChild(this.shell)
 
         this.header.classList.add("ml-screen-keyboard-header")
-        const title = document.createElement("span")
-        title.textContent = "Keyboard"
-        title.classList.add("ml-screen-keyboard-title")
+        const closeHeader = document.createElement("button")
+        closeHeader.type = "button"
+        closeHeader.classList.add("ml-screen-keyboard-close")
+        closeHeader.setAttribute("aria-label", "Close keyboard")
+        closeHeader.textContent = "×"
+        closeHeader.addEventListener("pointerdown", (event) => event.stopPropagation())
+        closeHeader.addEventListener("click", (event) => {
+            event.preventDefault()
+            this.hide()
+        })
         this.header.style.cursor = "grab"
         this.header.style.touchAction = "none"
         this.capsIndicator.classList.add("ml-screen-keyboard-caps")
-        this.header.appendChild(title)
+        this.header.appendChild(closeHeader)
         this.header.appendChild(this.capsIndicator)
         this.shell.appendChild(this.header)
         this.installDragHandlers()
@@ -84,12 +103,16 @@ export class ScreenKeyboard {
             this.keyboardPos = null
         }
         this.applyKeyboardPosition()
+        document.addEventListener("pointerdown", this.onOutsidePointer, true)
+        this.onVisibilityChange?.(true)
     }
     hide() {
         this.visible = false
         this.root.style.display = "none"
         this.stopBackspaceRepeat()
         this.symbolMode = false
+        document.removeEventListener("pointerdown", this.onOutsidePointer, true)
+        this.onVisibilityChange?.(false)
     }
 
     isVisible(): boolean {
@@ -110,6 +133,14 @@ export class ScreenKeyboard {
     }
     addTextListener(listener: (event: TextEvent) => void) {
         this.eventTarget.addEventListener("ml-text", listener as any)
+    }
+
+    removeTextListener(listener: (event: TextEvent) => void) {
+        this.eventTarget.removeEventListener("ml-text", listener as any)
+    }
+
+    removeKeyDownListener(listener: (event: KeyboardEvent) => void) {
+        this.eventTarget.removeEventListener("keydown", listener as any)
     }
 
     private emitText(text: string) {
@@ -250,7 +281,7 @@ export class ScreenKeyboard {
         row4.appendChild(this.modeKey)
         row4.appendChild(this.createKey("Space", () => this.emitText(" "), { span: 4 }))
         row4.appendChild(this.createKey("Enter", () => this.emitKeyTap("Enter", "Enter"), { span: 2, emphasized: true, action: true }))
-        row4.appendChild(this.createKey("Close", () => this.hide(), { span: 2, emphasized: true, action: true }))
+        row4.appendChild(this.createKey("Esc", () => this.emitKeyTap("Escape", "Escape"), { span: 2, emphasized: true, action: true }))
         this.updateCapsUi()
     }
 

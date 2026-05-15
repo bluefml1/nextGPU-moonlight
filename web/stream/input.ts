@@ -1,6 +1,6 @@
 import { StreamCapabilities, StreamControllerCapabilities, StreamMouseButton, TransportChannelId } from "../api_bindings.js"
 import { ByteBuffer, I16_MAX, U16_MAX, U8_MAX } from "./buffer.js"
-import { ControllerConfig, emptyGamepadState, extractGamepadState, GamepadState, SUPPORTED_BUTTONS } from "./gamepad.js"
+import { ControllerConfig, areGamepadStatesEqual, emptyGamepadState, extractGamepadState, GamepadState, SUPPORTED_BUTTONS } from "./gamepad.js"
 import { convertToKey, convertToModifiers } from "./keyboard.js"
 import { convertToButton } from "./mouse.js"
 import { DataTransportChannel, Transport, TransportChannelIdKey, TransportChannelIdValue } from "./transport/index.js"
@@ -23,6 +23,9 @@ const DOUBLE_TAP_FIRST_TAP_MAX_TIME_MS = 100
 const DOUBLE_TAP_SECOND_TAP_MAX_TIME_MS = 200
 
 const CONTROLLER_RUMBLE_INTERVAL_MS = 60
+const MAX_CONTROLLER_SLOTS = 16
+/** Sentinel `gamepadIndex` for a browser-driven virtual controller slot (not `navigator.getGamepads()`). */
+export const VIRTUAL_GAMEPAD_INDEX = -1
 
 function trySendChannel(channel: DataTransportChannel | null, buffer: ByteBuffer) {
     if (!channel) {
@@ -251,6 +254,7 @@ export class StreamInput {
 
     onInputContextLost() {
         this.resetAllKeys()
+        this.clearVirtualControllerSlotLocal()
     }
 
     watchdogTick(shouldForceRelease: boolean) {
@@ -758,6 +762,35 @@ export class StreamInput {
         return this.touchMouseAction
     }
 
+    /**
+     * Clears in-progress touch→mouse gesture state (e.g. after opening the on-screen keyboard or virtual
+     * controller, where stream `touchend` may not fire for a finger that moved onto overlay UI).
+     * Releases a touch-drag left button if we were in {@link PredictedTouchAction} `"drag"`.
+     */
+    resetTouchGestureState(reason = "unspecified"): void {
+        const hadTouches = this.touchTracker.size > 0 || this.primaryTouch != null || this.touchMouseAction !== "default" || this.nextTouchDoubleTap
+        if (hadTouches) {
+            console.debug(
+                `[Touch] reset touch gesture state (${reason})`,
+                {
+                    action: this.touchMouseAction,
+                    primaryTouch: this.primaryTouch,
+                    trackedTouches: this.touchTracker.size,
+                    nextTouchDoubleTap: this.nextTouchDoubleTap,
+                }
+            )
+        }
+        if (this.config.touchMode == "mouseRelative" || this.config.touchMode == "pointAndDrag") {
+            if (this.touchMouseAction == "drag") {
+                this.sendMouseButton(false, StreamMouseButton.LEFT)
+            }
+        }
+        this.touchTracker.clear()
+        this.primaryTouch = null
+        this.touchMouseAction = "default"
+        this.nextTouchDoubleTap = false
+    }
+
     // -- Controller
     // Wait for stream to connect and then send controllers
     private bufferedControllers: Array<number> = []
@@ -786,6 +819,97 @@ export class StreamInput {
 
     private gamepads: Array<{ gamepadIndex: number, oldState: GamepadState } | null> = []
     private gamepadRumbleInterval: number | null = null
+    private virtualControllerSlot: number | null = null
+
+    /**
+     * Registers a virtual controller with the host. Returns slot id, or null if unavailable.
+     * Call only while connected (`onStreamStart` has run).
+     */
+    enableVirtualController(): number | null {
+        if (!this.connected) {
+            return null
+        }
+        if (this.virtualControllerSlot != null) {
+            return this.virtualControllerSlot
+        }
+        let slot = -1
+        for (let i = 0; i < this.gamepads.length; i++) {
+            if (this.gamepads[i] == null) {
+                slot = i
+                break
+            }
+        }
+        if (slot === -1) {
+            if (this.gamepads.length >= MAX_CONTROLLER_SLOTS) {
+                return null
+            }
+            slot = this.gamepads.length
+        }
+
+        this.gamepads[slot] = { gamepadIndex: VIRTUAL_GAMEPAD_INDEX, oldState: emptyGamepadState() }
+        this.virtualControllerSlot = slot
+
+        if (this.gamepadRumbleInterval == null) {
+            this.gamepadRumbleInterval = window.setInterval(this.onGamepadRumbleInterval.bind(this), CONTROLLER_RUMBLE_INTERVAL_MS - 10)
+        }
+
+        this.sendControllerAdd(slot, SUPPORTED_BUTTONS, 0)
+        return slot
+    }
+
+    /**
+     * Removes the virtual controller from the host and frees the slot.
+     */
+    disableVirtualController(): void {
+        if (this.virtualControllerSlot == null) {
+            return
+        }
+        const slot = this.virtualControllerSlot
+        this.sendController(slot, emptyGamepadState())
+        this.sendControllerRemove(slot)
+        this.gamepads[slot] = null
+        this.virtualControllerSlot = null
+        if (this.gamepads.every(g => g == null) && this.gamepadRumbleInterval != null) {
+            window.clearInterval(this.gamepadRumbleInterval)
+            this.gamepadRumbleInterval = null
+        }
+    }
+
+    getVirtualControllerSlot(): number | null {
+        return this.virtualControllerSlot
+    }
+
+    /**
+     * Send virtual controller state when it differs from the last packet.
+     */
+    pushVirtualControllerState(state: GamepadState): void {
+        if (this.virtualControllerSlot == null || !this.connected) {
+            return
+        }
+        const slot = this.virtualControllerSlot
+        const entry = this.gamepads[slot]
+        if (!entry || entry.gamepadIndex !== VIRTUAL_GAMEPAD_INDEX) {
+            return
+        }
+        if (areGamepadStatesEqual(entry.oldState, state)) {
+            return
+        }
+        entry.oldState = state
+        this.sendController(slot, state)
+    }
+
+    private clearVirtualControllerSlotLocal(): void {
+        if (this.virtualControllerSlot == null) {
+            return
+        }
+        const slot = this.virtualControllerSlot
+        this.gamepads[slot] = null
+        this.virtualControllerSlot = null
+        if (this.gamepads.every(g => g == null) && this.gamepadRumbleInterval != null) {
+            window.clearInterval(this.gamepadRumbleInterval)
+            this.gamepadRumbleInterval = null
+        }
+    }
 
     onGamepadConnect(gamepad: Gamepad) {
         if (!this.connected) {
@@ -851,11 +975,7 @@ export class StreamInput {
     onGamepadDisconnect(event: GamepadEvent) {
         const index = this.gamepads.findIndex(value => value?.gamepadIndex == event.gamepad.index)
         if (index != -1) {
-            const id = this.gamepads[index]?.gamepadIndex
-            if (id != null) {
-                this.sendControllerRemove(id)
-            }
-
+            this.sendControllerRemove(index)
             this.gamepads[index] = null
         }
     }
@@ -873,7 +993,10 @@ export class StreamInput {
         for (let gamepadId = 0; gamepadId < this.gamepads.length; gamepadId++) {
             const oldGamepadState = this.gamepads[gamepadId]
             if (oldGamepadState == null) {
-                return
+                continue
+            }
+            if (oldGamepadState.gamepadIndex === VIRTUAL_GAMEPAD_INDEX) {
+                continue
             }
             const gamepad = navigator.getGamepads()[oldGamepadState.gamepadIndex]
             if (!gamepad) {
@@ -885,7 +1008,7 @@ export class StreamInput {
             }
 
             const state = extractGamepadState(gamepad, this.config.controllerConfig)
-            if (state == oldGamepadState.oldState) {
+            if (areGamepadStatesEqual(state, oldGamepadState.oldState)) {
                 continue
             }
             oldGamepadState.oldState = state
@@ -910,7 +1033,7 @@ export class StreamInput {
             const highFrequencyMotor = this.buffer.getU16() / U16_MAX
 
             const gamepadIndex = this.gamepads[id]?.gamepadIndex
-            if (gamepadIndex == null) {
+            if (gamepadIndex == null || gamepadIndex === VIRTUAL_GAMEPAD_INDEX) {
                 return
             }
 
@@ -922,7 +1045,7 @@ export class StreamInput {
             const rightTrigger = this.buffer.getU16() / U16_MAX
 
             const gamepadIndex = this.gamepads[id]?.gamepadIndex
-            if (gamepadIndex == null) {
+            if (gamepadIndex == null || gamepadIndex === VIRTUAL_GAMEPAD_INDEX) {
                 return
             }
 
@@ -948,7 +1071,7 @@ export class StreamInput {
     private onGamepadRumbleInterval() {
         for (let id = 0; id < this.gamepads.length; id++) {
             const gamepadIndex = this.gamepads[id]?.gamepadIndex
-            if (gamepadIndex == null) {
+            if (gamepadIndex == null || gamepadIndex === VIRTUAL_GAMEPAD_INDEX) {
                 continue
             }
 

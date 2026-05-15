@@ -7,19 +7,21 @@ const trueDefaultSettings: Settings =
 {
     // possible values: "left", "right", "up", "down"
     "sidebarEdge": "left",
-    "bitrate": 10000,
-    "packetSize": 100,
-    "fps": 60,
+    "showStreamBitrateHud": true,
+    // Aligned with `stream_profile_presets.ts` quality preset (temporary default while profile gate is off).
+    "bitrate":40,
+    "packetSize": 1024,
+    "fps": 118,
     "videoFrameQueueSize": 4,
     // possible values: "720p", "1080p", "1440p", "4k", "native", "custom"
-    "videoSize": "custom",
+    "videoSize": "4k",
     // only works if videoSize=custom
     "videoSizeCustom": {
-        "width": 1920,
-        "height": 1080
+        "width": 3840,
+        "height": 2160
     },
     // possible values: "h264", "h265", "av1", "auto"
-    "videoCodec": "h264",
+    "videoCodec": "h265",
     "forceVideoElementRenderer": true,
     "canvasRenderer": false,
     // Canvas only: when true, draw only on requestAnimationFrame (stable, may add ~0–17 ms). When false, draw on frame submit (low latency).

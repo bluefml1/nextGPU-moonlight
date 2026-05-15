@@ -4,10 +4,15 @@ import { PageStyle } from "../styles/index.js";
 import { Component, ComponentEvent } from "./index.js";
 import { InputComponent, SelectComponent } from "./input.js";
 import { SidebarEdge } from "./sidebar/index.js";
-import { clearStreamProfileLabel, getActiveStreamProfileTitle } from "../stream_profile_label.js";
+import { clearStreamProfileLabel, getActiveStreamProfileTitle } from "../stream_profile_label.js"
+import DEFAULT_SETTINGS from "../default_settings.js"
+import { snapBitrateMbps } from "./realtime_bitrate_hud.js";
 
 export type Settings = {
     sidebarEdge: SidebarEdge,
+    /** When true (default), show the floating realtime bitrate control next to stats while streaming. */
+    showStreamBitrateHud: boolean
+    /** Video target bitrate in **Mbps** (host wire format uses kbps; see `Stream` / `SetVideoBitrate`). */
     bitrate: number
     packetSize: number
     videoFrameQueueSize: number
@@ -66,7 +71,16 @@ function getVideoPresetOptions(): { value: string; name: string }[] {
     })
 }
 
-import DEFAULT_SETTINGS from "../default_settings.js"
+/** If `bitrate` looks like legacy Moonlight kbps in localStorage / imports, convert to Mbps. */
+export function normalizeStorageBitrateToMbps(settings: Settings): void {
+    const b = settings.bitrate
+    if (typeof b !== "number" || !Number.isFinite(b) || b <= 0) {
+        return
+    }
+    if (b > 1000) {
+        settings.bitrate = Math.round((b / 1000) * 1000) / 1000
+    }
+}
 
 export function defaultSettings(): Settings {
     // We are deep cloning this
@@ -105,6 +119,10 @@ export function getLocalStreamSettings(): Settings | null {
         } else {
             settings.fps = defaultSettings().fps
         }
+        if (settings.showStreamBitrateHud === undefined) {
+            settings.showStreamBitrateHud = defaultSettings().showStreamBitrateHud
+        }
+        normalizeStorageBitrateToMbps(settings)
     }
 
     return settings
@@ -135,6 +153,7 @@ export class StreamSettingsComponent implements Component {
     private streamHeader: HTMLHeadingElement = document.createElement("h2")
     private activeProfileNote: HTMLParagraphElement = document.createElement("p")
     private bitrate: InputComponent
+    private showStreamBitrateHud: InputComponent
     private packetSize: InputComponent
     private fps: InputComponent
     private videoCodec: SelectComponent
@@ -174,6 +193,9 @@ export class StreamSettingsComponent implements Component {
 
     constructor(settings?: Settings) {
         const defaultSettings_ = defaultSettings()
+        if (settings) {
+            normalizeStorageBitrateToMbps(settings)
+        }
 
         // Root div
         this.divElement.classList.add("settings")
@@ -230,17 +252,23 @@ export class StreamSettingsComponent implements Component {
         this.streamSection.appendChild(this.activeProfileNote)
 
         // Bitrate
-        this.bitrate = new InputComponent("bitrate", "number", "Bitrate", {
+        this.bitrate = new InputComponent("bitrate", "number", "Bitrate (Mbps)", {
             defaultValue: defaultSettings_.bitrate.toString(),
-            value: settings?.bitrate?.toString(),
-            step: "100",
+            value: settings?.bitrate != null ? String(settings.bitrate) : undefined,
+            step: "0.5",
             numberSlider: {
-                range_min: 1000,
-                range_max: 10000,
-            }
+                range_min: 15,
+                range_max: 300,
+            },
         })
         this.bitrate.addChangeListener(this.onSettingsChange.bind(this))
         this.bitrate.mount(this.streamSection)
+
+        this.showStreamBitrateHud = new InputComponent("showStreamBitrateHud", "checkbox", "Show realtime bitrate slider on stream (HUD)", {
+            checked: settings?.showStreamBitrateHud ?? defaultSettings_.showStreamBitrateHud,
+        })
+        this.showStreamBitrateHud.addChangeListener(this.onSettingsChange.bind(this))
+        this.showStreamBitrateHud.mount(this.streamSection)
 
         // Packet Size
         this.packetSize = new InputComponent("packetSize", "number", "Packet Size", {
@@ -551,7 +579,11 @@ export class StreamSettingsComponent implements Component {
         const settings = defaultSettings()
 
         settings.sidebarEdge = this.sidebarEdge.getValue() as any
-        settings.bitrate = parseInt(this.bitrate.getValue())
+        settings.showStreamBitrateHud = this.showStreamBitrateHud.isChecked()
+        {
+            const mbps = parseFloat(this.bitrate.getValue())
+            settings.bitrate = Number.isFinite(mbps) ? snapBitrateMbps(mbps) : defaultSettings().bitrate
+        }
         settings.packetSize = parseInt(this.packetSize.getValue())
         settings.fps = parseInt(this.fps.getValue())
 

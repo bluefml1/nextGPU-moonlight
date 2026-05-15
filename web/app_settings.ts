@@ -10,6 +10,7 @@ import { buildUrl } from "./config_.js";
 import {
     defaultSettings,
     getLocalStreamSettings,
+    normalizeStorageBitrateToMbps,
     setLocalStreamSettings,
     Settings,
 } from "./component/settings_menu.js";
@@ -84,17 +85,16 @@ export function getSettingsForApp(appId: number): Settings {
     const global = getLocalStreamSettings();
     if (global != null) {
         Object.assign(base, global);
-        migratePageStyle(base);
-        return base;
-    }
-
-    const legacyMap = loadLegacyPerAppMap();
-    const legacy = legacyMap[key];
-    if (legacy != null) {
-        Object.assign(base, legacy);
+    } else {
+        const legacyMap = loadLegacyPerAppMap();
+        const legacy = legacyMap[key];
+        if (legacy != null) {
+            Object.assign(base, legacy);
+        }
     }
 
     migratePageStyle(base);
+    normalizeStorageBitrateToMbps(base);
     return base;
 }
 
@@ -132,6 +132,7 @@ export function exportAppSettingsToJson(): string {
     const merged = defaultSettings();
     const g = getLocalStreamSettings();
     if (g != null) Object.assign(merged, g);
+    normalizeStorageBitrateToMbps(merged);
     return JSON.stringify(merged, null, 2);
 }
 
@@ -162,6 +163,7 @@ export function importAppSettingsFromJson(json: string): void {
         if (isSettingsShape(imported)) {
             Object.assign(merged, imported);
             migratePageStyle(merged as Settings);
+            normalizeStorageBitrateToMbps(merged as Settings);
             setLocalStreamSettings(merged as Settings);
             return;
         }
@@ -174,6 +176,7 @@ export function importAppSettingsFromJson(json: string): void {
             }
         }
         migratePageStyle(merged as Settings);
+        normalizeStorageBitrateToMbps(merged as Settings);
         setLocalStreamSettings(merged as Settings);
     } catch {
         // invalid json, do nothing

@@ -1,3 +1,5 @@
+// NOTE: Stream startup currently skips the profile gate in `stream.ts` (`ENABLE_STREAM_PROFILE_GATE`).
+// Presets below stay the source of truth for when the gate is re-enabled; defaults live in `default_settings.ts`.
 import type { Settings } from "./component/settings_menu.js"
 import {
     defaultSettings,
@@ -11,13 +13,13 @@ export type StreamProfileId = "performance" | "balance" | "quality"
 /** Product presets — see DetailDesign/stream_profile_presets_a4b71cf8.plan.md */
 const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
     performance: {
-        bitrate: 10000,
+        bitrate: 20,
         packetSize: 1024,
-        fps: 59,
+        fps: 280,
         videoCodec: "h265",
         videoFrameQueueSize: 2,
-        videoSize: "1080p",
-        videoSizeCustom: { width: 1920, height: 1080 },
+        videoSize: "4k",
+        videoSizeCustom: { width: 3840, height: 2160 },
         forceVideoElementRenderer: true,
         canvasRenderer: false,
         canvasVsync: false,
@@ -27,12 +29,12 @@ const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
         hdr: false,
     },
     balance: {
-        bitrate: 10000,
+        bitrate: 40,
         packetSize: 1024,
-        fps: 59,
+        fps: 280,
         videoCodec: "h265",
-        videoSize: "1440p",
-        videoSizeCustom: { width: 2560, height: 1440 },
+        videoSize: "4k",
+        videoSizeCustom: { width: 3840, height: 2160 },
         videoFrameQueueSize: 4,
         forceVideoElementRenderer: true,
         canvasRenderer: false,
@@ -43,13 +45,13 @@ const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
         hdr: false,
     },
     quality: {
-        bitrate: 10000,
+        bitrate: 80,
         packetSize: 1024,
-        fps: 59,
+        fps: 360,
         videoCodec: "h265",
         videoSize: "4k",
         videoSizeCustom: { width: 3840, height: 2160 },
-        videoFrameQueueSize: 6,
+        videoFrameQueueSize: 4,
         forceVideoElementRenderer: true,
         canvasRenderer: false,
         canvasVsync: false,
@@ -90,10 +92,19 @@ export function readProfileFromQuery(params: URLSearchParams): StreamProfileId |
     return null
 }
 
+/** localStorage key — when "1", stats overlay starts minimized (see ViewerApp). */
+const STREAM_STATS_MINIMIZED_KEY = "streamStatsMinimized"
+
 /** Merge preset into current mlSettings base and persist; set label key for optional UI. */
 export function persistStreamProfileChoice(id: StreamProfileId): void {
     const base = getLocalStreamSettings() ?? defaultSettings()
     const merged = applyStreamProfileToSettings(base, id)
     setLocalStreamSettings(merged)
     setStreamProfileLabel(id)
+    // All profiles: show stream stats expanded by default on next load.
+    try {
+        localStorage.setItem(STREAM_STATS_MINIMIZED_KEY, "0")
+    } catch {
+        /* ignore quota / private mode */
+    }
 }

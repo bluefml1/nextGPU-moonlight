@@ -2,10 +2,12 @@
 
 use std::{
     collections::HashSet,
+    env,
+    error::Error,
     io, panic,
     process::exit,
     sync::{
-        Arc, Weak,
+        Arc, Once, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -73,6 +75,59 @@ use crate::{
 pub type RequestClient = TokioHyperClient;
 
 pub const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
+
+/// Host string from Moonlight config (no scheme). Used to default TLS verify behavior for Sunshine's self-signed HTTPS.
+fn is_loopback_sunshine_host(host: &str) -> bool {
+    let h = host.trim();
+    let core = h
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(h);
+    core.eq_ignore_ascii_case("localhost")
+        || core == "127.0.0.1"
+        || core == "::1"
+}
+
+/// Stable label for stderr logs when Sunshine ml-stream-bitrate POST fails at the transport layer.
+fn classify_sunshine_bitrate_transport_failure(detail: &str) -> &'static str {
+    let d = detail.to_lowercase();
+    if d.contains("certificate")
+        || d.contains("invalid cert")
+        || d.contains("unknown cert")
+        || d.contains("tls ")
+        || d.contains("ssl ")
+        || d.contains("handshake")
+    {
+        return "tls_certificate_or_handshake";
+    }
+    if d.contains("timed out") || d.contains("timeout") || d.contains("deadline") {
+        return "tcp_or_tls_timeout";
+    }
+    if d.contains("connection refused") {
+        return "tcp_connection_refused";
+    }
+    if d.contains("dns") || d.contains("resolve") || d.contains("no such host") {
+        return "dns_resolution";
+    }
+    if d.contains("connection reset") || d.contains("broken pipe") {
+        return "tcp_reset_or_broken_pipe";
+    }
+    "transport_other"
+}
+
+fn classify_sunshine_bitrate_http_status(status: u16) -> &'static str {
+    match status {
+        401 => "http_401_unauthorized_token_or_auth",
+        403 => "http_403_forbidden_not_loopback",
+        404 => "http_404_no_running_session_or_wrong_sunshine_build",
+        409 => "http_409_multiple_stream_sessions",
+        503 => "http_503_session_unavailable",
+        _ => "http_non_success_other",
+    }
+}
+
+/// One-time hint when POST may fail TLS verify against Sunshine's self-signed cert on LAN hosts.
+static SUNSHINE_BITRATE_NONLOOPBACK_TLS_WARN: Once = Once::new();
 
 mod audio;
 mod buffer;
@@ -172,6 +227,11 @@ async fn main() {
         .with(stderr_output)
         .init();
 
+    match env::current_exe() {
+        Ok(path) => info!(path = %path.display(), "streamer executable path (verify host uses this binary after rebuild)"),
+        Err(e) => warn!(error = %e, "could not resolve streamer executable path"),
+    }
+
     // Send stage
     ipc_sender
         .send(StreamerIpcMessage::WebSocket(
@@ -183,6 +243,12 @@ async fn main() {
         .await;
 
     // -- Create the host and pair it
+    let moonlight_host_address = host_address.clone();
+    info!(
+        issue = "streamer_init_moonlight_host",
+        moonlight_host_address = %moonlight_host_address,
+        "Moonlight host used for default Sunshine ml-stream-bitrate URL unless SUNSHINE_BITRATE_URL is set"
+    );
     let host = MoonlightHost::new(host_address, host_http_port, client_unique_id)
         .expect("failed to create host");
 
@@ -209,7 +275,11 @@ async fn main() {
 
     let connection = StreamConnection::new(
         moonlight,
-        StreamInfo { host, app_id },
+        StreamInfo {
+            host,
+            app_id,
+            moonlight_host_address,
+        },
         ipc_sender.clone(),
         ipc_receiver,
         config,
@@ -240,6 +310,8 @@ async fn main() {
 struct StreamInfo {
     host: MoonlightHost<RequestClient>,
     app_id: u32,
+    /// Hostname or IP used for Moonlight HTTP; reused as default Sunshine HTTPS API host.
+    moonlight_host_address: String,
 }
 
 struct StreamSetup {
@@ -267,6 +339,8 @@ struct StreamConnection {
     pub timeout_terminate_request: Mutex<Option<Instant>>,
     pub terminate: Notify,
     is_terminating: AtomicBool,
+    /// Serialize Sunshine bitrate HTTP calls (last write wins per request; avoids overlapping POSTs).
+    sunshine_bitrate_http_lock: Mutex<()>,
 }
 
 impl StreamConnection {
@@ -301,6 +375,7 @@ impl StreamConnection {
             timeout_terminate_request: Default::default(),
             terminate: Notify::default(),
             is_terminating: AtomicBool::new(false),
+            sunshine_bitrate_http_lock: Mutex::new(()),
         });
 
         spawn({
@@ -447,6 +522,193 @@ impl StreamConnection {
             });
         }
     }
+
+    async fn send_bitrate_general_applied(&self, bitrate_kbps: u32) {
+        self.try_send_packet(
+            OutboundPacket::General {
+                message: GeneralServerMessage::BitrateApplied { bitrate_kbps },
+            },
+            "bitrate applied",
+            true,
+        )
+        .await;
+    }
+
+    async fn send_bitrate_general_rejected(&self, bitrate_kbps: u32, reason: String) {
+        self.try_send_packet(
+            OutboundPacket::General {
+                message: GeneralServerMessage::BitrateRejected { bitrate_kbps, reason },
+            },
+            "bitrate rejected",
+            true,
+        )
+        .await;
+    }
+
+    async fn set_video_bitrate_via_sunshine(&self, bitrate_kbps: u32) {
+        let _guard = self.sunshine_bitrate_http_lock.lock().await;
+
+        if bitrate_kbps < 500 {
+            warn!(
+                issue = "bitrate_below_minimum",
+                bitrate_kbps,
+                min_kbps = 500,
+                "sunshine ml-stream-bitrate skipped"
+            );
+            self.send_bitrate_general_rejected(bitrate_kbps, "too_low".into())
+                .await;
+            return;
+        }
+
+        let stream_active = self.stream.read().await.is_some();
+        if !stream_active {
+            warn!(
+                issue = "no_active_moonlight_stream",
+                bitrate_kbps,
+                "sunshine ml-stream-bitrate skipped (encoder not running yet)"
+            );
+            self.send_bitrate_general_rejected(bitrate_kbps, "no_active_stream".into())
+                .await;
+            return;
+        }
+
+        let host = self.info.moonlight_host_address.trim();
+        let default_url = if host.contains(':') && !host.starts_with('[') {
+            format!("https://[{host}]:47990/api/ml-stream-bitrate")
+        } else {
+            format!("https://{host}:47990/api/ml-stream-bitrate")
+        };
+
+        let url = env::var("SUNSHINE_BITRATE_URL").unwrap_or(default_url);
+        let sunshine_bitrate_url_from_env = env::var("SUNSHINE_BITRATE_URL").is_ok();
+        // Sunshine uses HTTPS with a self-signed cert by default; reqwest fails TLS verify unless
+        // this is set. For loopback we default to insecure so local sliders work without extra env.
+        let insecure = match env::var("SUNSHINE_BITRATE_TLS_INSECURE") {
+            Ok(v) if v.is_empty() => is_loopback_sunshine_host(host),
+            Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => true,
+            Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => false,
+            Ok(_) => false,
+            Err(_) => is_loopback_sunshine_host(host),
+        };
+        let tls_insecure_env = env::var("SUNSHINE_BITRATE_TLS_INSECURE").ok();
+        let token_header_set = matches!(env::var("SUNSHINE_BITRATE_TOKEN"), Ok(t) if !t.is_empty());
+
+        debug!(
+            issue = "sunshine_bitrate_post_params",
+            bitrate_kbps,
+            moonlight_host = %host,
+            post_url = %url,
+            tls_insecure = insecure,
+            tls_insecure_env = ?tls_insecure_env,
+            token_header_set,
+            sunshine_bitrate_url_from_env,
+            loopback_host = is_loopback_sunshine_host(host),
+            "sunshine ml-stream-bitrate POST"
+        );
+
+        if !is_loopback_sunshine_host(host) && !insecure {
+            SUNSHINE_BITRATE_NONLOOPBACK_TLS_WARN.call_once(|| {
+                warn!(
+                    issue = "non_loopback_tls_verify_enabled",
+                    host = %host,
+                    "Sunshine ml-stream-bitrate: non-loopback Moonlight host uses TLS verify. \
+                     If POST fails with certificate errors, set SUNSHINE_BITRATE_TLS_INSECURE=1 or SUNSHINE_BITRATE_URL."
+                );
+            });
+        }
+
+        let client = match reqwest::Client::builder()
+            .danger_accept_invalid_certs(insecure)
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(err) => {
+                warn!(
+                    issue = "reqwest_client_build_failed",
+                    error = %err,
+                    post_url = %url,
+                    "cannot build HTTP client for Sunshine ml-stream-bitrate"
+                );
+                self.send_bitrate_general_rejected(
+                    bitrate_kbps,
+                    format!("client_build_failed:{err}"),
+                )
+                .await;
+                return;
+            }
+        };
+
+        let mut request = client
+            .post(&url)
+            .json(&serde_json::json!({ "bitrate_kbps": bitrate_kbps }));
+
+        if let Ok(token) = env::var("SUNSHINE_BITRATE_TOKEN") {
+            if !token.is_empty() {
+                request = request.header("X-Sunshine-Bitrate-Token", token);
+            }
+        }
+
+        match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                debug!(
+                    issue = "sunshine_bitrate_post_ok",
+                    bitrate_kbps,
+                    status = %response.status(),
+                    post_url = %url,
+                    "Sunshine ml-stream-bitrate accepted"
+                );
+                self.send_bitrate_general_applied(bitrate_kbps).await;
+            }
+            Ok(response) => {
+                let status = response.status();
+                let code = status.as_u16();
+                let body = response.text().await.unwrap_or_default();
+                let http_issue = classify_sunshine_bitrate_http_status(code);
+                warn!(
+                    issue = http_issue,
+                    status = %status,
+                    body_len = body.len(),
+                    body_preview = %body.chars().take(200).collect::<String>(),
+                    post_url = %url,
+                    tls_insecure = insecure,
+                    token_header_set,
+                    "Sunshine ml-stream-bitrate returned error HTTP status"
+                );
+                let body_preview = body.chars().take(120).collect::<String>();
+                self.send_bitrate_general_rejected(
+                    bitrate_kbps,
+                    format!("http_{code}:{body_preview}"),
+                )
+                .await;
+            }
+            Err(err) => {
+                let mut detail = err.to_string();
+                let mut src = err.source();
+                while let Some(e) = src {
+                    detail.push_str(" / ");
+                    detail.push_str(&e.to_string());
+                    src = e.source();
+                }
+                let transport_issue = classify_sunshine_bitrate_transport_failure(&detail);
+                warn!(
+                    issue = transport_issue,
+                    post_url = %url,
+                    tls_insecure = insecure,
+                    loopback_host = is_loopback_sunshine_host(host),
+                    detail = %detail,
+                    "Sunshine ml-stream-bitrate POST failed before HTTP response"
+                );
+                let detail_preview = detail.chars().take(160).collect::<String>();
+                self.send_bitrate_general_rejected(
+                    bitrate_kbps,
+                    format!("post_failed:{detail_preview}"),
+                )
+                .await;
+            }
+        }
+    }
+
     async fn try_send_packet(&self, packet: OutboundPacket, packet_ty: &str, should_warn: bool) {
         let mut sender = self.transport_sender.lock().await;
 
@@ -463,7 +725,7 @@ impl StreamConnection {
         }
     }
 
-    async fn on_packet(&self, packet: InboundPacket) {
+    async fn on_packet(self: &Arc<Self>, packet: InboundPacket) {
         if matches!(packet, InboundPacket::KeyResetAll) {
             if let Err(err) = self.release_all_pressed_keys().await {
                 warn!("Failed to release keys from KeyResetAll packet: {err:?}");
@@ -490,6 +752,14 @@ impl StreamConnection {
 
                         self.stop().await;
 
+                        None
+                    }
+                    GeneralClientMessage::SetVideoBitrate { bitrate_kbps } => {
+                        drop(stream_lock);
+                        let this = Arc::clone(self);
+                        spawn(async move {
+                            this.set_video_bitrate_via_sunshine(bitrate_kbps).await;
+                        });
                         None
                     }
                 }
