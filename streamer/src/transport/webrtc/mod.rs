@@ -441,15 +441,6 @@ impl WebRtcInner {
                     error!("Failed to send start stream: {err}");
                 }
             }
-            StreamClientMessage::SetVideoBitrate { bitrate_kbps } => {
-                if let Err(err) = self
-                    .event_sender
-                    .send(TransportEvent::SetVideoBitrate { bitrate_kbps })
-                    .await
-                {
-                    error!("Failed to send SetVideoBitrate: {err}");
-                }
-            }
             StreamClientMessage::WebRtc(StreamSignalingMessage::Description(description)) => {
                 debug!("[Signaling] Received Remote Description: {:?}", description);
 

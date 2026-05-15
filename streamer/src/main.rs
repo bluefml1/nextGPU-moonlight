@@ -470,24 +470,6 @@ impl StreamConnection {
                                 }
                             });
                         }
-                        Ok(TransportEvent::SetVideoBitrate { bitrate_kbps }) => {
-                            debug!(
-                                issue = "transport_set_video_bitrate_event",
-                                bitrate_kbps,
-                                "received SetVideoBitrate; will attempt Sunshine ml-stream-bitrate POST"
-                            );
-                            let Some(this) = this.upgrade() else {
-                                warn!(
-                                    "Failed to get stream connection, stopping listening to events"
-                                );
-                                return;
-                            };
-
-                            let this = this.clone();
-                            spawn(async move {
-                                this.set_video_bitrate_via_sunshine(bitrate_kbps).await;
-                            });
-                        }
                         Ok(TransportEvent::RecvPacket(packet)) => {
                             let Some(this) = this.upgrade() else {
                                 warn!(
@@ -541,10 +523,30 @@ impl StreamConnection {
         }
     }
 
-    async fn set_video_bitrate_via_sunshine(self: &Arc<Self>, bitrate_kbps: u32) {
-        const PREFIX: &str = "[Moonlight][Bitrate]";
+    async fn send_bitrate_general_applied(&self, bitrate_kbps: u32) {
+        self.try_send_packet(
+            OutboundPacket::General {
+                message: GeneralServerMessage::BitrateApplied { bitrate_kbps },
+            },
+            "bitrate applied",
+            true,
+        )
+        .await;
+    }
+
+    async fn send_bitrate_general_rejected(&self, bitrate_kbps: u32, reason: String) {
+        self.try_send_packet(
+            OutboundPacket::General {
+                message: GeneralServerMessage::BitrateRejected { bitrate_kbps, reason },
+            },
+            "bitrate rejected",
+            true,
+        )
+        .await;
+    }
+
+    async fn set_video_bitrate_via_sunshine(&self, bitrate_kbps: u32) {
         let _guard = self.sunshine_bitrate_http_lock.lock().await;
-        let mut ipc_sender = self.ipc_sender.clone();
 
         if bitrate_kbps < 500 {
             warn!(
@@ -553,12 +555,7 @@ impl StreamConnection {
                 min_kbps = 500,
                 "sunshine ml-stream-bitrate skipped"
             );
-            let msg = format!("{PREFIX} rejected: bitrate too low ({bitrate_kbps} kbps)");
-            let _ = ipc_sender
-                .send(StreamerIpcMessage::WebSocket(StreamServerMessage::DebugLog {
-                    message: msg,
-                    ty: Some(LogMessageType::InformError),
-                }))
+            self.send_bitrate_general_rejected(bitrate_kbps, "too_low".into())
                 .await;
             return;
         }
@@ -570,12 +567,7 @@ impl StreamConnection {
                 bitrate_kbps,
                 "sunshine ml-stream-bitrate skipped (encoder not running yet)"
             );
-            let msg = format!("{PREFIX} rejected: no active stream (requested {bitrate_kbps} kbps)");
-            let _ = ipc_sender
-                .send(StreamerIpcMessage::WebSocket(StreamServerMessage::DebugLog {
-                    message: msg,
-                    ty: Some(LogMessageType::InformError),
-                }))
+            self.send_bitrate_general_rejected(bitrate_kbps, "no_active_stream".into())
                 .await;
             return;
         }
@@ -638,13 +630,11 @@ impl StreamConnection {
                     post_url = %url,
                     "cannot build HTTP client for Sunshine ml-stream-bitrate"
                 );
-                let msg = format!("{PREFIX} rejected: HTTP client build failed: {err}");
-                let _ = ipc_sender
-                    .send(StreamerIpcMessage::WebSocket(StreamServerMessage::DebugLog {
-                        message: msg,
-                        ty: Some(LogMessageType::InformError),
-                    }))
-                    .await;
+                self.send_bitrate_general_rejected(
+                    bitrate_kbps,
+                    format!("client_build_failed:{err}"),
+                )
+                .await;
                 return;
             }
         };
@@ -668,13 +658,7 @@ impl StreamConnection {
                     post_url = %url,
                     "Sunshine ml-stream-bitrate accepted"
                 );
-                let msg = format!("{PREFIX} applied: requested {bitrate_kbps} kbps (POST ok)");
-                let _ = ipc_sender
-                    .send(StreamerIpcMessage::WebSocket(StreamServerMessage::DebugLog {
-                        message: msg,
-                        ty: None,
-                    }))
-                    .await;
+                self.send_bitrate_general_applied(bitrate_kbps).await;
             }
             Ok(response) => {
                 let status = response.status();
@@ -691,13 +675,12 @@ impl StreamConnection {
                     token_header_set,
                     "Sunshine ml-stream-bitrate returned error HTTP status"
                 );
-                let msg = format!("{PREFIX} rejected: HTTP {status} for {url} body={body}");
-                let _ = ipc_sender
-                    .send(StreamerIpcMessage::WebSocket(StreamServerMessage::DebugLog {
-                        message: msg,
-                        ty: Some(LogMessageType::InformError),
-                    }))
-                    .await;
+                let body_preview = body.chars().take(120).collect::<String>();
+                self.send_bitrate_general_rejected(
+                    bitrate_kbps,
+                    format!("http_{code}:{body_preview}"),
+                )
+                .await;
             }
             Err(err) => {
                 let mut detail = err.to_string();
@@ -716,13 +699,12 @@ impl StreamConnection {
                     detail = %detail,
                     "Sunshine ml-stream-bitrate POST failed before HTTP response"
                 );
-                let msg = format!("{PREFIX} rejected: request failed for {url}: {detail}");
-                let _ = ipc_sender
-                    .send(StreamerIpcMessage::WebSocket(StreamServerMessage::DebugLog {
-                        message: msg,
-                        ty: Some(LogMessageType::InformError),
-                    }))
-                    .await;
+                let detail_preview = detail.chars().take(160).collect::<String>();
+                self.send_bitrate_general_rejected(
+                    bitrate_kbps,
+                    format!("post_failed:{detail_preview}"),
+                )
+                .await;
             }
         }
     }
@@ -743,7 +725,7 @@ impl StreamConnection {
         }
     }
 
-    async fn on_packet(&self, packet: InboundPacket) {
+    async fn on_packet(self: &Arc<Self>, packet: InboundPacket) {
         if matches!(packet, InboundPacket::KeyResetAll) {
             if let Err(err) = self.release_all_pressed_keys().await {
                 warn!("Failed to release keys from KeyResetAll packet: {err:?}");
@@ -770,6 +752,14 @@ impl StreamConnection {
 
                         self.stop().await;
 
+                        None
+                    }
+                    GeneralClientMessage::SetVideoBitrate { bitrate_kbps } => {
+                        drop(stream_lock);
+                        let this = Arc::clone(self);
+                        spawn(async move {
+                            this.set_video_bitrate_via_sunshine(bitrate_kbps).await;
+                        });
                         None
                     }
                 }

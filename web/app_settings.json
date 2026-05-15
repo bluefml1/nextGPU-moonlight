@@ -1,7 +1,7 @@
 {
   "881448767": {
     "sidebarEdge": "left",
-    "bitrate": 6000,
+    "bitrate": 6,
     "packetSize": 256,
     "videoFrameQueueSize": 2,
     "videoSize": "custom",
@@ -23,7 +23,7 @@
   },
   "67890": {
     "sidebarEdge": "left",
-    "bitrate": 10000,
+    "bitrate": 10,
     "packetSize": 2048,
     "videoFrameQueueSize": 3,
     "videoSize": "720p",

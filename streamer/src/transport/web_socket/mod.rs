@@ -314,17 +314,6 @@ impl TransportSender for WebSocketTransportSender {
                     return Err(TransportError::Closed);
                 }
             }
-            ServerIpcMessage::WebSocket(StreamClientMessage::SetVideoBitrate { bitrate_kbps }) => {
-                if self
-                    .event_sender
-                    .send(TransportEvent::SetVideoBitrate { bitrate_kbps })
-                    .await
-                    .is_err()
-                {
-                    warn!("Failed to send SetVideoBitrate event");
-                    return Err(TransportError::Closed);
-                }
-            }
             _ => {}
         }
         Ok(())
