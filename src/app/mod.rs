@@ -6,7 +6,10 @@ use std::{
 };
 
 use actix_web::{ResponseError, http::StatusCode, web::Bytes};
-use common::config::Config;
+use common::{
+    config::Config,
+    domain_txt::{load_domain_txt_identity, DomainTxtIdentity},
+};
 use hex::FromHexError;
 use log::{error, warn};
 use moonlight_common::{high::MoonlightClientError, http::client::tokio_hyper::TokioHyperClient};
@@ -125,6 +128,8 @@ impl AppRef {
 
 struct AppInner {
     config: Config,
+    /// From host `domain.txt` for stream labels and profile-gate API identity.
+    domain_txt_identity: Option<DomainTxtIdentity>,
     storage: Arc<dyn Storage + Send + Sync>,
     app_image_cache: RwLock<HashMap<(UserId, HostId, AppId), Bytes>>,
 }
@@ -137,9 +142,12 @@ pub struct App {
 
 impl App {
     pub async fn new(config: Config) -> Result<Self, anyhow::Error> {
+        let domain_txt_identity =
+            load_domain_txt_identity(config.web_server.domain_txt_path.as_deref());
         let app = AppInner {
             storage: create_storage(config.data_storage.clone()).await?,
             config,
+            domain_txt_identity,
             app_image_cache: Default::default(),
         };
 
@@ -156,6 +164,10 @@ impl App {
 
     pub fn config(&self) -> &Config {
         &self.inner.config
+    }
+
+    pub fn domain_txt_identity(&self) -> Option<&DomainTxtIdentity> {
+        self.inner.domain_txt_identity.as_ref()
     }
 
     /// Handles all logic related to adding the first user:

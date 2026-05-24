@@ -241,6 +241,12 @@ pub struct WebServerConfig {
     pub first_login_assign_global_hosts: bool,
     pub default_user_id: Option<u32>,
     pub forwarded_header: Option<ForwardedHeaders>,
+    /// Path to NextGPU `domain.txt` relative to the web-server cwd, or absolute.
+    #[serde(default = "default_domain_txt_path")]
+    pub domain_txt_path: Option<String>,
+    /// Base URL for `getMachineInfor` (browser profile gate).
+    #[serde(default = "default_machine_info_api_base")]
+    pub machine_info_api_base: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,8 +267,18 @@ impl Default for WebServerConfig {
             first_login_assign_global_hosts: true,
             default_user_id: None,
             forwarded_header: None,
+            domain_txt_path: default_domain_txt_path(),
+            machine_info_api_base: default_machine_info_api_base(),
         }
     }
+}
+
+fn default_domain_txt_path() -> Option<String> {
+    Some("../domain.txt".to_string())
+}
+
+fn default_machine_info_api_base() -> String {
+    "https://oa0bwhfkqk.execute-api.ap-southeast-1.amazonaws.com".to_string()
 }
 
 fn default_bind_address() -> SocketAddr {

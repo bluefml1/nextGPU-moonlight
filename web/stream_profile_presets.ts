@@ -1,62 +1,106 @@
-// NOTE: Stream startup currently skips the profile gate in `stream.ts` (`ENABLE_STREAM_PROFILE_GATE`).
-// Presets below stay the source of truth for when the gate is re-enabled; defaults live in `default_settings.ts`.
+// Presets applied by `runStreamProfileGate` in `stream.ts` before ViewerApp starts.
+// Fallback defaults (no profile yet) live in `default_settings.ts` (balance-aligned).
 import type { Settings } from "./component/settings_menu.js"
 import {
     defaultSettings,
     getLocalStreamSettings,
     setLocalStreamSettings,
 } from "./component/settings_menu.js"
-import { setStreamProfileLabel } from "./stream_profile_label.js"
+import { getActiveStreamProfileId, setStreamProfileLabel } from "./stream_profile_label.js"
 
 export type StreamProfileId = "performance" | "balance" | "quality"
+
+export type StreamProfileBitrateTier = {
+    minMbps: number
+    maxMbps: number
+    defaultMbps: number
+}
+
+export const PROFILE_BITRATE_TIERS: Record<StreamProfileId, StreamProfileBitrateTier> = {
+    performance: { minMbps: 10, maxMbps: 50, defaultMbps: 20 },
+    balance: { minMbps: 10, maxMbps: 70, defaultMbps: 40 },
+    quality: { minMbps: 10, maxMbps: 120, defaultMbps: 60 },
+}
+
+export const RT_BITRATE_STEP = 0.5
+
+/** Same for every profile and `default_settings.ts` — only resolution/bitrate differ by tier. */
+export const SHARED_STREAM_TIMING = {
+    fps: 118,
+    audioSampleQueueSize: 4,
+    videoFrameQueueSize: 2,
+} as const
+
+export function getBitrateTierForProfile(id: StreamProfileId): StreamProfileBitrateTier {
+    return PROFILE_BITRATE_TIERS[id]
+}
+
+function profileIdFromVideoSize(videoSize: Settings["videoSize"]): StreamProfileId | null {
+    if (videoSize === "1080p") return "performance"
+    if (videoSize === "1440p") return "balance"
+    if (videoSize === "4k") return "quality"
+    return null
+}
+
+export function getBitrateTierForSettings(settings: Settings): StreamProfileBitrateTier {
+    const stored = getActiveStreamProfileId()
+    if (stored === "performance" || stored === "balance" || stored === "quality") {
+        return getBitrateTierForProfile(stored)
+    }
+    const fromSize = profileIdFromVideoSize(settings.videoSize)
+    if (fromSize != null) {
+        return getBitrateTierForProfile(fromSize)
+    }
+    return PROFILE_BITRATE_TIERS.balance
+}
+
+export function snapBitrateMbpsForTier(mbps: number, tier: StreamProfileBitrateTier): number {
+    const c = Math.min(tier.maxMbps, Math.max(tier.minMbps, mbps))
+    const steps = Math.round((c - tier.minMbps) / RT_BITRATE_STEP)
+    return tier.minMbps + steps * RT_BITRATE_STEP
+}
 
 /** Product presets — see DetailDesign/stream_profile_presets_a4b71cf8.plan.md */
 const STREAM_PROFILE_PRESETS: Record<StreamProfileId, Partial<Settings>> = {
     performance: {
+        ...SHARED_STREAM_TIMING,
         bitrate: 20,
         packetSize: 1024,
-        fps: 280,
         videoCodec: "h265",
-        videoFrameQueueSize: 2,
-        videoSize: "4k",
-        videoSizeCustom: { width: 3840, height: 2160 },
+        videoSize: "1080p",
+        videoSizeCustom: { width: 1920, height: 1080 },
         forceVideoElementRenderer: true,
         canvasRenderer: false,
         canvasVsync: false,
         playAudioLocal: false,
-        audioSampleQueueSize: 4,
         dataTransport: "webrtc",
         hdr: false,
     },
     balance: {
+        ...SHARED_STREAM_TIMING,
         bitrate: 40,
         packetSize: 1024,
-        fps: 280,
         videoCodec: "h265",
-        videoSize: "4k",
-        videoSizeCustom: { width: 3840, height: 2160 },
-        videoFrameQueueSize: 4,
+        videoSize: "1440p",
+        videoSizeCustom: { width: 2560, height: 1440 },
         forceVideoElementRenderer: true,
         canvasRenderer: false,
         canvasVsync: false,
         playAudioLocal: false,
-        audioSampleQueueSize: 6,
         dataTransport: "webrtc",
         hdr: false,
     },
     quality: {
-        bitrate: 80,
+        ...SHARED_STREAM_TIMING,
+        bitrate: 60,
         packetSize: 1024,
-        fps: 360,
         videoCodec: "h265",
         videoSize: "4k",
         videoSizeCustom: { width: 3840, height: 2160 },
-        videoFrameQueueSize: 4,
         forceVideoElementRenderer: true,
         canvasRenderer: false,
         canvasVsync: false,
         playAudioLocal: false,
-        audioSampleQueueSize: 12,
         dataTransport: "webrtc",
         hdr: false,
     },

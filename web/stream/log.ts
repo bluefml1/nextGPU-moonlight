@@ -1,4 +1,5 @@
 import { LogMessageType } from "../api_bindings"
+import { localizeStreamLogMessage } from "../stream_locale.js"
 
 export type LogMessageInfo = {
     type?: LogMessageType
@@ -11,7 +12,7 @@ export class Logger {
     constructor() { }
 
     debug(message: string, info?: LogMessageInfo) {
-        this.callListeners(message, info?.type)
+        this.callListeners(localizeStreamLogMessage(message), info?.type)
     }
 
     private callListeners(message: string, type?: LogMessageType) {

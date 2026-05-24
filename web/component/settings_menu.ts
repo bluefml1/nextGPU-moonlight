@@ -6,7 +6,10 @@ import { InputComponent, SelectComponent } from "./input.js";
 import { SidebarEdge } from "./sidebar/index.js";
 import { clearStreamProfileLabel, getActiveStreamProfileTitle } from "../stream_profile_label.js"
 import DEFAULT_SETTINGS from "../default_settings.js"
-import { snapBitrateMbps } from "./realtime_bitrate_hud.js";
+import {
+    getBitrateTierForSettings,
+    snapBitrateMbpsForTier,
+} from "../stream_profile_presets.js";
 
 export type Settings = {
     sidebarEdge: SidebarEdge,
@@ -56,9 +59,9 @@ const VIDEO_PRESETS: {
     maxMbps: number
 }[] = [
     { id: "720p", width: 1280, height: 720, baseLabel: "1280 x 720 | HD", minMbps: 10, maxMbps: 25 },
-    { id: "1080p", width: 1920, height: 1080, baseLabel: "1920 x 1080 | FHD", minMbps: 20, maxMbps: 40 },
-    { id: "1440p", width: 2560, height: 1440, baseLabel: "2560 x 1440 | QHD", minMbps: 35, maxMbps: 55 },
-    { id: "4k", width: 3840, height: 2160, baseLabel: "3840 x 2160 | 4K", minMbps: 50, maxMbps: 70 },
+    { id: "1080p", width: 1920, height: 1080, baseLabel: "1920 x 1080 | FHD", minMbps: 10, maxMbps: 50 },
+    { id: "1440p", width: 2560, height: 1440, baseLabel: "2560 x 1440 | QHD", minMbps: 10, maxMbps: 70 },
+    { id: "4k", width: 3840, height: 2160, baseLabel: "3840 x 2160 | 4K", minMbps: 10, maxMbps: 120 },
     { id: "native", baseLabel: "Native (host)", minMbps: 20, maxMbps: 60 },
     { id: "custom", baseLabel: "Custom…", minMbps: 10, maxMbps: 70 },
 ]
@@ -582,7 +585,7 @@ export class StreamSettingsComponent implements Component {
         settings.showStreamBitrateHud = this.showStreamBitrateHud.isChecked()
         {
             const mbps = parseFloat(this.bitrate.getValue())
-            settings.bitrate = Number.isFinite(mbps) ? snapBitrateMbps(mbps) : defaultSettings().bitrate
+            settings.bitrate = Number.isFinite(mbps) ? mbps : defaultSettings().bitrate
         }
         settings.packetSize = parseInt(this.packetSize.getValue())
         settings.fps = parseInt(this.fps.getValue())
@@ -633,6 +636,9 @@ export class StreamSettingsComponent implements Component {
         settings.useSelectElementPolyfill = this.useSelectElementPolyfill.isChecked()
 
         settings.hostUploadRelativeDir = this.hostUploadRelativeDir.getValue().trim()
+
+        const tier = getBitrateTierForSettings(settings)
+        settings.bitrate = snapBitrateMbpsForTier(settings.bitrate, tier)
 
         return settings
     }

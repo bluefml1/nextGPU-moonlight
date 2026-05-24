@@ -1,6 +1,7 @@
 import { Api } from "../api.js"
 import { App, ConnectionStatus, GeneralClientMessage, GeneralServerMessage, StreamCapabilities, StreamClientMessage, StreamServerMessage, TransportChannelId } from "../api_bindings.js"
 import { showErrorPopup } from "../component/error.js"
+import { localizeStreamLogMessage, streamDebugLine, streamT } from "../stream_locale.js"
 import { Component } from "../component/index.js"
 import { normalizeStorageBitrateToMbps, Settings } from "../component/settings_menu.js"
 import { AudioPlayer } from "./audio/index.js"
@@ -323,10 +324,11 @@ export class Stream implements Component {
     }
 
     private debugLog(message: string, additional?: LogMessageInfo) {
-        if (this.minimalLogs && !this.shouldEmitLog(message, additional)) {
+        const localized = localizeStreamLogMessage(message)
+        if (this.minimalLogs && !this.shouldEmitLog(localized, additional)) {
             return
         }
-        for (const line of message.split("\n")) {
+        for (const line of localized.split("\n")) {
             const event: InfoEvent = new CustomEvent("stream-info", {
                 detail: { type: "addDebugLine", line, additional }
             })
@@ -335,11 +337,22 @@ export class Stream implements Component {
         }
     }
     private shouldEmitLog(message: string, additional?: LogMessageInfo): boolean {
+        if (
+            additional?.type === "fatal" ||
+            additional?.type === "fatalDescription" ||
+            additional?.type === "informError" ||
+            additional?.type === "ifErrorDescription"
+        ) {
+            return true
+        }
         const text = message.toLowerCase()
         return (
             text.includes("changing peer state to") ||
+            text.includes("trạng thái peer") ||
             text.includes("connection status") ||
-            text.includes("connection complete")
+            text.includes("trạng thái kết nối") ||
+            text.includes("connection complete") ||
+            text.includes("kết nối hoàn tất")
         )
     }
 
@@ -394,7 +407,7 @@ export class Stream implements Component {
 
             // we should allow streaming without audio
             if (!this.audioPlayer) {
-                showErrorPopup("Failed to find supported audio player -> audio is missing.")
+                showErrorPopup(streamT("bootstrap.audioFailed"))
             }
 
             if (!this.videoRenderer || !this.audioPlayer) {
@@ -431,7 +444,7 @@ export class Stream implements Component {
                 this.bitrateRequestDebounceTimer = null
             }
 
-            this.debugLog(`ConnectionTerminated with code ${code}`, { type: "fatalDescription" })
+            this.debugLog(streamDebugLine("log.connectionTerminated", { code }), { type: "fatalDescription" })
         }
         // -- WebRTC Config
         else if ("Setup" in message) {

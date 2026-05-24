@@ -8,17 +8,17 @@ const trueDefaultSettings: Settings =
     // possible values: "left", "right", "up", "down"
     "sidebarEdge": "left",
     "showStreamBitrateHud": true,
-    // Aligned with `stream_profile_presets.ts` quality preset (temporary default while profile gate is off).
-    "bitrate":40,
+    // Fallback when no profile / mlSettings yet; timing/queues match `SHARED_STREAM_TIMING` in stream_profile_presets.ts.
+    "bitrate": 40,
     "packetSize": 1024,
     "fps": 118,
-    "videoFrameQueueSize": 4,
+    "videoFrameQueueSize": 2,
     // possible values: "720p", "1080p", "1440p", "4k", "native", "custom"
-    "videoSize": "4k",
+    "videoSize": "1440p",
     // only works if videoSize=custom
     "videoSizeCustom": {
-        "width": 3840,
-        "height": 2160
+        "width": 2560,
+        "height": 1440
     },
     // possible values: "h264", "h265", "av1", "auto"
     "videoCodec": "h265",
@@ -27,7 +27,7 @@ const trueDefaultSettings: Settings =
     // Canvas only: when true, draw only on requestAnimationFrame (stable, may add ~0–17 ms). When false, draw on frame submit (low latency).
     "canvasVsync": false,
     "playAudioLocal": false,
-    "audioSampleQueueSize": 6,
+    "audioSampleQueueSize": 4,
     // possible values: "highres", "normal"
     "mouseScrollMode": "highres",
     "controllerConfig": {

@@ -3450,6 +3450,40 @@ canvas.video-stream {
     color: rgba(255, 255, 255, 0.35);
 }
 
+.ml-rt-bitrate__apply {
+    flex-shrink: 0;
+    margin: 0;
+    padding: 4px 10px;
+    min-height: 26px;
+    border-radius: 6px;
+    border: 1px solid rgba(100, 180, 255, 0.55);
+    background: rgba(40, 90, 180, 0.45);
+    color: #eef3ff;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.ml-rt-bitrate__apply:hover:not(:disabled) {
+    background: rgba(50, 110, 210, 0.65);
+    border-color: rgba(120, 200, 255, 0.75);
+}
+
+.ml-rt-bitrate__apply:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.ml-rt-bitrate__apply--busy {
+    opacity: 0.7;
+    cursor: wait;
+}
+
+.ml-rt-bitrate--pending .ml-rt-bitrate__apply {
+    box-shadow: 0 0 10px rgba(80, 140, 255, 0.35);
+}
+
 .ml-rt-bitrate__chevron {
     flex-shrink: 0;
     width: 26px;

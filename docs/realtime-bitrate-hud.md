@@ -2,6 +2,8 @@
 
 This document describes the on-stream **realtime bitrate** control: what it does, how data moves through the stack, and which files participate.
 
+For the full stack flow (session start vs live path, Sunshine encode loop, and **current** performance behavior after host-side reverts), see [realtime-bitrate-flow.md](./realtime-bitrate-flow.md).
+
 ## Purpose
 
 The realtime bitrate HUD lets the user change the **target video encode bitrate (Mbps)** while a session is active. It does **not** change in-game settings; it tells the host encoder path (via Sunshine’s HTTP API) how much bandwidth to aim for. The client converts to **kbps** only for `SetVideoBitrate` / Sunshine POST.

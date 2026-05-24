@@ -3747,6 +3747,7 @@ dependencies = [
  "openssl-src",
  "openssl-sys",
  "pem",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
