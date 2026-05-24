@@ -35,6 +35,7 @@ use common::api_bindings::{
 
 pub mod admin;
 pub mod auth;
+pub mod machine_info;
 pub mod stream;
 
 pub mod response_streaming;
@@ -313,6 +314,10 @@ async fn get_app_image(
 pub fn api_service() -> impl HttpServiceFactory {
     web::scope("/api")
         .wrap(from_fn(auth_middleware))
+        .service(services![
+            // -- Public (no AuthenticatedUser) — profile gate speed proxy
+            machine_info::get_machine_info,
+        ])
         .service(services![
             // -- Auth
             auth::login,

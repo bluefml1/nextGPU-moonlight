@@ -10,25 +10,34 @@ export function clearStreamProfileLabel(): void {
     localStorage.removeItem(ML_STREAM_PROFILE_STORAGE_KEY)
 }
 
-/** Human-readable title for mlStreamProfile, or null if unset / unknown. */
-export function getActiveStreamProfileTitle(): string | null {
+/** Raw profile id from storage, or null if unset / unknown. */
+export function getActiveStreamProfileId(): string | null {
     try {
         const raw = localStorage.getItem(ML_STREAM_PROFILE_STORAGE_KEY)
         if (raw == null || raw === "") {
             return null
         }
         const lower = raw.toLowerCase()
-        if (lower === "performance") {
-            return "Performance"
+        if (lower === "performance" || lower === "balance" || lower === "quality") {
+            return lower
         }
-        if (lower === "balance") {
-            return "Balance"
-        }
-        if (lower === "quality") {
-            return "Quality"
-        }
-        return raw
+        return null
     } catch {
         return null
     }
+}
+
+/** Human-readable title for mlStreamProfile, or null if unset / unknown. */
+export function getActiveStreamProfileTitle(): string | null {
+    const id = getActiveStreamProfileId()
+    if (id === "performance") {
+        return "Hiệu năng"
+    }
+    if (id === "balance") {
+        return "Cân bằng"
+    }
+    if (id === "quality") {
+        return "Chất lượng"
+    }
+    return null
 }

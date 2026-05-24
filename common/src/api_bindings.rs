@@ -17,6 +17,12 @@ const EXPORT_PATH: &str = "../../web/api_bindings.ts";
 pub struct ConfigJs {
     pub path_prefix: String,
     pub default_settings: Option<TsAny>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_info_api_base: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS, Clone)]

@@ -1,3 +1,5 @@
+import { streamT } from "./stream_locale.js"
+
 /** Full-screen loading UI while the stream connection is established. */
 export const MoonlightLoadingScreen = (() => {
     const CSS = `
@@ -175,7 +177,10 @@ export const MoonlightLoadingScreen = (() => {
         document.head.appendChild(style)
     }
 
-    function build(title = "Connecting to NextGPU", subtitle = "Establishing stream") {
+    function build(
+        title = streamT("loading.title"),
+        subtitle = streamT("loading.subtitle"),
+    ) {
         const root = document.createElement("div")
         root.id = "ml-loading-screen"
 
@@ -322,9 +327,11 @@ export const MoonlightLoadingScreen = (() => {
     return {
         show(title?: string, subtitle?: string) {
             if (el) return
-            console.info("[Overlay:Loading] show", { title, subtitle })
+            const resolvedTitle = title ?? streamT("loading.title")
+            const resolvedSubtitle = subtitle ?? streamT("loading.subtitle")
+            console.info("[Overlay:Loading] show", { title: resolvedTitle, subtitle: resolvedSubtitle })
             injectStyles()
-            el = build(title, subtitle)
+            el = build(resolvedTitle, resolvedSubtitle)
             document.body.appendChild(el)
         },
         hide(fadeMs = 300) {

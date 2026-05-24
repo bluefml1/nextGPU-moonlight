@@ -27,14 +27,24 @@ import {
     createRealtimeBitrateHud,
     formatStreamBitrateMbpsDisplay,
     type RealtimeBitrateHud,
-    RT_BITRATE_MIN,
 } from "./component/realtime_bitrate_hud.js"
+import {
+    getBitrateTierForSettings,
+    snapBitrateMbpsForTier,
+} from "./stream_profile_presets.js"
+import { streamDebugLine, streamLogMatches, streamLogStartsWith, streamT } from "./stream_locale.js"
+import {
+    applyStreamDocumentTitle,
+    getStreamMachineLabel,
+    initStreamMachineLabel,
+    streamLoadingTitle,
+} from "./stream_label.js"
 
 /** Matches stream index.ts — host bitrate POST feedback from streamer. */
 const MOONLIGHT_BITRATE_LOG_PREFIX = "[Moonlight][Bitrate]"
 
 /** When false, skip `runStreamProfileGate` — stream uses `default_settings.ts` / saved mlSettings only (no picker, no `?profile=` merge from `stream_profile_presets.ts`). */
-const ENABLE_STREAM_PROFILE_GATE = false
+const ENABLE_STREAM_PROFILE_GATE = true
 
 /** Persisted stream viewer mouse/touch mode (separate from `mlSettings`). */
 const ML_STREAM_INPUT_MODES_KEY = "mlStreamInputModes"
@@ -136,22 +146,22 @@ class DevStreamConnectionLog {
             "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;" +
             "border-bottom:1px solid rgba(255,255,255,.08);font-size:11px;font-weight:600;" +
             "letter-spacing:.04em;text-transform:uppercase;color:rgba(255,255,255,.45)"
-        head.textContent = "Connection log"
+        head.textContent = streamT("devLog.title")
         this.shell.appendChild(head)
 
         this.root.classList.add("modal-video-connect")
         this.root.style.cssText = "margin:0;padding:10px 12px 12px;max-height:calc(36vh - 40px);overflow:auto"
-        this.text.innerText = "Connecting"
+        this.text.innerText = streamT("modal.connecting")
         this.root.appendChild(this.text)
 
         this.root.appendChild(this.options)
         this.options.classList.add("modal-video-connect-options")
 
-        this.debugDetailButton.innerText = "Show logs"
+        this.debugDetailButton.innerText = streamT("devLog.showLogs")
         this.debugDetailButton.addEventListener("click", this.onDebugDetailClick.bind(this))
         this.options.appendChild(this.debugDetailButton)
 
-        this.hidePanelButton.innerText = "Hide"
+        this.hidePanelButton.innerText = streamT("devLog.hide")
         this.hidePanelButton.addEventListener("click", () => {
             this.hideUntil = Date.now() + 20000
             this.shell.style.display = "none"
@@ -176,10 +186,10 @@ class DevStreamConnectionLog {
     private onDebugDetailClick() {
         const shown = this.root.contains(this.debugDetailDisplay)
         if (shown) {
-            this.debugDetailButton.innerText = "Show logs"
+            this.debugDetailButton.innerText = streamT("devLog.showLogs")
             this.root.removeChild(this.debugDetailDisplay)
         } else {
-            this.debugDetailButton.innerText = "Hide logs"
+            this.debugDetailButton.innerText = streamT("devLog.hideLogs")
             this.root.appendChild(this.debugDetailDisplay)
             this.debugDetailDisplay.innerText = this.debugDetail
         }
@@ -197,7 +207,7 @@ class DevStreamConnectionLog {
         if (data.type == "app") {
             this.debugLog(`App: ${data.app.title}`)
         } else if (data.type == "connectionComplete") {
-            const t = "Connection complete"
+            const t = streamT("devLog.connectionComplete")
             this.text.innerText = t
             this.debugLog(t)
         } else if (data.type == "addDebugLine") {
@@ -216,11 +226,11 @@ class DevStreamConnectionLog {
                 }
             }
         } else if (data.type == "serverMessage") {
-            const t = `Server: ${data.message}`
+            const t = streamT("modal.serverPrefix", { message: data.message })
             this.text.innerText = t
             this.debugLog(t)
         } else if (data.type == "connectionStatus") {
-            this.debugLog(`Connection status: ${data.status}`)
+            this.debugLog(streamDebugLine("log.connectionStatus", { status: String(data.status) }))
         }
     }
 }
@@ -252,14 +262,14 @@ class StreamRecoveryOverlay {
             "color:rgba(244,248,255,.96);font-family:Inter,system-ui,-apple-system,\"Segoe UI\",sans-serif;box-sizing:border-box"
         this.root.appendChild(this.card)
 
-        this.title.textContent = "Connection Interrupted"
+        this.title.textContent = streamT("recovery.title")
         this.title.style.cssText =
             "margin:0 0 8px;font-size:22px;font-weight:700;letter-spacing:.015em;line-height:1.25"
         this.card.appendChild(this.title)
 
         this.body.style.cssText =
             "margin:0 0 18px;color:rgba(221,231,255,.82);line-height:1.55;font-size:14px"
-        this.body.textContent = "The streaming session was interrupted."
+        this.body.textContent = streamT("recovery.bodyDefault")
         this.card.appendChild(this.body)
 
         this.actions.style.cssText = "display:flex;gap:10px;flex-wrap:wrap;align-items:center"
@@ -279,7 +289,7 @@ class StreamRecoveryOverlay {
         }
 
         this.retryButton.type = "button"
-        this.retryButton.textContent = "Retry Connection"
+        this.retryButton.textContent = streamT("recovery.retry")
         applyButtonBase(this.retryButton)
         this.retryButton.style.background = "linear-gradient(135deg, #3e68ff, #1f8dff)"
         this.retryButton.style.borderColor = "rgba(134,170,255,.75)"
@@ -288,7 +298,7 @@ class StreamRecoveryOverlay {
         this.actions.appendChild(this.retryButton)
 
         this.settingsButton.type = "button"
-        this.settingsButton.textContent = "Open Stream Settings"
+        this.settingsButton.textContent = streamT("recovery.settings")
         applyButtonBase(this.settingsButton)
         this.settingsButton.style.background = "rgba(255,255,255,.06)"
         this.settingsButton.style.borderColor = "rgba(158,184,255,.4)"
@@ -297,7 +307,7 @@ class StreamRecoveryOverlay {
         this.actions.appendChild(this.settingsButton)
 
         this.exitButton.type = "button"
-        this.exitButton.textContent = "Close Page"
+        this.exitButton.textContent = streamT("recovery.exit")
         applyButtonBase(this.exitButton)
         this.exitButton.style.background = "rgba(255,255,255,.03)"
         this.exitButton.style.borderColor = "rgba(255,255,255,.2)"
@@ -330,11 +340,13 @@ class StreamRecoveryOverlay {
 }
 
 async function startApp() {
+    await initStreamMachineLabel()
+
     const api = await getApi()
 
     const rootElement = document.getElementById("root");
     if (rootElement == null) {
-        showErrorPopup("Unable to initialize the interface.", true)
+        showErrorPopup(streamT("bootstrap.initFailed"), true)
         return;
     }
 
@@ -344,7 +356,7 @@ async function startApp() {
     const hostIdStr = queryParams.get("hostId")
     const appIdStr = queryParams.get("appId")
     if (hostIdStr == null || appIdStr == null) {
-        await showMessage("Missing host or application identifier.")
+        await showMessage(streamT("bootstrap.missingIds"))
 
         window.close()
         return
@@ -682,8 +694,33 @@ class ViewerApp implements Component {
         const hud = this.realtimeBitrateHud
         if (!hud) return
         const s = getSettingsForApp(this.getAppId())
-        if (s && Number.isFinite(s.bitrate)) {
-            hud.update(s.bitrate)
+        if (!s) return
+        const tier = getBitrateTierForSettings(s)
+        hud.setBounds(tier)
+        if (Number.isFinite(s.bitrate)) {
+            const snapped = snapBitrateMbpsForTier(s.bitrate, tier)
+            hud.setCommitted(snapped)
+        }
+    }
+
+    private async applyOverlayBitrate(mbps: number): Promise<void> {
+        const hud = this.realtimeBitrateHud
+        if (!hud) return
+        const settings = getSettingsForApp(this.getAppId())
+        const tier = getBitrateTierForSettings(settings)
+        const snapped = snapBitrateMbpsForTier(mbps, tier)
+        settings.bitrate = snapped
+        setSettingsForApp(this.getAppId(), settings)
+        hud.setApplyBusy(true)
+        hud.setDisabled(true)
+        try {
+            await this.restartStreamWithNewSettings(settings)
+            hud.setCommitted(snapped)
+        } finally {
+            hud.setApplyBusy(false)
+            if (this.hasConnectedOnce || this.stream != null) {
+                hud.setDisabled(false)
+            }
         }
     }
 
@@ -809,11 +846,17 @@ class ViewerApp implements Component {
         })
 
         const st = getSettingsForApp(this.getAppId())
+        const bitrateTier = getBitrateTierForSettings(st)
+        const committedMbps = snapBitrateMbpsForTier(
+            Number.isFinite(st.bitrate) ? st.bitrate : bitrateTier.defaultMbps,
+            bitrateTier,
+        )
         const bitrateHud = createRealtimeBitrateHud({
-            initialMbps: st?.bitrate ?? RT_BITRATE_MIN,
-            onBitrateChange: (mbps, source) => {
-                this.getStream()?.requestVideoBitrateMbps(mbps, source)
-            },
+            minMbps: bitrateTier.minMbps,
+            maxMbps: bitrateTier.maxMbps,
+            defaultMbps: bitrateTier.defaultMbps,
+            committedMbps,
+            onApply: (mbps) => this.applyOverlayBitrate(mbps),
             onCloseRequested: () => {
                 const s = getSettingsForApp(this.getAppId())
                 s.showStreamBitrateHud = false
@@ -838,7 +881,7 @@ class ViewerApp implements Component {
         qualityBtn.className = "video-overlay-hud-tray__tool-btn video-overlay-hud-tray__tool-btn--quality"
         qualityBtn.setAttribute("aria-label", "Show stream quality / bitrate control")
         qualityBtn.title = "Show bitrate control"
-        qualityBtn.textContent = "Quality"
+        qualityBtn.textContent = streamT("hud.quality")
         qualityBtn.addEventListener("click", () => {
             const s = getSettingsForApp(this.getAppId())
             s.showStreamBitrateHud = true
@@ -851,7 +894,7 @@ class ViewerApp implements Component {
         statsBtn.className = "video-overlay-hud-tray__tool-btn video-overlay-hud-tray__tool-btn--stats"
         statsBtn.setAttribute("aria-label", "Show stream stats")
         statsBtn.title = "Show stream stats"
-        statsBtn.textContent = "Stats"
+        statsBtn.textContent = streamT("hud.stats")
         statsBtn.addEventListener("click", () => this.reopenStreamStatsFromTray())
 
         const button = document.createElement("button")
@@ -1237,7 +1280,7 @@ class ViewerApp implements Component {
 
     private activateLoadingOverlayOnce() {
         if (this.loadingShownForCurrentStart || this.startupConnectionResolved) return
-        MoonlightLoadingScreen.show()
+        MoonlightLoadingScreen.show(streamLoadingTitle())
         this.loadingShownForCurrentStart = true
     }
 
@@ -1257,7 +1300,7 @@ class ViewerApp implements Component {
         if (this.pointerRelockNoticeEl) return this.pointerRelockNoticeEl
         const el = document.createElement("div")
         el.id = "ml-pointer-relock-notice"
-        el.textContent = "Tap, click, scroll, or press a key to lock mouse"
+        el.textContent = streamT("pointerLock.relock")
         el.style.position = "fixed"
         el.style.top = "50%"
         el.style.left = "50%"
@@ -1376,7 +1419,7 @@ class ViewerApp implements Component {
         this.statsTopBar.classList.add("video-stats-topbar")
         this.statsTopBar.addEventListener("pointerdown", this.onStatsTopBarPointerDownForTrayDrag)
         this.statsTitleDiv.classList.add("video-stats-title")
-        this.statsTitleDiv.textContent = "Stream Stats"
+        this.statsTitleDiv.textContent = streamT("stats.title")
         this.statsActionsDiv.classList.add("video-stats-actions")
         this.statsMinimizeButton.classList.add("video-stats-action-btn")
         this.statsMinimizeButton.type = "button"
@@ -1626,7 +1669,7 @@ class ViewerApp implements Component {
         const data = event.detail
 
         if (data.type == "app") {
-            document.title = "NextGPU"
+            applyStreamDocumentTitle()
         } else if (data.type == "connectionComplete") {
             this.latestConnectionState = "Connected"
             this.hasConnectedOnce = true
@@ -1681,6 +1724,7 @@ class ViewerApp implements Component {
         } else if (data.type == "addDebugLine") {
             const message = data.line.trim()
             const isTerminalFatal =
+                streamLogStartsWith(message, "log.connectionTerminated") ||
                 message.startsWith("ConnectionTerminated") ||
                 message.includes("transport closed (failed)") ||
                 message.includes("transport closed (disconnect)")
@@ -1692,7 +1736,7 @@ class ViewerApp implements Component {
                 if (!this.hasConnectedOnce || isTerminalFatal) {
                     showErrorPopup(message)
                     this.latestConnectionState = "Failed"
-                    this.showConnectionRecovery("The stream could not be established or was terminated. Retry to reconnect using the current configuration.")
+                    this.showConnectionRecovery(streamT("recovery.streamFailed"))
                     if (this.realtimeBitrateHud) {
                         this.realtimeBitrateHud.setDisabled(true)
                     }
@@ -1704,17 +1748,20 @@ class ViewerApp implements Component {
                 } else {
                     showErrorPopup(line)
                 }
-            } else if (message === "Web Socket Closed" || message === "Web Socket or WebRtcPeer Error") {
+            } else if (
+                streamLogMatches(message, "log.wsClosed") ||
+                streamLogMatches(message, "log.wsOrWebrtcError")
+            ) {
                 if (!this.hasConnectedOnce) {
                     this.latestConnectionState = "Disconnected"
-                    this.showConnectionRecovery("Connection was lost. Retry to reconnect, or open stream settings to adjust transport and quality.")
+                    this.showConnectionRecovery(streamT("recovery.connectionLost"))
                 }
                 if (this.realtimeBitrateHud) {
                     this.realtimeBitrateHud.setDisabled(true)
                 }
             }
         } else if (data.type == "serverMessage") {
-            MoonlightLoadingScreen.setSubtitle(`Server: ${data.message}`)
+            MoonlightLoadingScreen.setSubtitle(streamT("modal.serverPrefix", { message: data.message }))
         } else if (data.type == "connectionStatus") {
             const statusText = String(data.status).toLowerCase()
             this.latestConnectionState = String(data.status)
@@ -1726,7 +1773,7 @@ class ViewerApp implements Component {
                 if (this.hasConnectedOnce && this.realtimeBitrateHud) {
                     this.realtimeBitrateHud.setDisabled(true)
                 }
-                this.showConnectionRecovery("The session has been disconnected. Retry to reconnect or close this page.")
+                this.showConnectionRecovery(streamT("recovery.disconnected"))
             }
         } else if (data.type == "fileTransferProgress") {
             this.updateFileTransferProgressCircle(data.percent, data.loaded, data.total, data.source)
@@ -2532,7 +2579,7 @@ class ViewerApp implements Component {
             }
 
         } else if (errorIfNotFound) {
-            await showMessage("Pointer Lock not supported")
+            await showMessage(streamT("pointerLock.unsupported"))
         }
     }
     async exitPointerLock() {
@@ -2795,18 +2842,18 @@ class ViewerApp implements Component {
             : statsData.videoFps
 
         if ((latency != null && latency >= 120) || (lossPercent != null && lossPercent >= 8) || (jitter != null && jitter >= 20) || (fps != null && fps < 20)) {
-            return "Very Bad"
+            return streamT("stats.quality.veryBad")
         }
         if ((latency != null && latency >= 80) || (lossPercent != null && lossPercent >= 4) || (jitter != null && jitter >= 12) || (fps != null && fps < 35)) {
-            return "Bad"
+            return streamT("stats.quality.bad")
         }
         if ((latency != null && latency >= 55) || (lossPercent != null && lossPercent >= 2) || (jitter != null && jitter >= 8) || (fps != null && fps < 50)) {
-            return "Normal"
+            return streamT("stats.quality.normal")
         }
         if ((latency != null && latency >= 35) || (lossPercent != null && lossPercent >= 0.6) || (jitter != null && jitter >= 4) || (fps != null && fps < 58)) {
-            return "Good"
+            return streamT("stats.quality.good")
         }
-        return "Very Good"
+        return streamT("stats.quality.veryGood")
     }
 
     private showBitrateToast(text: string, variant: "sent" | "applied" | "rejected") {
@@ -2841,18 +2888,30 @@ class ViewerApp implements Component {
     }
 
     private showBitrateSentMiniToast(mbps: number, source: "overlaySlider" | "preset") {
-        const via = source === "preset" ? "Preset" : "Slider"
-        this.showBitrateToast(`Bitrate ${formatStreamBitrateMbpsDisplay(mbps)} — sent (${via})`, "sent")
+        const viaKey = source === "preset" ? "toast.via.preset" : "toast.via.slider"
+        this.showBitrateToast(
+            streamT("toast.bitrate.sent", {
+                mbps: formatStreamBitrateMbpsDisplay(mbps),
+                via: streamT(viaKey),
+            }),
+            "sent",
+        )
     }
 
     private showBitrateHostAppliedMiniToast(mbps: number) {
-        this.showBitrateToast(`Bitrate ${formatStreamBitrateMbpsDisplay(mbps)} — applied`, "applied")
+        this.showBitrateToast(
+            streamT("toast.bitrate.applied", { mbps: formatStreamBitrateMbpsDisplay(mbps) }),
+            "applied",
+        )
     }
 
     private showBitrateHostRejectedMiniToast(mbps: number, reason: string) {
         const shortReason = reason.length > 48 ? `${reason.slice(0, 45)}…` : reason
         this.showBitrateToast(
-            `Bitrate ${formatStreamBitrateMbpsDisplay(mbps)} — not applied (${shortReason})`,
+            streamT("toast.bitrate.rejected", {
+                mbps: formatStreamBitrateMbpsDisplay(mbps),
+                reason: shortReason,
+            }),
             "rejected",
         )
     }
@@ -2871,9 +2930,10 @@ class ViewerApp implements Component {
         const iceCandidatePair = this.iceCandidatePairType(statsData)
         const connectionStateLabel = iceCandidatePair ? `${icePairState} (${iceCandidatePair})` : icePairState
         const connectionStatusLabel = this.connectionStatusLabel(statsData)
+        const na = streamT("stats.na")
         const resolution = statsData.videoWidth != null && statsData.videoHeight != null
             ? `${statsData.videoWidth}x${statsData.videoHeight}`
-            : "N/A"
+            : na
         const codec = this.safeText(statsData.videoCodec)
         const bitrate = this.computeBitrateMbps(statsData)
         const formattedBitrate = this.formatWithUnit(bitrate, "Mbps", 2)
@@ -2881,10 +2941,10 @@ class ViewerApp implements Component {
             this.stream?.getRequestedVideoBitrateMbps() ?? getSettingsForApp(this.getAppId())?.bitrate
         const targetBitrateRow =
             rawTargetMbps != null && Number.isFinite(rawTargetMbps)
-                ? `<span class="video-stats-row"><span class="video-stats-label">Target bitrate</span><span>${formatStreamBitrateMbpsDisplay(
+                ? `<span class="video-stats-row"><span class="video-stats-label">${streamT("stats.targetBitrate")}</span><span>${formatStreamBitrateMbpsDisplay(
                       rawTargetMbps,
                   )}</span></span>`
-                : `<span class="video-stats-row"><span class="video-stats-label">Target bitrate</span><span>N/A</span></span>`
+                : `<span class="video-stats-row"><span class="video-stats-label">${streamT("stats.targetBitrate")}</span><span>${na}</span></span>`
         this.statsMinimizeButton.textContent = this.statsMinimized ? "▢" : "—"
         this.statsTopBar.classList.toggle("video-stats-topbar-mini", this.statsMinimized)
         this.statsDetailsDiv.classList.remove("video-stats-mini", "video-stats-details-visible")
@@ -2892,29 +2952,29 @@ class ViewerApp implements Component {
 
         if (this.statsMinimized) {
             this.statsTitleDiv.innerHTML = `
-                <span class="video-stats-chip"><span class="video-stats-label">FPS</span>${this.formatWithUnit(fps, "fps", 0)}</span>
-                <span class="video-stats-chip"><span class="video-stats-label">Latency</span>${this.formatWithUnit(latency, "ms", 0)}</span>
-                <span class="video-stats-chip"><span class="video-stats-label">Status</span>${connectionStatusLabel}</span>
-                <span class="video-stats-chip"><span class="video-stats-label">Bitrate</span>${formattedBitrate}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.fps")}</span>${this.formatWithUnit(fps, "fps", 0)}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.latency")}</span>${this.formatWithUnit(latency, "ms", 0)}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.status")}</span>${connectionStatusLabel}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.bitrate")}</span>${formattedBitrate}</span>
             `
             this.statsSummaryDiv.hidden = true
             this.statsSummaryDiv.innerHTML = ""
             return
         }
 
-        this.statsTitleDiv.textContent = "Stream Stats"
+        this.statsTitleDiv.textContent = streamT("stats.title")
         this.statsSummaryDiv.hidden = false
         this.statsSummaryDiv.innerHTML = `
-            <span class="video-stats-row"><span class="video-stats-label">Connection State</span><span>${connectionStateLabel}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">Status</span><span>${connectionStatusLabel}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">FPS</span><span>${this.formatWithUnit(fps, "fps", 0)}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">Latency</span><span>${this.formatWithUnit(latency, "ms", 0)}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">Video Codec</span><span>${codec}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">Resolution</span><span>${resolution}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">Jitter</span><span>${this.formatWithUnit(jitter, "ms", 2)}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">Loss</span><span>${packetLossPercent != null ? `${packetLossPercent.toFixed(2)}%` : "N/A"}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.connectionState")}</span><span>${connectionStateLabel}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.status")}</span><span>${connectionStatusLabel}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.fps")}</span><span>${this.formatWithUnit(fps, "fps", 0)}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.latency")}</span><span>${this.formatWithUnit(latency, "ms", 0)}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.videoCodec")}</span><span>${codec}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.resolution")}</span><span>${resolution}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.jitter")}</span><span>${this.formatWithUnit(jitter, "ms", 2)}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.loss")}</span><span>${packetLossPercent != null ? `${packetLossPercent.toFixed(2)}%` : na}</span></span>
             ${targetBitrateRow}
-            <span class="video-stats-row"><span class="video-stats-label">Bitrate</span><span>${formattedBitrate}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.bitrate")}</span><span>${formattedBitrate}</span></span>
         `
         this.statsDetailsDiv.classList.remove("video-stats-details-visible")
     }
@@ -3131,17 +3191,17 @@ class ConnectionInfoModal implements Modal<void> {
     constructor() {
         this.root.classList.add("modal-video-connect")
 
-        this.text.innerText = "Connecting"
+        this.text.innerText = streamT("modal.connecting")
         this.root.appendChild(this.text)
 
         this.root.appendChild(this.options)
         this.options.classList.add("modal-video-connect-options")
 
-        this.debugDetailButton.innerText = "View Logs"
+        this.debugDetailButton.innerText = streamT("modal.viewLogs")
         this.debugDetailButton.addEventListener("click", this.onDebugDetailClick.bind(this))
         this.options.appendChild(this.debugDetailButton)
 
-        this.closeButton.innerText = "Close"
+        this.closeButton.innerText = streamT("modal.close")
         this.closeButton.addEventListener("click", this.onClose.bind(this))
         this.options.appendChild(this.closeButton)
 
@@ -3153,10 +3213,10 @@ class ConnectionInfoModal implements Modal<void> {
         let debugDetailCurrentlyShown = this.root.contains(this.debugDetailDisplay)
 
         if (debugDetailCurrentlyShown) {
-            this.debugDetailButton.innerText = "View Logs"
+            this.debugDetailButton.innerText = streamT("modal.viewLogs")
             this.root.removeChild(this.debugDetailDisplay)
         } else {
-            this.debugDetailButton.innerText = "Hide Logs"
+            this.debugDetailButton.innerText = streamT("modal.hideLogs")
             this.root.appendChild(this.debugDetailDisplay)
             this.debugDetailDisplay.innerText = this.debugDetail
         }
@@ -3172,7 +3232,7 @@ class ConnectionInfoModal implements Modal<void> {
         const data = event.detail
 
         if (data.type == "connectionComplete") {
-            const text = `Connection Complete`
+            const text = streamT("modal.connectionComplete")
             this.text.innerText = text
             this.debugLog(text)
 
@@ -3203,7 +3263,7 @@ class ConnectionInfoModal implements Modal<void> {
                 showErrorPopup(data.line)
             }
         } else if (data.type == "serverMessage") {
-            const text = `Server: ${data.message}`
+            const text = streamT("modal.serverPrefix", { message: data.message })
             this.text.innerText = text
             this.debugLog(text)
         }
@@ -3660,7 +3720,7 @@ class ViewerSidebar implements Component, Sidebar {
         this.uploadDoneAnnouncementButton.type = "button"
         this.uploadDoneAnnouncementTitle = document.createElement("span")
         this.uploadDoneAnnouncementTitle.classList.add("upload-done-announcement-title")
-        this.uploadDoneAnnouncementTitle.textContent = "Upload Status"
+        this.uploadDoneAnnouncementTitle.textContent = streamT("upload.title")
         this.uploadDoneAnnouncementMessage = document.createElement("span")
         this.uploadDoneAnnouncementMessage.classList.add("upload-done-announcement-message")
         this.uploadDoneAnnouncementButton.appendChild(this.uploadDoneAnnouncementTitle)
@@ -4048,7 +4108,7 @@ class ViewerSidebar implements Component, Sidebar {
 
     showUploadDoneAnnouncement(fileName: string) {
         const safeFileName = (fileName || "").trim() || "file"
-        this.uploadDoneAnnouncementMessage.textContent = `Up Load '${safeFileName}' done, please check the file on the desktop`
+        this.uploadDoneAnnouncementMessage.textContent = streamT("upload.done", { file: safeFileName })
         this.uploadDoneAnnouncementButton.style.display = "inline-flex"
         if (this.uploadDoneAnnouncementHideTimer != null) {
             clearTimeout(this.uploadDoneAnnouncementHideTimer)

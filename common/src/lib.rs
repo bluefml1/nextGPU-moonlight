@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub mod api_bindings;
 pub mod api_bindings_ext;
 pub mod config;
+pub mod domain_txt;
 pub mod ipc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
