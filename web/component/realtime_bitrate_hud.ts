@@ -66,6 +66,8 @@ export type RealtimeBitrateHud = {
     setBounds: (tier: StreamProfileBitrateTier) => void
     setApplyBusy: (busy: boolean) => void
     getPendingMbps: () => number
+    getCommittedMbps: () => number
+    revertToCommitted: () => void
 }
 
 export type CreateRealtimeBitrateHudOptions = {
@@ -73,13 +75,13 @@ export type CreateRealtimeBitrateHudOptions = {
     maxMbps: number
     defaultMbps: number
     committedMbps: number
-    onApply: (mbps: number) => void | Promise<void>
     onPendingChange?: (mbps: number) => void
+    onDirtyChange?: (dirty: boolean) => void
     onCloseRequested?: () => void
 }
 
 export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOptions): RealtimeBitrateHud {
-    const { onApply, onPendingChange, onCloseRequested } = options
+    const { onPendingChange, onDirtyChange, onCloseRequested } = options
 
     let tier: StreamProfileBitrateTier = {
         minMbps: options.minMbps,
@@ -140,10 +142,6 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
 
     const valueSlot = document.createElement("div")
     valueSlot.className = "ml-rt-bitrate__value-slot"
-    const valueDisplay = document.createElement("button")
-    valueDisplay.type = "button"
-    valueDisplay.className = "ml-rt-bitrate__value-display"
-    valueDisplay.setAttribute("aria-label", streamT("bitrateHud.aria.edit"))
     const valueInput = document.createElement("input")
     valueInput.type = "number"
     valueInput.className = "ml-rt-bitrate__value-input"
@@ -153,14 +151,20 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
     valueInput.setAttribute("inputmode", "decimal")
     valueInput.setAttribute("autocomplete", "off")
     valueInput.setAttribute("aria-label", streamT("bitrateHud.aria.bitrateMbps"))
-    valueSlot.appendChild(valueDisplay)
+    valueInput.readOnly = true
+    const valueUnit = document.createElement("span")
+    valueUnit.className = "ml-rt-bitrate__value-unit"
+    valueUnit.textContent = streamT("bitrateHud.unit.mbps")
+    valueUnit.setAttribute("aria-hidden", "true")
     valueSlot.appendChild(valueInput)
+    valueSlot.appendChild(valueUnit)
 
     const chevron = document.createElement("button")
     chevron.type = "button"
     chevron.className = "ml-rt-bitrate__chevron"
     chevron.setAttribute("aria-expanded", "false")
     chevron.setAttribute("aria-label", streamT("bitrateHud.aria.toggleDetail"))
+    chevron.title = streamT("bitrateHud.aria.toggleDetail")
     chevron.innerHTML =
         '<svg class="ml-rt-bitrate__chevron-icon" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path fill="currentColor" d="M2 4l4 4 4-4H2z"/></svg>'
 
@@ -171,18 +175,11 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
     closeBtn.title = streamT("bitrateHud.aria.hide")
     closeBtn.textContent = "×"
 
-    const applyBtn = document.createElement("button")
-    applyBtn.type = "button"
-    applyBtn.className = "ml-rt-bitrate__apply"
-    applyBtn.textContent = streamT("bitrateHud.apply")
-    applyBtn.setAttribute("aria-label", streamT("bitrateHud.aria.apply"))
-    applyBtn.title = streamT("bitrateHud.aria.apply")
-    applyBtn.hidden = true
+    let draggingRange = false
 
     strip.appendChild(tierCol)
     strip.appendChild(trackWrap)
     strip.appendChild(valueSlot)
-    strip.appendChild(applyBtn)
     strip.appendChild(chevron)
     strip.appendChild(closeBtn)
 
@@ -265,10 +262,10 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
         root.classList.add(`ml-rt-bitrate--tier-${tierId}`)
     }
 
-    function syncApplyVisibility() {
+    function syncDirtyState() {
         const dirty = pendingMbps !== committedMbps
-        applyBtn.hidden = !dirty
         root.classList.toggle("ml-rt-bitrate--pending", dirty)
+        onDirtyChange?.(dirty)
     }
 
     function syncRangeAttrs() {
@@ -297,17 +294,21 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
         const def = TIER_DEFS[idx]
         const text = tierText(def)
         setTierClass(def.id)
-        tierLabel.textContent = text.label
+        if (!draggingRange) {
+            tierLabel.textContent = text.label
+        }
         pill.textContent = text.fullLabel
         hint.textContent = text.hint
         bigNum.textContent = formatStreamBitrateMbpsNumber(mbps)
         root.setAttribute("aria-valuetext", `${formatStreamBitrateMbpsDisplay(mbps)}, ${text.label}`)
-        valueDisplay.innerHTML = `${formatStreamBitrateMbpsNumber(mbps)}<span class="ml-rt-bitrate__value-unit">Mbps</span>`
+        if (!editingValue) {
+            valueInput.value = mbpsToInputFieldString(mbps)
+        }
         for (let i = 0; i < presetButtons.length; i++) {
             const presetMbps = snap(Number.parseFloat(presetButtons[i].dataset.mbps ?? ""))
             presetButtons[i].classList.toggle("is-active", mbps === presetMbps)
         }
-        syncApplyVisibility()
+        syncDirtyState()
     }
 
     function update(mbps: number) {
@@ -327,9 +328,8 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
     function closeEditor(commit: boolean) {
         if (!editingValue) return
         editingValue = false
+        valueInput.readOnly = true
         root.classList.remove("ml-rt-bitrate--editing")
-        valueDisplay.setAttribute("aria-hidden", "false")
-        valueInput.setAttribute("aria-hidden", "true")
         if (commit) {
             const rawMbps = Number.parseFloat(valueInput.value)
             if (!Number.isFinite(rawMbps)) {
@@ -348,15 +348,29 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
         if (range.disabled || applyBusy) return
         editingValue = true
         editSnapshot = pendingMbps
+        valueInput.readOnly = false
         root.classList.add("ml-rt-bitrate--editing")
-        valueDisplay.setAttribute("aria-hidden", "true")
-        valueInput.setAttribute("aria-hidden", "false")
         valueInput.value = mbpsToInputFieldString(pendingMbps)
         requestAnimationFrame(() => {
             valueInput.focus()
             valueInput.select()
         })
     }
+
+    function endRangeDrag() {
+        if (!draggingRange) return
+        draggingRange = false
+        root.classList.remove("ml-rt-bitrate--dragging")
+        applyVisuals(pendingMbps)
+    }
+
+    range.addEventListener("pointerdown", () => {
+        if (range.disabled) return
+        draggingRange = true
+        root.classList.add("ml-rt-bitrate--dragging")
+    })
+    range.addEventListener("pointerup", () => endRangeDrag())
+    range.addEventListener("pointercancel", () => endRangeDrag())
 
     range.addEventListener("input", () => {
         const v = Number.parseFloat(range.value)
@@ -365,17 +379,17 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
         range.value = String(pendingMbps)
     })
 
-    valueDisplay.addEventListener("pointerdown", (e) => {
+    valueInput.addEventListener("pointerdown", (e) => {
         e.stopPropagation()
         if (range.disabled) return
+        if (!valueInput.readOnly) return
         e.preventDefault()
         openEditor()
     })
-    valueDisplay.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault()
-            openEditor()
-        }
+    valueInput.addEventListener("focus", () => {
+        if (range.disabled || applyBusy) return
+        if (!valueInput.readOnly) return
+        openEditor()
     })
 
     valueInput.addEventListener("keydown", (e) => {
@@ -388,13 +402,10 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
             closeEditor(false)
         }
     })
-    valueSlot.addEventListener("focusout", (e) => {
+    valueInput.addEventListener("focusout", () => {
         if (!editingValue) return
-        const next = e.relatedTarget
-        if (next instanceof Node && valueSlot.contains(next)) return
         closeEditor(true)
     })
-    valueInput.addEventListener("pointerdown", (e) => e.stopPropagation())
 
     chevron.addEventListener("click", () => {
         if (range.disabled) return
@@ -408,15 +419,8 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
         onCloseRequested?.()
     })
 
-    applyBtn.addEventListener("click", (e) => {
-        e.stopPropagation()
-        if (range.disabled || applyBusy || pendingMbps === committedMbps) return
-        void Promise.resolve(onApply(pendingMbps))
-    })
-
     function setDisabled(disabled: boolean) {
         range.disabled = disabled
-        applyBtn.disabled = disabled || applyBusy
         root.classList.toggle("ml-rt-bitrate--disabled", disabled)
         root.toggleAttribute("aria-disabled", disabled)
         if (disabled) {
@@ -429,9 +433,14 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
 
     function setApplyBusy(busy: boolean) {
         applyBusy = busy
-        applyBtn.disabled = busy || range.disabled
-        applyBtn.classList.toggle("ml-rt-bitrate__apply--busy", busy)
         root.classList.toggle("ml-rt-bitrate--apply-busy", busy)
+    }
+
+    function revertToCommitted() {
+        if (editingValue) {
+            closeEditor(false)
+        }
+        setCommitted(committedMbps)
     }
 
     function setCommitted(mbps: number) {
@@ -452,7 +461,6 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
         applyVisuals(pendingMbps)
     }
 
-    valueInput.setAttribute("aria-hidden", "true")
     syncRangeAttrs()
     applyVisuals(committedMbps)
 
@@ -465,5 +473,7 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
         setBounds,
         setApplyBusy,
         getPendingMbps: () => pendingMbps,
+        getCommittedMbps: () => committedMbps,
+        revertToCommitted,
     }
 }

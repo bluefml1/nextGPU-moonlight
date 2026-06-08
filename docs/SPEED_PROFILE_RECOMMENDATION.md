@@ -32,17 +32,17 @@ Let **S** = measured download speed in Mbps (`speed_result`).
 
 | Condition | Recommended profile | Rationale |
 |-----------|---------------------|-----------|
-| **S < 60** | `performance` | Weaker link; 1080p / 20 Mbps default. |
-| **60 ≤ S ≤ 150** | `balance` | Mid-range; 2K / 40 Mbps default. |
-| **S > 150** | `quality` | Strong link; 4K / 60 Mbps default. |
+| **S ≤ 150** | `performance` | Speedtest band 0–150 Mbps inclusive; 1080p / 20 Mbps default. |
+| **150 < S ≤ 300** | `balance` | Speedtest band above 150 through 300 Mbps; 2K / 40 Mbps default. |
+| **S > 300** | `quality` | Speedtest band 300+ Mbps; 4K / 60 Mbps default. |
 
 ## Implementation
 
 - Proxy: `get_machine_info` in `src/api/machine_info.rs`
 - Mapping: `profileIdFromSpeedMbps()` in `web/profile_recommendation.ts`
-- Constants: `SPEED_THRESHOLD_PERFORMANCE_MBPS = 60`, `SPEED_THRESHOLD_QUALITY_MBPS = 150`
+- Constants: `SPEED_THRESHOLD_BALANCE_MBPS = 150`, `SPEED_THRESHOLD_QUALITY_MBPS = 300`
 - UI: `web/component/stream_profile_gate.ts` shows Mbps when available and badges the recommended card.
 
 ## Tuning
 
-Adjust 60 and 150 after production telemetry. Document any change here and in code constants together.
+Adjust 150 and 300 after production telemetry. Document any change here and in code constants together.

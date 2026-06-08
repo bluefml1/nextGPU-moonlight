@@ -3067,30 +3067,176 @@ canvas.video-stream {
     justify-content: center;
 }
 
+.video-overlay-hud-cluster {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    box-sizing: border-box;
+    z-index: 70;
+}
+
+.video-overlay-hud-cluster .video-overlay-hud-tray {
+    flex: 0 1 auto;
+    min-width: 0;
+}
+
+.video-overlay-bitrate-apply {
+    flex: 0 0 auto;
+    align-self: center;
+    margin: 0;
+    padding: 4px 10px;
+    min-height: 30px;
+    height: 30px;
+    box-sizing: border-box;
+    border-radius: 8px;
+    border: 1px solid rgba(100, 180, 255, 0.55);
+    background: rgba(40, 90, 180, 0.45);
+    color: #eef3ff;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.video-overlay-bitrate-apply:hover:not(:disabled) {
+    background: rgba(50, 110, 210, 0.65);
+    border-color: rgba(120, 200, 255, 0.75);
+}
+
+.video-overlay-bitrate-apply:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.video-overlay-bitrate-apply[hidden] {
+    display: none !important;
+}
+
 .video-overlay-hud-tray {
     display: flex;
     flex-direction: column;
-    align-items: stretch;
+    align-items: flex-start;
     gap: 0;
     padding: 0;
-    border-radius: 10px;
-    border: 1px solid rgba(255, 255, 255, 0.28);
-    background: rgba(0, 0, 0, 0.88);
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(0, 0, 0, 0.92);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
-    z-index: 70;
+    z-index: auto;
     box-sizing: border-box;
+    width: fit-content;
     max-width: min(520px, calc(100vw - 16px));
+}
+
+.video-overlay-hud-tray:has(.video-overlay-hud-tray__stats .video-stats:not([hidden])) {
+    width: 100%;
+    align-items: stretch;
 }
 
 .video-overlay-hud-tray__toolbar {
     display: flex;
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-    padding: 4px 6px 4px 6px;
+    padding: 4px 6px;
     box-sizing: border-box;
     min-width: 0;
+    width: fit-content;
+    max-width: 100%;
+    flex: 0 0 auto;
+}
+
+.video-overlay-hud-tray__toolbar:has(.ml-rt-bitrate--expanded),
+.video-overlay-hud-tray:has(.video-overlay-hud-tray__stats .video-stats:not([hidden]))
+    .video-overlay-hud-tray__toolbar {
     width: 100%;
+    align-content: flex-start;
+}
+
+/* Strip + detail flatten into toolbar flex so Apply/Stats/Fullscreen sit on the strip row */
+.video-overlay-hud-tray__toolbar .ml-rt-bitrate {
+    display: contents;
+}
+
+.video-overlay-hud-tray__toolbar .video-overlay-hud-tray__drag-handle {
+    order: 0;
+    align-self: center;
+    height: 30px;
+    min-height: 30px;
+}
+
+.video-overlay-hud-tray__toolbar .ml-rt-bitrate__strip {
+    flex: 0 0 auto;
+    order: 1;
+}
+
+.video-overlay-hud-tray__toolbar .video-overlay-bitrate-apply {
+    order: 12;
+    flex: 0 0 auto;
+}
+
+.video-overlay-hud-tray__toolbar .video-overlay-hud-tray__tool-btn--stats {
+    order: 13;
+}
+
+.video-overlay-hud-tray__toolbar .video-fullscreen-toggle-btn {
+    order: 14;
+}
+
+.video-overlay-hud-tray__toolbar .video-overlay-hud-tray__tool-btn--quality {
+    order: 15;
+}
+
+.video-overlay-hud-tray__toolbar .ml-rt-bitrate:not(.ml-rt-bitrate--expanded) .ml-rt-bitrate__detail {
+    flex: 0 0 0;
+    width: 0;
+    min-width: 0;
+    max-width: 0;
+    overflow: hidden;
+}
+
+.video-overlay-hud-tray__toolbar .ml-rt-bitrate--expanded .ml-rt-bitrate__detail {
+    flex: 1 1 100%;
+    flex-basis: 100%;
+    order: 20;
+    width: 100%;
+    min-width: 100%;
+    max-width: 100%;
+    align-self: stretch;
+}
+
+/* No Apply: push Stats (or Fullscreen) into the strip-row gap */
+.video-overlay-hud-tray__toolbar:not(:has(.video-overlay-bitrate-apply:not([hidden])))
+    .video-overlay-hud-tray__tool-btn--stats:not([style*="none"]) {
+    margin-left: auto;
+}
+
+.video-overlay-hud-tray__toolbar:not(:has(.video-overlay-bitrate-apply:not([hidden])))
+    .video-fullscreen-toggle-btn {
+    margin-left: auto;
+}
+
+.video-overlay-hud-tray__toolbar:not(:has(.video-overlay-bitrate-apply:not([hidden]))):has(
+        .video-overlay-hud-tray__tool-btn--stats:not([style*="none"])
+    )
+    .video-fullscreen-toggle-btn {
+    margin-left: 0;
+}
+
+/* Apply visible: sit in the gap, then Stats + Fullscreen */
+.video-overlay-hud-tray__toolbar:has(.video-overlay-bitrate-apply:not([hidden]))
+    .video-overlay-bitrate-apply {
+    margin-left: auto;
+}
+
+.video-overlay-hud-tray__toolbar:has(.video-overlay-bitrate-apply:not([hidden]))
+    .video-overlay-hud-tray__tool-btn--stats:not([style*="none"]),
+.video-overlay-hud-tray__toolbar:has(.video-overlay-bitrate-apply:not([hidden]))
+    .video-fullscreen-toggle-btn {
+    margin-left: 0;
 }
 
 .video-overlay-hud-tray__stats {
@@ -3114,7 +3260,7 @@ canvas.video-stream {
     flex-shrink: 0;
     width: 14px;
     align-self: stretch;
-    min-height: 28px;
+    min-height: 30px;
     border-radius: 4px;
     cursor: grab;
     touch-action: none;
@@ -3134,7 +3280,10 @@ canvas.video-stream {
 .video-overlay-hud-tray__tool-btn {
     flex-shrink: 0;
     margin: 0;
-    padding: 6px 10px;
+    padding: 4px 8px;
+    min-height: 30px;
+    height: 30px;
+    box-sizing: border-box;
     border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.28);
     background: rgba(255, 255, 255, 0.08);
@@ -3157,29 +3306,35 @@ canvas.video-stream {
     top: auto;
     right: auto;
     left: auto;
+    width: 30px !important;
+    min-width: 30px !important;
+    max-width: 30px !important;
+    height: 30px !important;
+    min-height: 30px !important;
+    max-height: 30px !important;
+    font-size: 14px !important;
 }
 
-/* Realtime bitrate HUD — toolbar row shares width with tray */
-.video-overlay-hud-tray__toolbar .ml-rt-bitrate {
-    width: auto;
-    min-width: 120px;
-    max-width: min(380px, calc(100vw - 200px));
-    flex: 1;
+/* Realtime bitrate HUD — match minimized stats topbar height (30px row) */
+.video-overlay-hud-tray__toolbar .ml-rt-bitrate__strip {
+    max-width: min(420px, calc(100vw - 200px));
 }
 
 .ml-rt-bitrate {
     box-sizing: border-box;
-    width: min(430px, calc(100vw - 20px - 52px));
-    max-width: calc(100vw - 24px - 52px);
+    width: fit-content;
+    max-width: min(420px, calc(100vw - 24px - 52px));
     min-width: 0;
-    flex: 1;
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
+    align-items: flex-start;
     cursor: grab;
-    border-radius: 8px;
-    background: rgba(0, 0, 0, 0.72);
-    border: 0.5px solid rgba(255, 255, 255, 0.18);
-    overflow: hidden;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    overflow: visible;
     color: rgba(238, 243, 255, 0.94);
     font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     font-size: 11px;
@@ -3199,10 +3354,15 @@ canvas.video-stream {
     display: flex;
     flex-direction: row;
     align-items: center;
-    gap: 10px;
-    padding: 4px 8px 4px 10px;
+    gap: 6px;
+    padding: 0;
     min-height: 30px;
-    min-width: 0;
+    height: 30px;
+    width: fit-content;
+    max-width: 100%;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    box-sizing: border-box;
 }
 
 .ml-rt-bitrate__tier {
@@ -3241,16 +3401,23 @@ canvas.video-stream {
 
 .ml-rt-bitrate__tier-label {
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     white-space: nowrap;
-    color: rgba(255, 255, 255, 0.88);
+    color: rgba(255, 255, 255, 0.92);
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 5.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .ml-rt-bitrate__track-wrap {
     position: relative;
-    flex: 1;
-    min-width: 0;
-    height: 32px;
+    flex: 0 0 88px;
+    width: 88px;
+    min-width: 88px;
+    max-width: 88px;
+    height: 22px;
     display: flex;
     align-items: center;
 }
@@ -3273,6 +3440,10 @@ canvas.video-stream {
     width: 0%;
     border-radius: inherit;
     transition: width 0.08s ease-out;
+}
+
+.ml-rt-bitrate--dragging .ml-rt-bitrate__fill {
+    transition: none;
 }
 
 .ml-rt-bitrate--tier-warning .ml-rt-bitrate__fill {
@@ -3315,7 +3486,7 @@ canvas.video-stream {
 
 .ml-rt-bitrate .ml-rt-bitrate__range::-webkit-slider-runnable-track,
 .ml-rt-bitrate .video-overlay-bitrate-range::-webkit-slider-runnable-track {
-    height: 32px;
+    height: 22px;
     background: transparent;
 }
 
@@ -3323,177 +3494,117 @@ canvas.video-stream {
 .ml-rt-bitrate .video-overlay-bitrate-range::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 22px;
-    height: 32px;
+    width: 18px;
+    height: 22px;
     background: transparent;
 }
 
 .ml-rt-bitrate .ml-rt-bitrate__range::-moz-range-track,
 .ml-rt-bitrate .video-overlay-bitrate-range::-moz-range-track {
     background: transparent;
-    height: 32px;
+    height: 22px;
 }
 
 .ml-rt-bitrate .ml-rt-bitrate__range::-moz-range-thumb,
 .ml-rt-bitrate .video-overlay-bitrate-range::-moz-range-thumb {
-    width: 22px;
-    height: 32px;
+    width: 18px;
+    height: 22px;
     background: transparent;
     border: none;
 }
 
 .ml-rt-bitrate__value-slot {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(28px, auto);
-    align-items: stretch;
-    min-width: 76px;
-    flex-shrink: 0;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 0;
     position: relative;
     z-index: 3;
-    border-radius: 8px;
-}
-
-.ml-rt-bitrate--editing .ml-rt-bitrate__value-slot {
-    z-index: 4;
-    border: 1px solid rgba(140, 200, 255, 0.55);
-    background: rgba(10, 16, 28, 0.96);
-    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
-}
-
-.ml-rt-bitrate__value-display,
-.ml-rt-bitrate__value-input {
-    grid-row: 1;
-    grid-column: 1;
+    height: 30px;
     box-sizing: border-box;
-    width: 100%;
-    min-width: 0;
+}
+
+/* Beat global input[type=number] text-field styles (width:100%, large border, etc.) */
+.ml-rt-bitrate__value-slot input.ml-rt-bitrate__value-input[type="number"] {
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    width: 3rem;
+    min-width: 3rem;
+    max-width: 3rem;
     margin: 0;
-    padding: 5px 8px;
-    font-size: 13px;
+    padding: 0 4px;
+    height: 22px;
+    min-height: 22px;
+    max-height: 22px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
     text-align: right;
     font-family: inherit;
-    border-radius: 8px;
-}
-
-.ml-rt-bitrate__value-display {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 4px;
-    border: 1px solid transparent;
-    background: transparent;
-    color: rgba(255, 255, 255, 0.95);
-    font-weight: 500;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(255, 255, 255, 0.07);
+    color: rgba(255, 255, 255, 0.96);
+    font-weight: 600;
+    line-height: 22px;
+    outline: none;
+    box-shadow: none;
+    backdrop-filter: none;
+    overflow: hidden;
+    white-space: nowrap;
     cursor: text;
-    transition: background 0.15s ease, border-color 0.15s ease;
+    -moz-appearance: textfield;
+    appearance: textfield;
 }
 
-.ml-rt-bitrate__value-display:hover {
-    border-color: rgba(255, 255, 255, 0.14);
-    background: rgba(255, 255, 255, 0.06);
+.ml-rt-bitrate__value-slot input.ml-rt-bitrate__value-input[type="number"]:hover:read-only {
+    border-color: rgba(255, 255, 255, 0.26);
+    background: rgba(255, 255, 255, 0.09);
+    box-shadow: none;
 }
 
-.ml-rt-bitrate__value-display:focus-visible {
-    outline: 2px solid rgba(120, 190, 255, 0.45);
-    outline-offset: 1px;
-}
-
-.ml-rt-bitrate--editing .ml-rt-bitrate__value-display {
-    visibility: hidden;
-    pointer-events: none;
+.ml-rt-bitrate--editing .ml-rt-bitrate__value-slot input.ml-rt-bitrate__value-input[type="number"],
+.ml-rt-bitrate__value-slot input.ml-rt-bitrate__value-input[type="number"]:focus {
+    border-color: rgba(255, 255, 255, 0.32);
+    background: rgba(255, 255, 255, 0.1);
+    color: #ffffff;
+    outline: none;
+    box-shadow: none;
 }
 
 .ml-rt-bitrate__value-unit {
     font-size: 10px;
     font-weight: 500;
-    opacity: 0.65;
-}
-
-.ml-rt-bitrate__value-input {
-    display: block;
-    height: 100%;
-    min-height: 28px;
-    border: none;
-    background: transparent;
-    color: rgba(248, 250, 255, 0.98);
-    font-weight: 600;
-    line-height: 1.3;
-    outline: none;
-    box-shadow: none;
-    -moz-appearance: textfield;
-    appearance: textfield;
-}
-
-.ml-rt-bitrate:not(.ml-rt-bitrate--editing) .ml-rt-bitrate__value-input {
-    visibility: hidden;
+    color: rgba(255, 255, 255, 0.55);
+    opacity: 1;
+    flex-shrink: 0;
     pointer-events: none;
+    line-height: 1;
 }
 
-.ml-rt-bitrate__value-input::-webkit-inner-spin-button,
-.ml-rt-bitrate__value-input::-webkit-outer-spin-button {
+.ml-rt-bitrate__value-slot input.ml-rt-bitrate__value-input[type="number"]::-webkit-inner-spin-button,
+.ml-rt-bitrate__value-slot input.ml-rt-bitrate__value-input[type="number"]::-webkit-outer-spin-button {
     -webkit-appearance: none;
     margin: 0;
 }
 
-.ml-rt-bitrate__value-input:focus {
-    outline: none;
-}
-
-.ml-rt-bitrate--editing .ml-rt-bitrate__value-slot:focus-within {
-    border-color: rgba(170, 220, 255, 0.9);
-    box-shadow: 0 0 0 2px rgba(100, 170, 255, 0.32);
-}
-
-.ml-rt-bitrate__value-input::placeholder {
+.ml-rt-bitrate__value-slot input.ml-rt-bitrate__value-input[type="number"]::placeholder {
     color: rgba(255, 255, 255, 0.35);
-}
-
-.ml-rt-bitrate__apply {
-    flex-shrink: 0;
-    margin: 0;
-    padding: 4px 10px;
-    min-height: 26px;
-    border-radius: 6px;
-    border: 1px solid rgba(100, 180, 255, 0.55);
-    background: rgba(40, 90, 180, 0.45);
-    color: #eef3ff;
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-}
-
-.ml-rt-bitrate__apply:hover:not(:disabled) {
-    background: rgba(50, 110, 210, 0.65);
-    border-color: rgba(120, 200, 255, 0.75);
-}
-
-.ml-rt-bitrate__apply:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-}
-
-.ml-rt-bitrate__apply--busy {
-    opacity: 0.7;
-    cursor: wait;
-}
-
-.ml-rt-bitrate--pending .ml-rt-bitrate__apply {
-    box-shadow: 0 0 10px rgba(80, 140, 255, 0.35);
 }
 
 .ml-rt-bitrate__chevron {
     flex-shrink: 0;
-    width: 26px;
-    height: 26px;
+    width: 22px;
+    height: 22px;
     margin: 0;
     padding: 0;
     display: inline-grid;
     place-items: center;
     border-radius: 6px;
-    border: 0.5px solid rgba(255, 255, 255, 0.28);
+    border: 1px solid rgba(255, 255, 255, 0.24);
     background: rgba(255, 255, 255, 0.06);
     color: rgba(255, 255, 255, 0.9);
     cursor: pointer;
@@ -3514,18 +3625,18 @@ canvas.video-stream {
 
 .ml-rt-bitrate__close {
     flex-shrink: 0;
-    width: 26px;
-    height: 26px;
+    width: 22px;
+    height: 22px;
     margin: 0;
     padding: 0;
     display: inline-grid;
     place-items: center;
     border-radius: 6px;
-    border: 0.5px solid rgba(255, 255, 255, 0.28);
+    border: 1px solid rgba(255, 255, 255, 0.24);
     background: rgba(255, 255, 255, 0.06);
     color: rgba(255, 255, 255, 0.88);
     cursor: pointer;
-    font-size: 18px;
+    font-size: 14px;
     line-height: 1;
     font-weight: 500;
 }
@@ -3543,23 +3654,36 @@ canvas.video-stream {
 }
 
 .ml-rt-bitrate__detail {
-    border-top: 0.5px solid rgba(255, 255, 255, 0.2);
+    box-sizing: border-box;
+    width: 0;
+    min-width: 0;
+    max-width: 0;
+    border-top: none;
     max-height: 0;
     opacity: 0;
     overflow: hidden;
+    pointer-events: none;
     transition: max-height 0.28s ease, opacity 0.22s ease;
+    border-radius: 0 0 8px 8px;
 }
 
 .ml-rt-bitrate--expanded .ml-rt-bitrate__detail {
+    align-self: stretch;
+    width: 100%;
+    min-width: 100%;
+    max-width: 100%;
+    border-top: 0.5px solid rgba(255, 255, 255, 0.2);
     max-height: 340px;
     opacity: 1;
+    pointer-events: auto;
 }
 
 @media (prefers-reduced-motion: reduce) {
 
     .ml-rt-bitrate__detail,
     .ml-rt-bitrate__chevron-icon,
-    .ml-rt-bitrate__fill {
+    .ml-rt-bitrate__fill,
+    .ml-rt-bitrate--dragging .ml-rt-bitrate__fill {
         transition: none !important;
     }
 }
