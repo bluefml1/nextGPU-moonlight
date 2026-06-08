@@ -74,18 +74,30 @@ const GATE_CSS = `
     background-size: 40px 40px;
     pointer-events: none;
 }
+#ml-profile-gate-brand {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin: 0 auto 12px;
+    min-width: clamp(120px, 28vw, 200px);
+    min-height: clamp(72px, 14vh, 120px);
+}
 #ml-profile-gate-glow {
     position: absolute;
-    width: min(420px, 90vw);
-    height: min(420px, 50vh);
+    z-index: 0;
+    top: 50%;
+    left: 50%;
+    width: min(280px, 72vw);
+    height: min(280px, 72vw);
     border-radius: 50%;
     background: radial-gradient(circle,
-        rgba(58,91,255,.18) 0%,
-        rgba(0,200,255,.08) 45%,
-        transparent 70%
+        rgba(58,91,255,.22) 0%,
+        rgba(0,200,255,.1) 42%,
+        transparent 68%
     );
-    top: 28%;
-    left: 50%;
     transform: translate(-50%, -50%);
     pointer-events: none;
 }
@@ -95,11 +107,11 @@ const GATE_CSS = `
     display: block;
     width: auto;
     max-height: clamp(40px, 10vh, 72px);
-    margin: 0 auto 12px;
+    margin: 0;
     object-fit: contain;
 }
 @media (max-height: 680px) {
-    #ml-profile-gate-logo { display: none; }
+    #ml-profile-gate-brand { display: none; }
 }
 #ml-profile-gate h1 {
     position: relative;
@@ -288,15 +300,19 @@ function showProfilePickerUi(): Promise<StreamProfileId> {
     langBar.appendChild(btnEn)
     shell.appendChild(langBar)
 
+    const brand = document.createElement("div")
+    brand.id = "ml-profile-gate-brand"
+
     const glow = document.createElement("div")
     glow.id = "ml-profile-gate-glow"
-    shell.appendChild(glow)
+    brand.appendChild(glow)
 
     const logo = document.createElement("img")
     logo.id = "ml-profile-gate-logo"
     logo.src = "resources/sidebar-button-icon.png"
     logo.alt = getStreamMachineLabel() ?? "Stream"
-    shell.appendChild(logo)
+    brand.appendChild(logo)
+    shell.appendChild(brand)
 
     const h1 = document.createElement("h1")
     h1.id = "ml-profile-gate-title"

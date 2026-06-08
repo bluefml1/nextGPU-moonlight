@@ -10,20 +10,20 @@ export type StreamProfileRecommendation = {
 const POLL_ATTEMPTS = 5
 const POLL_INTERVAL_MS = 1000
 
-/** Download speed (Mbps) below this → Performance profile. */
-export const SPEED_THRESHOLD_PERFORMANCE_MBPS = 60
+/** Download speed (Mbps) at or below this → Performance (speedtest band 0–150 Mbps inclusive). */
+export const SPEED_THRESHOLD_BALANCE_MBPS = 150
 
-/** Download speed (Mbps) above this → Quality profile; between performance and this → Balance. */
-export const SPEED_THRESHOLD_QUALITY_MBPS = 150
+/** Download speed (Mbps) above this → Quality; above {@link SPEED_THRESHOLD_BALANCE_MBPS} through here → Balance. */
+export const SPEED_THRESHOLD_QUALITY_MBPS = 300
 
-/** @deprecated Use SPEED_THRESHOLD_PERFORMANCE_MBPS */
-export const SPEED_THRESHOLD_BALANCE_MBPS = SPEED_THRESHOLD_PERFORMANCE_MBPS
+/** @deprecated Use {@link SPEED_THRESHOLD_BALANCE_MBPS} */
+export const SPEED_THRESHOLD_PERFORMANCE_MBPS = SPEED_THRESHOLD_BALANCE_MBPS
 
 export function profileIdFromSpeedMbps(mbps: number | null | undefined): StreamProfileId {
     if (mbps == null || !Number.isFinite(mbps)) {
         return "balance"
     }
-    if (mbps < SPEED_THRESHOLD_PERFORMANCE_MBPS) {
+    if (mbps <= SPEED_THRESHOLD_BALANCE_MBPS) {
         return "performance"
     }
     if (mbps <= SPEED_THRESHOLD_QUALITY_MBPS) {

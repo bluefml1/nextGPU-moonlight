@@ -408,6 +408,7 @@ function formatTransferBytes(n: number): string {
 class ViewerApp implements Component {
     private static readonly KEY_WATCHDOG_INTERVAL_MS = 350
     private static readonly HUD_TRAY_DRAG_THRESHOLD_PX = 6
+    private static readonly BITRATE_APPLY_DISMISS_MS = 10000
     private api: Api
     private hostId: number
     private appId: number
@@ -493,6 +494,9 @@ class ViewerApp implements Component {
     private virtualControllerOverlay: VirtualControllerOverlay
     private fullscreenToggleButton: HTMLButtonElement | null = null
     private overlayHudTray: HTMLDivElement | null = null
+    private overlayHudCluster: HTMLDivElement | null = null
+    private overlayBitrateApplyBtn: HTMLButtonElement | null = null
+    private overlayBitrateApplyDismissTimer: ReturnType<typeof setTimeout> | null = null
     private overlayBitrateRange: HTMLInputElement | null = null
     private realtimeBitrateHud: RealtimeBitrateHud | null = null
     private statsControlsGroup: HTMLDivElement | null = null
@@ -632,9 +636,47 @@ class ViewerApp implements Component {
         await this.requestFullscreen()
     }
 
+    private getOverlayHudDragEl(): HTMLDivElement | null {
+        return this.overlayHudCluster ?? this.overlayHudTray
+    }
+
+    private clearBitrateApplyDismissTimer(): void {
+        if (this.overlayBitrateApplyDismissTimer !== null) {
+            clearTimeout(this.overlayBitrateApplyDismissTimer)
+            this.overlayBitrateApplyDismissTimer = null
+        }
+    }
+
+    private syncOverlayBitrateApplyButton(dirty: boolean): void {
+        const btn = this.overlayBitrateApplyBtn
+        if (!btn) return
+        btn.hidden = !dirty
+        this.clearBitrateApplyDismissTimer()
+        if (!dirty) return
+        this.overlayBitrateApplyDismissTimer = setTimeout(() => {
+            this.overlayBitrateApplyDismissTimer = null
+            this.dismissPendingOverlayBitrate()
+        }, ViewerApp.BITRATE_APPLY_DISMISS_MS)
+    }
+
+    private dismissPendingOverlayBitrate(): void {
+        const hud = this.realtimeBitrateHud
+        if (!hud) return
+        hud.revertToCommitted()
+        if (this.overlayBitrateApplyBtn) {
+            this.overlayBitrateApplyBtn.hidden = true
+        }
+    }
+
+    private onBitrateHudPendingChange(): void {
+        const hud = this.realtimeBitrateHud
+        if (!hud || hud.getPendingMbps() === hud.getCommittedMbps()) return
+        this.syncOverlayBitrateApplyButton(true)
+    }
+
     private syncFullscreenToggleButtonPosition() {
         const button = this.fullscreenToggleButton
-        const tray = this.overlayHudTray
+        const tray = this.getOverlayHudDragEl()
         if (!button) return
         if (!tray) {
             if (isPhoneLikeDevice()) {
@@ -654,9 +696,9 @@ class ViewerApp implements Component {
         }
         const statsVisible = !this.statsDiv.hidden && !this.statsClosed
         const topBarHeight = this.statsTopBar.getBoundingClientRect().height
-        const targetSize = statsVisible
-            ? Math.round(Math.min(56, Math.max(28, topBarHeight || 36)))
-            : 36
+        const toolbarHeight = this.overlayHudToolbar?.getBoundingClientRect().height ?? 0
+        const rowHeight = statsVisible ? topBarHeight : toolbarHeight
+        const targetSize = Math.round(Math.min(56, Math.max(28, rowHeight || 30)))
         if (!isPhoneLikeDevice()) {
             button.style.width = `${targetSize}px`
             button.style.minWidth = `${targetSize}px`
@@ -706,6 +748,10 @@ class ViewerApp implements Component {
     private async applyOverlayBitrate(mbps: number): Promise<void> {
         const hud = this.realtimeBitrateHud
         if (!hud) return
+        this.clearBitrateApplyDismissTimer()
+        if (this.overlayBitrateApplyBtn) {
+            this.overlayBitrateApplyBtn.hidden = true
+        }
         const settings = getSettingsForApp(this.getAppId())
         const tier = getBitrateTierForSettings(settings)
         const snapped = snapBitrateMbpsForTier(mbps, tier)
@@ -713,11 +759,17 @@ class ViewerApp implements Component {
         setSettingsForApp(this.getAppId(), settings)
         hud.setApplyBusy(true)
         hud.setDisabled(true)
+        if (this.overlayBitrateApplyBtn) {
+            this.overlayBitrateApplyBtn.disabled = true
+        }
         try {
             await this.restartStreamWithNewSettings(settings)
             hud.setCommitted(snapped)
         } finally {
             hud.setApplyBusy(false)
+            if (this.overlayBitrateApplyBtn) {
+                this.overlayBitrateApplyBtn.disabled = false
+            }
             if (this.hasConnectedOnce || this.stream != null) {
                 hud.setDisabled(false)
             }
@@ -753,7 +805,7 @@ class ViewerApp implements Component {
     }
 
     private startHudTrayDrag(event: PointerEvent, captureEl: HTMLElement): void {
-        const hudTray = this.overlayHudTray
+        const hudTray = this.getOverlayHudDragEl()
         if (!hudTray || event.button !== 0) return
         if (this.hudTrayDragPointerId !== null) return
         this.fullscreenToggleButtonDragging = true
@@ -777,7 +829,7 @@ class ViewerApp implements Component {
 
     private readonly onHudTrayDragPointerMove = (event: PointerEvent): void => {
         if (this.hudTrayDragPointerId === null || event.pointerId !== this.hudTrayDragPointerId) return
-        const hudTray = this.overlayHudTray
+        const hudTray = this.getOverlayHudDragEl()
         if (!hudTray) return
         event.preventDefault()
         event.stopPropagation()
@@ -827,6 +879,9 @@ class ViewerApp implements Component {
         if (this.fullscreenToggleButton) return
         this.ensureStatsControlsGroup()
 
+        const hudCluster = document.createElement("div")
+        hudCluster.classList.add("video-overlay-hud-cluster")
+
         const hudTray = document.createElement("div")
         hudTray.classList.add("video-overlay-hud-tray")
         const toolbar = document.createElement("div")
@@ -856,7 +911,8 @@ class ViewerApp implements Component {
             maxMbps: bitrateTier.maxMbps,
             defaultMbps: bitrateTier.defaultMbps,
             committedMbps,
-            onApply: (mbps) => this.applyOverlayBitrate(mbps),
+            onPendingChange: () => this.onBitrateHudPendingChange(),
+            onDirtyChange: (dirty) => this.syncOverlayBitrateApplyButton(dirty),
             onCloseRequested: () => {
                 const s = getSettingsForApp(this.getAppId())
                 s.showStreamBitrateHud = false
@@ -912,16 +968,37 @@ class ViewerApp implements Component {
             void this.toggleFullscreenFromButton()
         })
 
+        const bitrateApplyBtn = document.createElement("button")
+        bitrateApplyBtn.type = "button"
+        bitrateApplyBtn.className = "video-overlay-bitrate-apply"
+        bitrateApplyBtn.textContent = streamT("bitrateHud.apply")
+        bitrateApplyBtn.setAttribute("aria-label", streamT("bitrateHud.aria.apply"))
+        bitrateApplyBtn.title = streamT("bitrateHud.aria.apply")
+        bitrateApplyBtn.hidden = true
+        bitrateApplyBtn.addEventListener("click", (e) => {
+            e.stopPropagation()
+            const hud = this.realtimeBitrateHud
+            if (!hud || bitrateApplyBtn.disabled) return
+            if (hud.getPendingMbps() === hud.getCommittedMbps()) return
+            void this.applyOverlayBitrate(hud.getPendingMbps())
+        })
+        bitrateApplyBtn.addEventListener("pointerdown", (e) => e.stopPropagation())
+
         toolbar.appendChild(dragHandle)
         toolbar.appendChild(bitrateHud.root)
-        toolbar.appendChild(qualityBtn)
+        toolbar.appendChild(bitrateApplyBtn)
         toolbar.appendChild(statsBtn)
         toolbar.appendChild(button)
+        toolbar.appendChild(qualityBtn)
         hudTray.appendChild(toolbar)
         hudTray.appendChild(statsSlot)
 
-        this.statsControlsGroup?.appendChild(hudTray)
+        hudCluster.appendChild(hudTray)
+
+        this.statsControlsGroup?.appendChild(hudCluster)
+        this.overlayHudCluster = hudCluster
         this.overlayHudTray = hudTray
+        this.overlayBitrateApplyBtn = bitrateApplyBtn
         this.overlayHudToolbar = toolbar
         this.overlayHudStatsSlot = statsSlot
         this.overlayHudDragHandle = dragHandle
@@ -1452,7 +1529,9 @@ class ViewerApp implements Component {
         } else {
             this.statsControlsGroup?.appendChild(this.statsDiv)
         }
-        if (this.overlayHudTray) {
+        if (this.overlayHudCluster) {
+            this.statsControlsGroup?.appendChild(this.overlayHudCluster)
+        } else if (this.overlayHudTray) {
             this.statsControlsGroup?.appendChild(this.overlayHudTray)
         } else if (this.fullscreenToggleButton) {
             this.statsControlsGroup?.appendChild(this.fullscreenToggleButton)
@@ -2062,6 +2141,8 @@ class ViewerApp implements Component {
         if (targetElement.closest(".ml-virtual-controller")) return true
         if (targetElement.closest(".ml-rt-bitrate")) return true
         if (targetElement.closest(".video-overlay-hud-tray")) return true
+        if (targetElement.closest(".video-overlay-hud-cluster")) return true
+        if (targetElement.closest(".video-overlay-bitrate-apply")) return true
         if (targetElement.closest(".video-fullscreen-toggle-btn")) return true
         if (targetElement.closest(".modal-video-connect")) return true
         if (targetElement.closest(".modal-settings-panel")) return true
@@ -2670,7 +2751,10 @@ class ViewerApp implements Component {
             this.hudTrayDragCaptureEl = null
             this.fullscreenToggleButtonDragging = false
         }
-        if (this.overlayHudTray?.parentElement) {
+        this.clearBitrateApplyDismissTimer()
+        if (this.overlayHudCluster?.parentElement) {
+            this.overlayHudCluster.parentElement.removeChild(this.overlayHudCluster)
+        } else if (this.overlayHudTray?.parentElement) {
             this.overlayHudTray.parentElement.removeChild(this.overlayHudTray)
         } else if (this.fullscreenToggleButton?.parentElement) {
             this.fullscreenToggleButton.parentElement.removeChild(this.fullscreenToggleButton)
@@ -2686,6 +2770,8 @@ class ViewerApp implements Component {
         this.controllerFallbackButton = null
         this.fullscreenToggleButton = null
         this.overlayHudTray = null
+        this.overlayHudCluster = null
+        this.overlayBitrateApplyBtn = null
         this.overlayHudToolbar = null
         this.overlayHudStatsSlot = null
         this.hudTrayQualityRestoreBtn = null
