@@ -107,6 +107,12 @@ pub struct CliConfig {
     pub log_file: Option<String>,
     #[arg(long, env = "STREAMER_PATH")]
     pub streamer_path: Option<String>,
+    /// Windows: path to `startSession.ps1` (see `start_session_script_path` in config).
+    #[arg(long, env = "START_SESSION_SCRIPT_PATH")]
+    pub start_session_script_path: Option<String>,
+    /// Windows: path to `cancelSession.ps1` (see `cancel_session_script_path` in config).
+    #[arg(long, env = "CANCEL_SESSION_SCRIPT_PATH")]
+    pub cancel_session_script_path: Option<String>,
     /// Disables the STUN ice server which are bundled by default.
     /// This only disables the generation of them in the first config.
     /// After the config.json has been generated the ice servers in the config will be used regardless if this is set.
@@ -177,6 +183,12 @@ impl CliConfig {
         }
         if let Some(streamer_path) = self.streamer_path {
             config.streamer_path = streamer_path;
+        }
+        if let Some(start_session_script_path) = self.start_session_script_path {
+            config.start_session_script_path = Some(start_session_script_path);
+        }
+        if let Some(cancel_session_script_path) = self.cancel_session_script_path {
+            config.cancel_session_script_path = Some(cancel_session_script_path);
         }
         if self.disable_default_webrtc_ice_servers {
             config

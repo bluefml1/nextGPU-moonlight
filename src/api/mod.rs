@@ -35,7 +35,9 @@ use common::api_bindings::{
 
 pub mod admin;
 pub mod auth;
+pub mod cancel_session;
 pub mod machine_info;
+pub mod start_session;
 pub mod stream;
 
 pub mod response_streaming;

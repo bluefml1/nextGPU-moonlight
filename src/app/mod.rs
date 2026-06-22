@@ -2,13 +2,15 @@ use std::{
     collections::HashMap,
     io,
     ops::Deref,
+    path::PathBuf,
     sync::{Arc, Weak},
 };
 
 use actix_web::{ResponseError, http::StatusCode, web::Bytes};
+
 use common::{
     config::Config,
-    domain_txt::{load_domain_txt_identity, DomainTxtIdentity},
+    domain_txt::{discover_domain_txt_path, load_domain_txt_identity, DomainTxtIdentity},
 };
 use hex::FromHexError;
 use log::{error, warn};
@@ -128,10 +130,13 @@ impl AppRef {
 
 struct AppInner {
     config: Config,
+    /// Resolved path to host `domain.txt` (shared with startSession.ps1).
+    domain_txt_path: Option<PathBuf>,
     /// From host `domain.txt` for stream labels and profile-gate API identity.
     domain_txt_identity: Option<DomainTxtIdentity>,
     storage: Arc<dyn Storage + Send + Sync>,
     app_image_cache: RwLock<HashMap<(UserId, HostId, AppId), Bytes>>,
+    stream_sessions: crate::stream_sessions::StreamSessionRegistry,
 }
 
 pub type MoonlightClient = TokioHyperClient;
@@ -142,13 +147,17 @@ pub struct App {
 
 impl App {
     pub async fn new(config: Config) -> Result<Self, anyhow::Error> {
+        let domain_txt_path =
+            discover_domain_txt_path(config.web_server.domain_txt_path.as_deref());
         let domain_txt_identity =
             load_domain_txt_identity(config.web_server.domain_txt_path.as_deref());
         let app = AppInner {
             storage: create_storage(config.data_storage.clone()).await?,
             config,
+            domain_txt_path,
             domain_txt_identity,
             app_image_cache: Default::default(),
+            stream_sessions: Default::default(),
         };
 
         Ok(Self {
@@ -166,8 +175,20 @@ impl App {
         &self.inner.config
     }
 
+    pub fn domain_txt_path(&self) -> Option<&PathBuf> {
+        self.inner.domain_txt_path.as_ref()
+    }
+
     pub fn domain_txt_identity(&self) -> Option<&DomainTxtIdentity> {
         self.inner.domain_txt_identity.as_ref()
+    }
+
+    pub fn stream_sessions(&self) -> &crate::stream_sessions::StreamSessionRegistry {
+        &self.inner.stream_sessions
+    }
+
+    pub async fn cancel_stream_sessions(&self, host_id: HostId) {
+        self.inner.stream_sessions.cancel_host(host_id).await;
     }
 
     /// Handles all logic related to adding the first user:

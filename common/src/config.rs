@@ -25,6 +25,14 @@ pub struct Config {
     pub moonlight: MoonlightConfig,
     #[serde(default = "default_streamer_path")]
     pub streamer_path: String,
+    /// Windows: `startSession.ps1` path before spawning the streamer. When omitted, auto-resolves
+    /// from `%ProgramFiles%\\Sunshine\\script\\startSession.ps1` (then other Sunshine install paths).
+    #[serde(default)]
+    pub start_session_script_path: Option<String>,
+    /// Windows: `cancelSession.ps1` path after `POST /host/cancel` (rental user wipe). When omitted, auto-resolves from
+    /// `%ProgramFiles%\\Sunshine\\script(s)\\cancelSession.ps1` (then other Sunshine install paths).
+    #[serde(default)]
+    pub cancel_session_script_path: Option<String>,
     #[serde(default)]
     pub log: LogConfig,
     #[serde(default)]
@@ -36,6 +44,8 @@ impl Default for Config {
         Self {
             data_storage: Default::default(),
             streamer_path: default_streamer_path(),
+            start_session_script_path: None,
+            cancel_session_script_path: None,
             web_server: Default::default(),
             moonlight: Default::default(),
             webrtc: Default::default(),
@@ -241,8 +251,9 @@ pub struct WebServerConfig {
     pub first_login_assign_global_hosts: bool,
     pub default_user_id: Option<u32>,
     pub forwarded_header: Option<ForwardedHeaders>,
-    /// Path to NextGPU `domain.txt` relative to the web-server cwd, or absolute.
-    #[serde(default = "default_domain_txt_path")]
+    /// Optional override for `domain.txt`. When omitted, Moonlight discovers it automatically
+    /// (`../domain.txt` from cwd, then `%ProgramData%\\nextGPU\\domain.txt`, etc.).
+    #[serde(default)]
     pub domain_txt_path: Option<String>,
     /// Base URL for `getMachineInfor` (browser profile gate).
     #[serde(default = "default_machine_info_api_base")]
@@ -267,14 +278,10 @@ impl Default for WebServerConfig {
             first_login_assign_global_hosts: true,
             default_user_id: None,
             forwarded_header: None,
-            domain_txt_path: default_domain_txt_path(),
+            domain_txt_path: None,
             machine_info_api_base: default_machine_info_api_base(),
         }
     }
-}
-
-fn default_domain_txt_path() -> Option<String> {
-    Some("../domain.txt".to_string())
 }
 
 fn default_machine_info_api_base() -> String {

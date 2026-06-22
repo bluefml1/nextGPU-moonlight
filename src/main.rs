@@ -38,6 +38,7 @@ use crate::{
 
 mod api;
 mod app;
+mod stream_sessions;
 mod web;
 
 mod cli;

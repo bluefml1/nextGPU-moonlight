@@ -488,6 +488,8 @@ pub enum StreamServerMessage {
     ConnectionTerminated {
         error_code: i32,
     },
+    /// Host session was cancelled via `POST /host/cancel`; client must leave the stream page.
+    SessionCancelled,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS)]

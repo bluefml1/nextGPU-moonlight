@@ -30,10 +30,14 @@ use tokio::{
 };
 use tracing::{Level, instrument, span};
 
-use crate::app::{
-    App, AppError,
-    host::{AppId, HostId},
-    user::AuthenticatedUser,
+use crate::{
+    api::{cancel_session, start_session},
+    app::{
+        App, AppError,
+        host::{AppId, HostId},
+        user::AuthenticatedUser,
+    },
+    stream_sessions::StreamSessionGuard,
 };
 
 #[get("/host/stream")]
@@ -91,6 +95,16 @@ pub async fn start_host(
 
         let host_id = HostId(host_id);
         let app_id = AppId(app_id);
+
+        let stream_session_id = web_app
+            .stream_sessions()
+            .register(host_id, session.clone())
+            .await;
+        let _stream_session_guard = StreamSessionGuard::new(
+            web_app.stream_sessions().clone(),
+            host_id,
+            stream_session_id,
+        );
 
         // -- Collect host data
         let mut host = match user.host(host_id).await {
@@ -200,6 +214,38 @@ pub async fn start_host(
             StreamServerMessage::UpdateApp { app: app.into() },
         )
         .await;
+
+        if let Some(script_path) = start_session::resolve_start_session_script(web_app.config()) {
+            let _ = send_ws_message(
+                &mut session,
+                StreamServerMessage::DebugLog {
+                    message: "Preparing nextGPU session...".to_string(),
+                    ty: None,
+                },
+            )
+            .await;
+
+            if let Err(err) =
+                start_session::run_start_session(
+                    &script_path,
+                    web_app.domain_txt_path().map(|path| path.as_path()),
+                )
+                .await
+            {
+                warn!("[StartSession]: prep failed for host {host_id:?}: {err}");
+
+                let _ = send_ws_message(
+                    &mut session,
+                    StreamServerMessage::DebugLog {
+                        message: format!("Session prep failed: {err}"),
+                        ty: Some(LogMessageType::FatalDescription),
+                    },
+                )
+                .await;
+                let _ = session.close(None).await;
+                return;
+            }
+        }
 
         // -- Starting stage: launch streamer
         let _ = send_ws_message(
@@ -374,18 +420,43 @@ async fn send_ws_message(sender: &mut Session, message: StreamServerMessage) -> 
     sender.text(json).await
 }
 
+/// Ends the host app session and runs `cancelSession.ps1` to wipe the rental user.
+/// Sunshine `endSession.ps1` may also run on disconnect from `cancel_app()`.
+/// Only invoked by an explicit client `POST /host/cancel` — never from `startSession` or stream teardown.
 #[post("/host/cancel")]
 pub async fn cancel_host(
+    web_app: Data<App>,
     mut user: AuthenticatedUser,
     Json(request): Json<PostCancelRequest>,
 ) -> Result<Json<PostCancelResponse>, AppError> {
     let host_id = HostId(request.host_id);
 
+    // Push SessionCancelled to every open stream tab before tearing down the host session.
+    web_app.cancel_stream_sessions(host_id).await;
+
     let mut host = user.host(host_id).await?;
 
-    host.cancel_app(&mut user).await?;
+    if let Err(err) = host.cancel_app(&mut user).await {
+        warn!("[CancelSession]: cancel_app failed (continuing with cancelSession.ps1): {err}");
+    }
 
-    Ok(Json(PostCancelResponse { success: true }))
+    let Some(script_path) = cancel_session::resolve_cancel_session_script(web_app.config()) else {
+        warn!("[CancelSession]: cancelSession.ps1 not configured");
+        return Ok(Json(PostCancelResponse { success: false }));
+    };
+
+    match cancel_session::run_cancel_session(
+        &script_path,
+        web_app.domain_txt_path().map(|path| path.as_path()),
+    )
+    .await
+    {
+        Ok(()) => Ok(Json(PostCancelResponse { success: true })),
+        Err(err) => {
+            warn!("[CancelSession]: {err}");
+            Ok(Json(PostCancelResponse { success: false }))
+        }
+    }
 }
 
 fn host_user_profile() -> PathBuf {
