@@ -64,6 +64,7 @@ use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt, util::S
 use crate::{
     audio::StreamAudioDecoder,
     dynamic_ice_servers::load_dynamic_ice_servers,
+    keyboard_locks::{host_keyboard_locks_for_query, read_host_keyboard_locks},
     transport::{
         InboundPacket, OutboundPacket, TransportError, TransportEvent, TransportEvents,
         TransportSender, web_socket,
@@ -133,6 +134,7 @@ mod audio;
 mod buffer;
 mod convert;
 mod dynamic_ice_servers;
+mod keyboard_locks;
 mod transport;
 mod video;
 
@@ -762,6 +764,25 @@ impl StreamConnection {
                         });
                         None
                     }
+                    GeneralClientMessage::QueryKeyboardLocks => {
+                        let locks = host_keyboard_locks_for_query();
+                        drop(stream_lock);
+                        let this = Arc::clone(self);
+                        spawn(async move {
+                            this.try_send_packet(
+                                OutboundPacket::General {
+                                    message: GeneralServerMessage::KeyboardLocks {
+                                        caps_lock: locks.caps_lock,
+                                        num_lock: locks.num_lock,
+                                    },
+                                },
+                                "keyboard locks",
+                                true,
+                            )
+                            .await;
+                        });
+                        None
+                    }
                 }
             }
             InboundPacket::MousePosition {
@@ -1165,6 +1186,7 @@ impl StreamConnection {
 
         let capabilities = StreamCapabilities {
             touch: host_features.contains(HostFeatures::PEN_TOUCH_EVENTS),
+            keyboard_locks: read_host_keyboard_locks(),
         };
 
         let (video_setup, audio_setup) = {

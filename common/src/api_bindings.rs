@@ -420,10 +420,19 @@ impl Display for RtcIceServer {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, TS, Clone, Copy)]
+#[ts(export, export_to = EXPORT_PATH)]
+pub struct HostKeyboardLocks {
+    pub caps_lock: bool,
+    pub num_lock: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, TS)]
 #[ts(export, export_to = EXPORT_PATH)]
 pub struct StreamCapabilities {
     pub touch: bool,
+    #[serde(default)]
+    pub keyboard_locks: Option<HostKeyboardLocks>,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS, Clone)]
@@ -501,6 +510,8 @@ pub enum GeneralServerMessage {
     BitrateApplied { bitrate_kbps: u32 },
     /// Sunshine ml-stream-bitrate could not be applied (`reason` is a short code or message).
     BitrateRejected { bitrate_kbps: u32, reason: String },
+    /// Host Caps Lock / Num Lock state (Windows `GetKeyState`).
+    KeyboardLocks { caps_lock: bool, num_lock: bool },
 }
 
 #[derive(Serialize, Deserialize, Debug, TS)]
@@ -509,6 +520,8 @@ pub enum GeneralClientMessage {
     Stop,
     /// Realtime target encode bitrate while on WebRTC (sent on the `general` data channel).
     SetVideoBitrate { bitrate_kbps: u32 },
+    /// Request current host Caps Lock / Num Lock state.
+    QueryKeyboardLocks,
 }
 
 #[derive(Serialize, Deserialize, Debug, TS)]
