@@ -1,4 +1,5 @@
 import { Api } from "../api.js"
+import { buildHostCursorFrame, HostCursorFrame, isHostCursorHidden } from "../host_cursor_frame.js"
 import { App, ConnectionStatus, GeneralClientMessage, GeneralServerMessage, StreamCapabilities, StreamClientMessage, StreamServerMessage, TransportChannelId } from "../api_bindings.js"
 import { showErrorPopup } from "../component/error.js"
 import { localizeStreamLogMessage, streamDebugLine, streamT } from "../stream_locale.js"
@@ -34,6 +35,7 @@ export type InfoEvent = CustomEvent<
     { type: "connectionStatus", status: ConnectionStatus } |
     { type: "addDebugLine", line: string, additional?: LogMessageInfo } |
     { type: "hostCursorHidden", hidden: boolean } |
+    { type: "hostCursorShape", frame: HostCursorFrame | null } |
     { type: "fileTransferProgress", percent: number, loaded?: number, total?: number, source?: "file" | "clipboard" } |
     { type: "fileTransferProgressEnd", source?: "file" | "clipboard" } |
     { type: "bitrateRequestApplied", mbps: number, source: VideoBitrateChangeSource } |
@@ -487,13 +489,17 @@ export class Stream implements Component {
         hotspot_y: number
         rgba: Array<number>
     }) {
-        const hostCursorHidden = !cursor.visible || cursor.width <= 0 || cursor.height <= 0 || cursor.rgba.length == 0
+        const hostCursorHidden = isHostCursorHidden(cursor)
         if (hostCursorHidden != this.lastEmittedHostCursorHidden) {
             this.lastEmittedHostCursorHidden = hostCursorHidden
             const event: InfoEvent = new CustomEvent("stream-info", {
                 detail: { type: "hostCursorHidden", hidden: hostCursorHidden },
             })
             this.eventTarget.dispatchEvent(event)
+            const shapeEvent: InfoEvent = new CustomEvent("stream-info", {
+                detail: { type: "hostCursorShape", frame: null },
+            })
+            this.eventTarget.dispatchEvent(shapeEvent)
         }
 
         if (hostCursorHidden) {
@@ -502,63 +508,24 @@ export class Stream implements Component {
             return
         }
 
-        // Most browsers cap custom cursor bitmaps around 128x128 px.
-        const maxCursorSize = 128
-        const renderWidth = Math.min(cursor.width, maxCursorSize)
-        const renderHeight = Math.min(cursor.height, maxCursorSize)
-
-        // Compact checksum for update dedupe.
-        let checksum = 2166136261 >>> 0
-        for (let i = 0; i < cursor.rgba.length; i++) {
-            checksum ^= (cursor.rgba[i] ?? 0) & 0xff
-            checksum = Math.imul(checksum, 16777619) >>> 0
+        const frame = buildHostCursorFrame(cursor)
+        if (!frame) {
+            return
         }
-        const signature = `${cursor.width}x${cursor.height}:${cursor.hotspot_x},${cursor.hotspot_y}:${cursor.rgba.length}:${checksum}`
-        if (signature === this.lastCursorSignature) {
+        if (frame.signature === this.lastCursorSignature) {
             return
         }
 
-        const canvas = document.createElement("canvas")
-        canvas.width = cursor.width
-        canvas.height = cursor.height
-        const ctx = canvas.getContext("2d")
-        if (!ctx) {
-            return
-        }
-
-        const imageData = ctx.createImageData(cursor.width, cursor.height)
-        const rgba = cursor.rgba
-        const maxLen = Math.min(imageData.data.length, rgba.length)
-        for (let i = 0; i < maxLen; i++) {
-            imageData.data[i] = rgba[i]
-        }
-        ctx.putImageData(imageData, 0, 0)
-
-        let outputDataUrl = canvas.toDataURL("image/png")
-        let hotspotX = cursor.hotspot_x
-        let hotspotY = cursor.hotspot_y
-
-        if (renderWidth != cursor.width || renderHeight != cursor.height) {
-            const scaled = document.createElement("canvas")
-            scaled.width = renderWidth
-            scaled.height = renderHeight
-            const scaledCtx = scaled.getContext("2d")
-            if (scaledCtx) {
-                scaledCtx.drawImage(canvas, 0, 0, renderWidth, renderHeight)
-                outputDataUrl = scaled.toDataURL("image/png")
-                hotspotX = Math.round((cursor.hotspot_x * renderWidth) / cursor.width)
-                hotspotY = Math.round((cursor.hotspot_y * renderHeight) / cursor.height)
-            }
-        }
-
-        hotspotX = Math.max(0, Math.min(hotspotX, renderWidth - 1))
-        hotspotY = Math.max(0, Math.min(hotspotY, renderHeight - 1))
-
-        this.divElement.style.cursor = `url('${outputDataUrl}') ${hotspotX} ${hotspotY}, auto`
-        this.lastCursorSignature = signature
+        this.divElement.style.cursor = `url('${frame.dataUrl}') ${frame.hotspotX} ${frame.hotspotY}, auto`
+        this.lastCursorSignature = frame.signature
         this.debugLog(
-            `[CursorShape] applied ${cursor.width}x${cursor.height} -> ${renderWidth}x${renderHeight} hotspot(${hotspotX},${hotspotY}) checksum=${checksum}`
+            `[CursorShape] applied ${frame.sourceWidth}x${frame.sourceHeight} -> ${frame.renderWidth}x${frame.renderHeight} hotspot(${frame.hotspotX},${frame.hotspotY})`
         )
+
+        const shapeEvent: InfoEvent = new CustomEvent("stream-info", {
+            detail: { type: "hostCursorShape", frame },
+        })
+        this.eventTarget.dispatchEvent(shapeEvent)
     }
 
     async startConnection() {

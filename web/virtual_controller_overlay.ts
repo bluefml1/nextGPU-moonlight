@@ -9,6 +9,10 @@ const SETTINGS_FAB_POS_KEY = "ml.virtualController.settingsFab.v1"
 const DRAG_THRESHOLD_PX = 6
 const LISTEN_CANCEL_KEYS = new Set(["Escape"])
 const STICK_KEY_DEADZONE = 0.2
+/** Default translucent face / stick background alpha (0–1). */
+const DEFAULT_BG_OPACITY = 0.58
+const MIN_BG_OPACITY = 0
+const MAX_BG_OPACITY = 1
 /** Reliable pressed styling on touch (not only :hover / :active). */
 const FACE_PRESSED_CLASS = "ml-virtual-controller-face--pressed"
 
@@ -63,6 +67,8 @@ export interface VirtualControlDef {
 export interface VirtualLayoutFile {
     version: 1 | 2
     controls: VirtualControlDef[]
+    /** Face / stick background opacity (0–1). */
+    bgOpacity?: number
 }
 
 export type VirtualControllerDeps = {
@@ -195,9 +201,9 @@ function defaultLayout(): VirtualLayoutFile {
             { id: "sl", role: "stickL", rect: { x: 0.22, y: 0.62, w: 0.18, h: 0.2 }, enabled: true },
             { id: "sr", role: "stickR", rect: { x: 0.6, y: 0.62, w: 0.18, h: 0.2 }, enabled: true },
             { id: "sel", role: "select", rect: { x: 0.06, y: 0.68, w: 0.10, h: 0.07 }, enabled: true },
-            { id: "spec", role: "special", rect: { x: 0.44, y: 0.68, w: 0.10, h: 0.07 }, enabled: true },
             { id: "sta", role: "start", rect: { x: 0.84, y: 0.68, w: 0.10, h: 0.07 }, enabled: true },
         ],
+        bgOpacity: DEFAULT_BG_OPACITY,
     }
 }
 
@@ -223,6 +229,12 @@ const KNOWN_ROLES = new Set<VirtualControlRole>([
     "custom",
 ])
 
+function clampBgOpacity(v: unknown): number {
+    const n = typeof v === "number" ? v : DEFAULT_BG_OPACITY
+    if (!Number.isFinite(n)) return DEFAULT_BG_OPACITY
+    return Math.max(MIN_BG_OPACITY, Math.min(MAX_BG_OPACITY, n))
+}
+
 function migrateLayout(raw: unknown): VirtualLayoutFile {
     const o = raw as Partial<VirtualLayoutFile>
     if (!o || (o.version !== 1 && o.version !== 2) || !Array.isArray(o.controls)) {
@@ -231,6 +243,8 @@ function migrateLayout(raw: unknown): VirtualLayoutFile {
     const controls: VirtualControlDef[] = []
     for (const c of o.controls as VirtualControlDef[]) {
         if (!c?.id || !c.role || !c.rect || !KNOWN_ROLES.has(c.role)) continue
+        // Drop guide/home (special) from layouts — removed from HUD defaults.
+        if (c.role === "special") continue
         const next: VirtualControlDef = {
             id: c.id,
             role: c.role,
@@ -245,7 +259,7 @@ function migrateLayout(raw: unknown): VirtualLayoutFile {
         controls.push(next)
     }
     if (controls.length === 0) return defaultLayout()
-    return { version: 2, controls }
+    return { version: 2, controls, bgOpacity: clampBgOpacity(o.bgOpacity) }
 }
 
 function loadLayout(): VirtualLayoutFile {
@@ -259,7 +273,11 @@ function loadLayout(): VirtualLayoutFile {
 }
 
 function saveLayout(layout: VirtualLayoutFile): void {
-    const toSave: VirtualLayoutFile = { version: 2, controls: layout.controls }
+    const toSave: VirtualLayoutFile = {
+        version: 2,
+        controls: layout.controls,
+        bgOpacity: clampBgOpacity(layout.bgOpacity),
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave))
 }
 
@@ -390,6 +408,10 @@ export class VirtualControllerOverlay {
     private addPickCancel = document.createElement("button")
     private resetBtn = document.createElement("button")
     private applyBtn = document.createElement("button")
+    private opacityRow = document.createElement("div")
+    private opacityLabel = document.createElement("label")
+    private opacityRange = document.createElement("input")
+    private opacityValue = document.createElement("span")
     private shroud = document.createElement("div")
     private listenHint = document.createElement("div")
 
@@ -407,14 +429,15 @@ export class VirtualControllerOverlay {
     /** Per-control knob position for {@link VirtualControlRole} `stickWasd` (each stick is independent). */
     private stickKeyVisual = new Map<string, { x: number, y: number }>()
     private stickKeyDir = new Map<string, keyof VirtualStickKeys | null>()
-    private stickDrag: null | {
+    /** Active stick drags keyed by pointerId so left/right (and WASD sticks) can move simultaneously. */
+    private stickDrags = new Map<number, {
         id: string
         role: StickDragRole
         ox: number
         oy: number
         startX: number
         startY: number
-    } = null
+    }>()
 
     private moveDrag: null | { id: string, rect0: VirtualControlRect, ptr0X: number, ptr0Y: number } = null
     private resizeDrag: null | { id: string, startW: number, startH: number, ptrX: number, ptrY: number } = null
@@ -467,10 +490,29 @@ export class VirtualControllerOverlay {
         this.applyBtn.className = "ml-virtual-controller-settings-action ml-virtual-controller-settings-action--primary"
         this.applyBtn.textContent = "Apply"
 
+        this.opacityRow.className = "ml-virtual-controller-opacity"
+        this.opacityLabel.className = "ml-virtual-controller-opacity__label"
+        this.opacityLabel.htmlFor = "ml-vc-opacity"
+        this.opacityLabel.textContent = "Opacity"
+        this.opacityRange.id = "ml-vc-opacity"
+        this.opacityRange.className = "ml-virtual-controller-opacity__range"
+        this.opacityRange.type = "range"
+        this.opacityRange.min = String(MIN_BG_OPACITY)
+        this.opacityRange.max = String(MAX_BG_OPACITY)
+        this.opacityRange.step = "0.01"
+        this.opacityRange.value = String(DEFAULT_BG_OPACITY)
+        this.opacityRange.setAttribute("aria-label", "HUD button background opacity")
+        this.opacityValue.className = "ml-virtual-controller-opacity__value"
+        this.opacityValue.textContent = `${Math.round(DEFAULT_BG_OPACITY * 100)}%`
+        this.opacityRow.appendChild(this.opacityLabel)
+        this.opacityRow.appendChild(this.opacityRange)
+        this.opacityRow.appendChild(this.opacityValue)
+
         this.shroud.className = "ml-virtual-controller-shroud"
         this.listenHint.className = "ml-virtual-controller-listen-hint"
         this.listenHint.textContent = "Tap a key on the keyboard or press a hardware key…"
 
+        this.settingsBar.appendChild(this.opacityRow)
         this.settingsBar.appendChild(this.addBtn)
         this.settingsBar.appendChild(this.resetBtn)
         this.settingsBar.appendChild(this.applyBtn)
@@ -503,9 +545,17 @@ export class VirtualControllerOverlay {
         })
         this.resetBtn.addEventListener("click", () => {
             this.layout = defaultLayout()
+            this.syncOpacitySlider()
+            this.applyBgOpacity()
             this.renderControls()
         })
         this.applyBtn.addEventListener("click", () => this.applySettings())
+        this.opacityRange.addEventListener("input", () => {
+            const v = clampBgOpacity(Number.parseFloat(this.opacityRange.value))
+            this.layout.bgOpacity = v
+            this.opacityValue.textContent = `${Math.round(v * 100)}%`
+            this.applyBgOpacity()
+        })
     }
 
     private applyStoredSettingsFabPosition(): void {
@@ -689,7 +739,7 @@ export class VirtualControllerOverlay {
         }
         this.activePress.clear()
         this.pointerDownOnControl.clear()
-        this.stickDrag = null
+        this.stickDrags.clear()
         this.moveDrag = null
         this.resizeDrag = null
         this.stickL = { x: 0, y: 0 }
@@ -713,6 +763,8 @@ export class VirtualControllerOverlay {
         window.addEventListener("keydown", this.onWindowKeyWhileListening)
         this.visible = true
         this.root.style.display = "block"
+        this.syncOpacitySlider()
+        this.applyBgOpacity()
         this.syncSettingsUi()
         this.renderControls()
         const input = this.deps.getStreamInput()
@@ -814,7 +866,7 @@ export class VirtualControllerOverlay {
             this.stickL = { x: 0, y: 0 }
             this.stickR = { x: 0, y: 0 }
             this.stickKeyVisual.clear()
-            this.stickDrag = null
+            this.stickDrags.clear()
             this.pointerDownOnControl.clear()
             this.moveDrag = null
             this.activePress.clear()
@@ -831,10 +883,28 @@ export class VirtualControllerOverlay {
         this.settingsBar.style.display = this.settingsMode ? "flex" : "none"
         this.shroud.style.display = this.settingsMode ? "block" : "none"
         this.syncAddMenu()
+        if (this.settingsMode) {
+            this.syncOpacitySlider()
+        }
+    }
+
+    private syncOpacitySlider(): void {
+        const v = clampBgOpacity(this.layout.bgOpacity)
+        this.layout.bgOpacity = v
+        this.opacityRange.value = String(v)
+        this.opacityValue.textContent = `${Math.round(v * 100)}%`
+    }
+
+    private applyBgOpacity(): void {
+        const v = clampBgOpacity(this.layout.bgOpacity)
+        this.layout.bgOpacity = v
+        this.root.style.setProperty("--ml-vc-bg-alpha", String(v))
     }
 
     private applySettings(): void {
+        this.layout.bgOpacity = clampBgOpacity(Number.parseFloat(this.opacityRange.value))
         saveLayout(this.layout)
+        this.applyBgOpacity()
         this.settingsMode = false
         this.addMenuOpen = false
         this.stopListening()
@@ -1115,11 +1185,7 @@ export class VirtualControllerOverlay {
               ? "stickWasd"
               : null
 
-        /* Combos: each control id can be in activePress; each face captures its pointer — multiple buttons, multiple pointers. Same face + two fingers still one capture target. */
-        face.addEventListener("lostpointercapture", () => {
-            face.classList.remove(FACE_PRESSED_CLASS)
-        })
-
+        /* Combos: each control id can be in activePress; stickDrags is keyed by pointerId so multiple sticks move at once. */
         face.addEventListener("contextmenu", (e) => {
             e.preventDefault()
         })
@@ -1144,14 +1210,14 @@ export class VirtualControllerOverlay {
                 const rect = (disc ?? face).getBoundingClientRect()
                 const ox = (e.clientX - rect.left) / rect.width - 0.5
                 const oy = 0.5 - (e.clientY - rect.top) / rect.height
-                this.stickDrag = {
+                this.stickDrags.set(e.pointerId, {
                     id: def.id,
                     role: stickRole,
                     ox,
                     oy,
                     startX: e.clientX,
                     startY: e.clientY,
-                }
+                })
                 face.setPointerCapture(e.pointerId)
             } else {
                 this.sendDigitalDown(def)
@@ -1185,14 +1251,15 @@ export class VirtualControllerOverlay {
                     wrap.style.top = `${def.rect.y * 100}%`
                 }
             }
-            if (this.stickDrag?.id === def.id) {
+            const drag = this.stickDrags.get(e.pointerId)
+            if (drag?.id === def.id) {
                 const disc = face.querySelector(".ml-virtual-controller-stick-disc") as HTMLElement | null
                 const rect = (disc ?? face).getBoundingClientRect()
                 const nx = (e.clientX - rect.left) / rect.width - 0.5
                 const ny = 0.5 - (e.clientY - rect.top) / rect.height
                 const mx = Math.max(-1, Math.min(1, nx * 2))
                 const my = Math.max(-1, Math.min(1, ny * 2))
-                const role = this.stickDrag.role
+                const role = drag.role
                 if (role === "stickL") {
                     this.stickL.x = mx
                     this.stickL.y = my
@@ -1221,8 +1288,9 @@ export class VirtualControllerOverlay {
         })
 
         const endStick = (e: PointerEvent) => {
-            if (this.stickDrag?.id === def.id) {
-                const role = this.stickDrag.role
+            const drag = this.stickDrags.get(e.pointerId)
+            if (drag?.id === def.id) {
+                const role = drag.role
                 if (this.settingsMode) {
                     if (role === "stickL") {
                         this.stickL.x = 0
@@ -1272,9 +1340,14 @@ export class VirtualControllerOverlay {
                         this.positionKnob(knob, v)
                     }
                 }
-                this.stickDrag = null
+                this.stickDrags.delete(e.pointerId)
             }
         }
+
+        face.addEventListener("lostpointercapture", (e: PointerEvent) => {
+            face.classList.remove(FACE_PRESSED_CLASS)
+            endStick(e)
+        })
 
         face.addEventListener("pointerup", (e) => {
             if (this.settingsMode) {

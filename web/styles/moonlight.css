@@ -2980,6 +2980,7 @@ canvas.video-stream {
 
 /* Virtual controller — mobile HUD (fixed controls, no panel). Under ScreenKeyboard (100120), above stream capture. */
 .ml-virtual-controller {
+    --ml-vc-bg-alpha: 0.58;
     position: fixed;
     inset: 0;
     z-index: 100115;
@@ -3075,6 +3076,40 @@ canvas.video-stream {
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
 }
 
+.ml-virtual-controller-opacity {
+    display: flex;
+    flex: 1 1 100%;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    min-width: min(280px, calc(100vw - 48px));
+    padding: 2px 4px 4px;
+}
+
+.ml-virtual-controller-opacity__label {
+    flex: 0 0 auto;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.ml-virtual-controller-opacity__range {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 28px;
+    margin: 0;
+    accent-color: #3f7cff;
+    touch-action: none;
+}
+
+.ml-virtual-controller-opacity__value {
+    flex: 0 0 3.2em;
+    text-align: right;
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+    color: rgba(255, 255, 255, 0.7);
+}
+
 .ml-virtual-controller-add-menu {
     display: none;
     flex: 1 1 100%;
@@ -3127,9 +3162,9 @@ canvas.video-stream {
     height: 100%;
     border-radius: 12px;
     border: 1px solid rgba(255, 255, 255, 0.16);
-    background: rgba(36, 36, 44, 0.58);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: rgba(36, 36, 44, var(--ml-vc-bg-alpha, 0.58));
+    backdrop-filter: blur(calc(8px * var(--ml-vc-bg-alpha, 0.58)));
+    -webkit-backdrop-filter: blur(calc(8px * var(--ml-vc-bg-alpha, 0.58)));
     display: flex;
     align-items: center;
     justify-content: center;
@@ -3146,35 +3181,35 @@ canvas.video-stream {
 @media (hover: hover) and (pointer: fine) {
     .ml-virtual-controller-face:hover:not(.ml-virtual-controller-face--stick) {
         border-color: rgba(255, 255, 255, 0.28);
-        background: rgba(44, 44, 54, 0.62);
+        background: rgba(44, 44, 54, calc(var(--ml-vc-bg-alpha, 0.58) * 1.14));
     }
 
     .ml-virtual-controller-stick-disc:hover {
         border-color: rgba(255, 255, 255, 0.28);
-        background: rgba(36, 40, 52, 0.62);
+        background: rgba(36, 40, 52, calc(var(--ml-vc-bg-alpha, 0.58) * 1.1));
     }
 }
 
 .ml-virtual-controller-face:active:not(.ml-virtual-controller-face--stick) {
     border-color: rgba(200, 220, 255, 0.45);
-    background: rgba(48, 52, 68, 0.68);
+    background: rgba(48, 52, 68, calc(var(--ml-vc-bg-alpha, 0.58) * 1.2));
 }
 
 .ml-virtual-controller-face--pressed:not(.ml-virtual-controller-face--stick) {
     border-color: rgba(160, 200, 255, 0.55);
-    background: rgba(52, 58, 82, 0.78);
-    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.25);
+    background: rgba(52, 58, 82, calc(var(--ml-vc-bg-alpha, 0.58) * 1.35));
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, calc(0.25 * var(--ml-vc-bg-alpha, 0.58)));
 }
 
 .ml-virtual-controller-face--stick.ml-virtual-controller-face--pressed .ml-virtual-controller-stick-disc {
     border-color: rgba(160, 200, 255, 0.55);
-    background: rgba(52, 58, 82, 0.78);
-    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.25);
+    background: rgba(52, 58, 82, calc(var(--ml-vc-bg-alpha, 0.58) * 1.35));
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, calc(0.25 * var(--ml-vc-bg-alpha, 0.58)));
 }
 
 .ml-virtual-controller-face--stick:active .ml-virtual-controller-stick-disc {
     border-color: rgba(200, 220, 255, 0.45);
-    background: rgba(48, 52, 68, 0.68);
+    background: rgba(48, 52, 68, calc(var(--ml-vc-bg-alpha, 0.58) * 1.2));
 }
 
 /* Outer rect can be non-square; disc is an inscribed circle (not an ellipse). */
@@ -3201,9 +3236,9 @@ canvas.video-stream {
     max-height: 100%;
     border-radius: 50%;
     border: 1px solid rgba(255, 255, 255, 0.16);
-    background: rgba(28, 28, 36, 0.55);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: rgba(28, 28, 36, var(--ml-vc-bg-alpha, 0.58));
+    backdrop-filter: blur(calc(8px * var(--ml-vc-bg-alpha, 0.58)));
+    -webkit-backdrop-filter: blur(calc(8px * var(--ml-vc-bg-alpha, 0.58)));
 }
 
 @supports not (width: 1cqmin) {
@@ -3294,6 +3329,24 @@ canvas.video-stream {
     cursor: pointer;
 }
 
+/* Stick: pin handles to the circle rim (not the square bounding-box corners). */
+.ml-virtual-controller-control:has(.ml-virtual-controller-face--stick) .ml-virtual-controller-handle--toggle {
+    /* NW point on circumference: 50% ± 50%/√2 */
+    top: calc(50% - 35.355%);
+    left: calc(50% - 35.355%);
+    right: auto;
+    bottom: auto;
+    transform: translate(-50%, -50%);
+}
+
+.ml-virtual-controller-control:has(.ml-virtual-controller-face--stick) .ml-virtual-controller-handle--resize {
+    top: calc(50% + 35.355%);
+    left: calc(50% + 35.355%);
+    right: auto;
+    bottom: auto;
+    transform: translate(-50%, -50%);
+}
+
 .ml-virtual-controller-handle--toggle.ml-virtual-controller-handle--off {
     border-color: rgba(255, 180, 120, 0.55);
     color: rgba(255, 210, 170, 0.95);
@@ -3352,4 +3405,223 @@ canvas.video-stream {
     .sidebar-stream .sidebar-touch-mode-row.sidebar-stream-buttons-row-triple > button {
         font-size: 0.82rem;
     }
+}
+
+/* ---- Phone radial fan FAB (flat dark overlay aesthetic) ---- */
+.ml-mobile-fab {
+    --ml-fab-primary-size: 48px;
+    --ml-fab-action-size: 40px;
+    --ml-fab-radius: 84px;
+    --ml-fab-primary: #e24b4a;
+    --ml-fab-action-bg: #14140f;
+    --ml-fab-action-border: rgba(255, 255, 255, 0.14);
+    --ml-fab-icon: rgba(255, 255, 255, 0.75);
+    --ml-fab-ease: cubic-bezier(0.4, 0, 0.2, 1);
+    --ml-fab-duration: 200ms;
+    position: fixed;
+    right: max(16px, env(safe-area-inset-right, 0px));
+    bottom: max(24px, calc(env(safe-area-inset-bottom, 0px) + 16px));
+    z-index: 210000;
+    width: var(--ml-fab-primary-size);
+    height: var(--ml-fab-primary-size);
+    pointer-events: none;
+    display: none;
+}
+
+.ml-mobile-fab--visible {
+    display: block;
+}
+
+.ml-mobile-fab__backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    cursor: default;
+    pointer-events: none;
+    opacity: 0;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.ml-mobile-fab--open .ml-mobile-fab__backdrop {
+    pointer-events: auto;
+}
+
+.ml-mobile-fab__primary,
+.ml-mobile-fab__action {
+    position: absolute;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border-radius: 50%;
+    box-shadow: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    pointer-events: auto;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* Primary: solid red anchor — always distinct from dark satellites */
+.ml-mobile-fab__primary {
+    z-index: 2;
+    right: 0;
+    bottom: 0;
+    width: var(--ml-fab-primary-size);
+    height: var(--ml-fab-primary-size);
+    border: none;
+    background: var(--ml-fab-primary);
+    color: #fff;
+    touch-action: none;
+    cursor: grab;
+    transition: transform var(--ml-fab-duration) var(--ml-fab-ease);
+}
+
+.ml-mobile-fab--dragging .ml-mobile-fab__primary {
+    cursor: grabbing;
+}
+
+.ml-mobile-fab__primary:active {
+    transform: scale(0.94);
+}
+
+.ml-mobile-fab__primary-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+}
+
+.ml-mobile-fab__primary-glyph {
+    width: 14px;
+    height: 14px;
+    display: block;
+    pointer-events: none;
+}
+
+/* Secondary: flat dark circles on equal-radius 90° fan */
+.ml-mobile-fab__action {
+    z-index: 1;
+    right: calc((var(--ml-fab-primary-size) - var(--ml-fab-action-size)) / 2);
+    bottom: calc((var(--ml-fab-primary-size) - var(--ml-fab-action-size)) / 2);
+    width: var(--ml-fab-action-size);
+    height: var(--ml-fab-action-size);
+    border: 0.5px solid var(--ml-fab-action-border);
+    background: var(--ml-fab-action-bg);
+    color: var(--ml-fab-icon);
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(0.4);
+    transition:
+        opacity var(--ml-fab-duration) var(--ml-fab-ease),
+        transform var(--ml-fab-duration) var(--ml-fab-ease),
+        border-color var(--ml-fab-duration) var(--ml-fab-ease);
+    transition-delay: 0ms;
+    pointer-events: none;
+}
+
+.ml-mobile-fab--open .ml-mobile-fab__action {
+    opacity: 1;
+    transform: translate3d(
+            calc(var(--ml-fab-x) * var(--ml-fab-radius)),
+            calc(var(--ml-fab-y) * var(--ml-fab-radius)),
+            0
+        )
+        scale(1);
+    transition-delay: calc(var(--ml-fab-i, 0) * 28ms);
+    pointer-events: auto;
+}
+
+/* Hold primary: show only last-used action for slide-to-confirm. */
+.ml-mobile-fab--quick .ml-mobile-fab__action {
+    opacity: 0;
+    pointer-events: none;
+    transition-delay: 0ms;
+}
+
+.ml-mobile-fab--quick .ml-mobile-fab__action--quick-target {
+    opacity: 1;
+    transform: translate3d(
+            calc(var(--ml-fab-x) * var(--ml-fab-radius)),
+            calc(var(--ml-fab-y) * var(--ml-fab-radius)),
+            0
+        )
+        scale(1);
+    pointer-events: none;
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+.ml-mobile-fab--quick .ml-mobile-fab__action--quick-target.ml-mobile-fab__action--quick-hover {
+    border-color: rgba(255, 255, 255, 0.7);
+    transform: translate3d(
+            calc(var(--ml-fab-x) * var(--ml-fab-radius)),
+            calc(var(--ml-fab-y) * var(--ml-fab-radius)),
+            0
+        )
+        scale(1.12);
+}
+
+.ml-mobile-fab__action:active {
+    transform: translate3d(
+            calc(var(--ml-fab-x) * var(--ml-fab-radius)),
+            calc(var(--ml-fab-y) * var(--ml-fab-radius)),
+            0
+        )
+        scale(0.94);
+}
+
+.ml-mobile-fab__action--active {
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
+.ml-mobile-fab__action-icon {
+    width: 18px;
+    height: 18px;
+    display: block;
+    pointer-events: none;
+    opacity: 0.75;
+}
+
+.ml-mobile-fab__action-icon--invert {
+    filter: brightness(0) invert(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ml-mobile-fab__primary,
+    .ml-mobile-fab__action {
+        transition: none !important;
+        transition-delay: 0ms !important;
+    }
+}
+
+/* ---- Adaptive software cursor (host cursor hidden) ---- */
+.ml-software-cursor {
+    position: fixed;
+    left: 0;
+    top: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    pointer-events: none;
+    z-index: 100050;
+    display: none;
+}
+
+.ml-software-cursor--host {
+    width: auto;
+    height: auto;
+    transform: none;
+}
+
+.ml-software-cursor__img {
+    display: block;
+    pointer-events: none;
+    image-rendering: pixelated;
 }

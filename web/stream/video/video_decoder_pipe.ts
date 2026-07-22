@@ -210,7 +210,9 @@ export class VideoDecoderPipe implements DataVideoRenderer {
                 return
             }
 
-            const { configure, chunk } = value
+            const success = value as { configure?: VideoDecoderConfig; chunk: Uint8Array<ArrayBuffer>; error: false }
+            const configure = success.configure
+            const chunk = success.chunk
 
             if (!chunk) {
                 console.debug("No chunk received!")

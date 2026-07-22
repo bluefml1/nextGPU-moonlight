@@ -5,7 +5,7 @@ import { showErrorPopup } from "./component/error.js";
 import { InfoEvent, Stream } from "./stream/index.js"
 import { getModalBackground, Modal, showMessage, showModal } from "./component/modal/index.js";
 import { getSidebarDragOffsetY, getSidebarRoot, isSidebarExtended, setSidebar, setSidebarExtended, setSidebarStyle, Sidebar } from "./component/sidebar/index.js";
-import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig } from "./stream/input.js";
+import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig, SoftwareCursorMotion } from "./stream/input.js";
 import {
     exportAppSettingsToFile,
     getSettingsForApp,
@@ -19,6 +19,8 @@ import { SelectComponent } from "./component/input.js";
 import { LogMessageType, StreamCapabilities, StreamKeys, StreamKeyModifiers } from "./api_bindings.js";
 import { ScreenKeyboard, TextEvent } from "./screen_keyboard.js";
 import { VirtualControllerOverlay } from "./virtual_controller_overlay.js";
+import { MobileFabMenu } from "./mobile_fab_menu.js";
+import { SoftwareCursor } from "./software_cursor.js";
 import { FormModal } from "./component/modal/form.js";
 import { StreamStatsData } from "./stream/stats.js";
 import { MoonlightLoadingScreen, MoonlightPointerLockOverlay } from "./stream_overlays.js";
@@ -48,6 +50,24 @@ const ENABLE_STREAM_PROFILE_GATE = true
 
 /** Persisted stream viewer mouse/touch mode (separate from `mlSettings`). */
 const ML_STREAM_INPUT_MODES_KEY = "mlStreamInputModes"
+/** Persisted stream HUD cluster visibility — phone FAB only (`"0"` / `"1"`). */
+const ML_STREAM_HUD_VISIBLE_PHONE_KEY = "ml.streamHudVisible.phone"
+/** @deprecated Migrated to {@link ML_STREAM_HUD_VISIBLE_PHONE_KEY}. */
+const ML_STREAM_HUD_VISIBLE_LEGACY_KEY = "ml.streamHudVisible"
+
+function loadPhoneStreamHudVisible(): boolean {
+    try {
+        let raw = localStorage.getItem(ML_STREAM_HUD_VISIBLE_PHONE_KEY)
+        if (raw == null) {
+            raw = localStorage.getItem(ML_STREAM_HUD_VISIBLE_LEGACY_KEY)
+        }
+        if (raw === "0") return false
+        if (raw === "1") return true
+    } catch {
+        /* ignore */
+    }
+    return true
+}
 
 function isPhoneLikeDevice(): boolean {
     try {
@@ -80,7 +100,7 @@ function mergePersistedStreamInputModes(base: StreamInputConfig): StreamInputCon
         if (o.mouseMode === "relative" || o.mouseMode === "follow" || o.mouseMode === "pointAndDrag") {
             base.mouseMode = o.mouseMode
         }
-        if (o.touchMode === "touch" || o.touchMode === "mouseRelative" || o.touchMode === "pointAndDrag") {
+        if (o.touchMode === "touch" || o.touchMode === "mouseRelative" || o.touchMode === "pointAndDrag" || o.touchMode === "mouseFollow") {
             base.touchMode = o.touchMode
         }
     } catch {
@@ -478,6 +498,7 @@ class ViewerApp implements Component {
     private quickDockPostTransitionTimer: ReturnType<typeof setTimeout> | null = null
     private readonly windowResizeForQuickDock = () => {
         this.scheduleSyncSettingsQuickButtonDock()
+        this.refreshSoftwareCursorClampRect()
     }
     private readonly sidebarBackgroundTransitionDock = (ev: Event) => {
         const te = ev as TransitionEvent
@@ -489,8 +510,9 @@ class ViewerApp implements Component {
         }
         this.syncSettingsQuickButtonDockPosition()
     }
-    private keyboardFallbackButton: HTMLButtonElement | null = null
-    private controllerFallbackButton: HTMLButtonElement | null = null
+    private mobileFabMenu: MobileFabMenu | null = null
+    private streamHudVisible = true
+    private softwareCursor = new SoftwareCursor()
     private virtualControllerOverlay: VirtualControllerOverlay
     private fullscreenToggleButton: HTMLButtonElement | null = null
     private overlayHudTray: HTMLDivElement | null = null
@@ -536,14 +558,14 @@ class ViewerApp implements Component {
         if (!button) return
         if (isPhoneLikeDevice()) {
             button.style.display = "none"
-            this.syncKeyboardFallbackButtonVisibility()
+            this.syncMobileFabMenuVisibility()
             return
         }
         // Keep quick arrow visible on touch/tablet devices in fullscreen so it can toggle keyboard.
         button.style.display = this.isFullscreen() ? "none" : "flex"
         // In fullscreen, keep arrow above any overlay layers so taps always reach it.
         button.style.zIndex = this.isFullscreen() ? "200000" : "200000"
-        this.syncKeyboardFallbackButtonVisibility()
+        this.syncMobileFabMenuVisibility()
         this.scheduleSyncSettingsQuickButtonDock()
     }
 
@@ -602,15 +624,104 @@ class ViewerApp implements Component {
         }
     }
 
-    private syncKeyboardFallbackButtonVisibility() {
+    private syncMobileFabMenuVisibility() {
         const show = isPhoneLikeDevice()
-        const kb = this.keyboardFallbackButton
-        if (kb) {
-            kb.style.display = show ? "flex" : "none"
+        if (show) {
+            this.ensureMobileFabMenu()
         }
-        const ctl = this.controllerFallbackButton
-        if (ctl) {
-            ctl.style.display = show ? "flex" : "none"
+        this.mobileFabMenu?.setVisible(show)
+        if (show) {
+            this.syncMobileFabActiveState()
+        }
+    }
+
+    syncMobileFabActiveState() {
+        if (!this.mobileFabMenu) return
+        const screenKeyboard = this.sidebar?.getScreenKeyboard()
+        this.mobileFabMenu.setActiveState({
+            keyboard: !!(screenKeyboard?.isVisible() || screenKeyboard?.isActuallyVisible()),
+            controller: !!this.virtualControllerOverlay?.isVisible(),
+            hud: this.streamHudVisible,
+            mouseFollow: this.inputConfig.touchMode === "mouseFollow",
+        })
+    }
+
+    private applyStreamHudVisibility() {
+        const cluster = this.overlayHudCluster
+        const hudShown = isPhoneLikeDevice() ? this.streamHudVisible : true
+        if (cluster) {
+            // Match CSS `.video-overlay-hud-cluster { display: flex }` when shown.
+            // Must use explicit values — `syncFullscreenToggleButtonPosition` also writes display.
+            cluster.style.display = hudShown ? "flex" : "none"
+        }
+        if (hudShown) {
+            this.syncHudTrayToolbarButtons()
+        }
+        // Always run so the 500ms stats timer cannot force the cluster back to flex while hidden.
+        this.syncFullscreenToggleButtonPosition()
+        this.syncMobileFabActiveState()
+    }
+
+    private toggleStreamHudFromFab() {
+        this.streamHudVisible = !this.streamHudVisible
+        try {
+            localStorage.setItem(ML_STREAM_HUD_VISIBLE_PHONE_KEY, this.streamHudVisible ? "1" : "0")
+        } catch {
+            /* quota / private mode */
+        }
+        this.applyStreamHudVisibility()
+    }
+
+    private togglePhoneMouseModeFromFab() {
+        const config = { ...this.getInputConfig() }
+        if (config.touchMode === "touch") {
+            config.mouseMode = "follow"
+            config.touchMode = "mouseFollow"
+        } else {
+            config.touchMode = "touch"
+        }
+        this.setInputConfig(config)
+        this.sidebar.syncInputModeSelects()
+        this.syncMobileFabActiveState()
+    }
+
+    private shouldShowSoftwareCursor(): boolean {
+        if (!isPhoneLikeDevice()) {
+            return false
+        }
+        if (this.inputConfig.touchMode === "touch") {
+            return false
+        }
+        if (this.inputConfig.touchMode === "mouseFollow") {
+            return !this.latestHostCursorHidden
+        }
+        return true
+    }
+
+    private syncSoftwareCursorVisibility(opts?: { recenter?: boolean }) {
+        const visible = this.shouldShowSoftwareCursor()
+        if (visible) {
+            this.refreshSoftwareCursorClampRect()
+        }
+        this.softwareCursor.setVisible(visible, {
+            recenter: opts?.recenter ?? (visible && !this.softwareCursor.isVisible()),
+        })
+    }
+
+    private refreshSoftwareCursorClampRect() {
+        const inputEl = document.getElementById("input")
+        if (!inputEl) return
+        this.softwareCursor.setClampRect(inputEl.getBoundingClientRect())
+    }
+
+    private onSoftwareCursorMotion = (motion: SoftwareCursorMotion) => {
+        if (!isPhoneLikeDevice()) return
+        this.softwareCursor.setClampRect(motion.rect)
+        if (!this.softwareCursor.isVisible()) return
+        if (motion.kind === "relative") {
+            this.softwareCursor.moveByClient(motion.dx, motion.dy)
+        } else {
+            this.softwareCursor.setPositionClient(motion.x, motion.y)
         }
     }
 
@@ -688,6 +799,11 @@ class ViewerApp implements Component {
         }
         tray.style.position = "fixed"
         tray.style.zIndex = "70"
+        if (!this.streamHudVisible && isPhoneLikeDevice()) {
+            tray.style.display = "none"
+            button.style.display = "none"
+            return
+        }
         tray.style.display = "flex"
         if (isPhoneLikeDevice()) {
             button.style.display = "none"
@@ -763,7 +879,10 @@ class ViewerApp implements Component {
             this.overlayBitrateApplyBtn.disabled = true
         }
         try {
-            await this.restartStreamWithNewSettings(settings)
+            // TEMP: disabled restartStreamWithNewSettings to test realtime bitrate only.
+            // TODO: restore full restart when ready.
+            // await this.restartStreamWithNewSettings(settings)
+            this.stream?.requestVideoBitrateMbps(snapped, "overlaySlider", { immediate: true })
             hud.setCommitted(snapped)
         } finally {
             hud.setApplyBusy(false)
@@ -1010,205 +1129,41 @@ class ViewerApp implements Component {
         this.syncHudTrayToolbarButtons()
         this.syncFullscreenToggleButtonLabel()
         this.syncFullscreenToggleButtonPosition()
+        this.applyStreamHudVisibility()
     }
 
-    private ensureKeyboardFallbackButton() {
-        if (this.keyboardFallbackButton) return
-        const button = document.createElement("button")
-        button.type = "button"
-        button.id = "ml-keyboard-fallback-button"
-        button.setAttribute("aria-label", "Toggle keyboard")
-        button.title = "Toggle keyboard"
-        const keyboardIcon = document.createElement("img")
-        keyboardIcon.src = "resources/nextgpu-keyboard.svg"
-        keyboardIcon.alt = ""
-        keyboardIcon.setAttribute("aria-hidden", "true")
-        keyboardIcon.style.width = "15px"
-        keyboardIcon.style.height = "15px"
-        keyboardIcon.style.display = "block"
-        button.appendChild(keyboardIcon)
-        button.style.cssText =
-            "position:fixed;right:68px;bottom:72px;z-index:210000;display:none;" +
-            "width:32px;height:32px;padding:0;border-radius:8px;border:1px solid rgba(255,255,255,.78);" +
-            "background:rgba(0,0,0,.92);" +
-            "box-shadow:0 12px 24px rgba(0,0,0,.48),0 0 0 1px rgba(255,255,255,.08) inset;" +
-            "align-items:center;justify-content:center;cursor:pointer;touch-action:none"
-        const toggleKeyboard = () => {
-            const screenKeyboard = this.sidebar.getScreenKeyboard()
-            if (screenKeyboard.isVisible() || screenKeyboard.isActuallyVisible()) {
-                screenKeyboard.hide()
-            } else {
-                setSidebarExtended(false)
-                screenKeyboard.show()
-            }
-        }
-        let dragPointerId: number | null = null
-        let dragStartX = 0
-        let dragStartY = 0
-        let dragOffsetX = 0
-        let dragOffsetY = 0
-        let dragged = false
-        let suppressClickUntilMs = 0
-        const DRAG_THRESHOLD = 6
-        const onDocumentPointerMove = (event: PointerEvent) => {
-            if (dragPointerId == null || event.pointerId !== dragPointerId) return
-            const dx = event.clientX - dragStartX
-            const dy = event.clientY - dragStartY
-            if (!dragged && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
-                dragged = true
-            }
-            if (!dragged) return
-            const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
-            const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
-            const nextLeft = Math.max(8, Math.min(vw - button.offsetWidth - 8, event.clientX - dragOffsetX))
-            const nextTop = Math.max(8, Math.min(vh - button.offsetHeight - 8, event.clientY - dragOffsetY))
-            button.style.right = "auto"
-            button.style.bottom = "auto"
-            button.style.left = `${nextLeft}px`
-            button.style.top = `${nextTop}px`
-        }
-        const onDocumentPointerEnd = (event: PointerEvent) => {
-            if (dragPointerId == null || event.pointerId !== dragPointerId) return
-            dragPointerId = null
-            document.removeEventListener("pointermove", onDocumentPointerMove)
-            document.removeEventListener("pointerup", onDocumentPointerEnd)
-            document.removeEventListener("pointercancel", onDocumentPointerEnd)
-            if (dragged) {
-                event.preventDefault()
-                event.stopImmediatePropagation()
-                dragged = false
-                suppressClickUntilMs = Date.now() + 500
-                return
-            }
-            suppressClickUntilMs = Date.now() + 500
-            toggleKeyboard()
-        }
-        button.addEventListener("pointerdown", (event: PointerEvent) => {
-            dragPointerId = event.pointerId
-            dragged = false
-            const rect = button.getBoundingClientRect()
-            dragStartX = event.clientX
-            dragStartY = event.clientY
-            dragOffsetX = event.clientX - rect.left
-            dragOffsetY = event.clientY - rect.top
-            document.addEventListener("pointermove", onDocumentPointerMove)
-            document.addEventListener("pointerup", onDocumentPointerEnd)
-            document.addEventListener("pointercancel", onDocumentPointerEnd)
+    private ensureMobileFabMenu() {
+        if (this.mobileFabMenu) return
+        this.streamHudVisible = loadPhoneStreamHudVisible()
+        const menu = new MobileFabMenu({
+            onKeyboard: () => {
+                const screenKeyboard = this.sidebar.getScreenKeyboard()
+                if (screenKeyboard.isVisible() || screenKeyboard.isActuallyVisible()) {
+                    screenKeyboard.hide()
+                } else {
+                    setSidebarExtended(false)
+                    screenKeyboard.show()
+                }
+                this.syncMobileFabActiveState()
+            },
+            onController: () => {
+                const vc = this.virtualControllerOverlay
+                if (vc.isVisible()) {
+                    vc.hide()
+                } else {
+                    setSidebarExtended(false)
+                    vc.show()
+                }
+                this.syncMobileFabActiveState()
+            },
+            onHud: () => this.toggleStreamHudFromFab(),
+            onMouse: () => this.togglePhoneMouseModeFromFab(),
+            onOpenChange: () => this.syncMobileFabActiveState(),
         })
-        button.addEventListener("keydown", (event: KeyboardEvent) => {
-            if (event.key !== "Enter" && event.key !== " ") return
-            event.preventDefault()
-            toggleKeyboard()
-        })
-        button.addEventListener("click", (event: MouseEvent) => {
-            if (dragged) return
-            if (Date.now() < suppressClickUntilMs) return
-            event.preventDefault()
-            toggleKeyboard()
-        })
-        document.body.appendChild(button)
-        this.keyboardFallbackButton = button
-        this.syncKeyboardFallbackButtonVisibility()
-    }
-
-    private ensureControllerFallbackButton() {
-        if (this.controllerFallbackButton) return
-        const button = document.createElement("button")
-        button.type = "button"
-        button.id = "ml-controller-fallback-button"
-        button.setAttribute("aria-label", "Toggle on-screen controller")
-        button.title = "On-screen controller"
-        const icon = document.createElement("img")
-        icon.src = "resources/game-controller.svg"
-        icon.alt = ""
-        icon.setAttribute("aria-hidden", "true")
-        icon.style.width = "15px"
-        icon.style.height = "15px"
-        icon.style.display = "block"
-        icon.style.filter = "brightness(0) invert(1)"
-        button.appendChild(icon)
-        button.style.cssText =
-            "position:fixed;right:108px;bottom:72px;z-index:210000;display:none;" +
-            "width:32px;height:32px;padding:0;border-radius:8px;border:1px solid rgba(255,255,255,.78);" +
-            "background:rgba(0,0,0,.92);" +
-            "box-shadow:0 12px 24px rgba(0,0,0,.48),0 0 0 1px rgba(255,255,255,.08) inset;" +
-            "align-items:center;justify-content:center;cursor:pointer;touch-action:none"
-        const toggleController = () => {
-            const vc = this.virtualControllerOverlay
-            if (vc.isVisible()) {
-                vc.hide()
-            } else {
-                setSidebarExtended(false)
-                vc.show()
-            }
-        }
-        let dragPointerId: number | null = null
-        let dragStartX = 0
-        let dragStartY = 0
-        let dragOffsetX = 0
-        let dragOffsetY = 0
-        let dragged = false
-        let suppressClickUntilMs = 0
-        const DRAG_THRESHOLD = 6
-        const onDocumentPointerMove = (event: PointerEvent) => {
-            if (dragPointerId == null || event.pointerId !== dragPointerId) return
-            const dx = event.clientX - dragStartX
-            const dy = event.clientY - dragStartY
-            if (!dragged && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
-                dragged = true
-            }
-            if (!dragged) return
-            const vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
-            const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
-            const nextLeft = Math.max(8, Math.min(vw - button.offsetWidth - 8, event.clientX - dragOffsetX))
-            const nextTop = Math.max(8, Math.min(vh - button.offsetHeight - 8, event.clientY - dragOffsetY))
-            button.style.right = "auto"
-            button.style.bottom = "auto"
-            button.style.left = `${nextLeft}px`
-            button.style.top = `${nextTop}px`
-        }
-        const onDocumentPointerEnd = (event: PointerEvent) => {
-            if (dragPointerId == null || event.pointerId !== dragPointerId) return
-            dragPointerId = null
-            document.removeEventListener("pointermove", onDocumentPointerMove)
-            document.removeEventListener("pointerup", onDocumentPointerEnd)
-            document.removeEventListener("pointercancel", onDocumentPointerEnd)
-            if (dragged) {
-                event.preventDefault()
-                event.stopImmediatePropagation()
-                dragged = false
-                suppressClickUntilMs = Date.now() + 500
-                return
-            }
-            suppressClickUntilMs = Date.now() + 500
-            toggleController()
-        }
-        button.addEventListener("pointerdown", (event: PointerEvent) => {
-            dragPointerId = event.pointerId
-            dragged = false
-            const rect = button.getBoundingClientRect()
-            dragStartX = event.clientX
-            dragStartY = event.clientY
-            dragOffsetX = event.clientX - rect.left
-            dragOffsetY = event.clientY - rect.top
-            document.addEventListener("pointermove", onDocumentPointerMove)
-            document.addEventListener("pointerup", onDocumentPointerEnd)
-            document.addEventListener("pointercancel", onDocumentPointerEnd)
-        })
-        button.addEventListener("keydown", (event: KeyboardEvent) => {
-            if (event.key !== "Enter" && event.key !== " ") return
-            event.preventDefault()
-            toggleController()
-        })
-        button.addEventListener("click", (event: MouseEvent) => {
-            if (dragged) return
-            if (Date.now() < suppressClickUntilMs) return
-            event.preventDefault()
-            toggleController()
-        })
-        document.body.appendChild(button)
-        this.controllerFallbackButton = button
-        this.syncKeyboardFallbackButtonVisibility()
+        menu.mount(document.body)
+        this.mobileFabMenu = menu
+        this.applyStreamHudVisibility()
+        this.syncMobileFabMenuVisibility()
     }
 
     private ensureSettingsQuickButton() {
@@ -1322,8 +1277,7 @@ class ViewerApp implements Component {
         })
         document.body.appendChild(button)
         this.settingsQuickButton = button
-        this.ensureKeyboardFallbackButton()
-        this.ensureControllerFallbackButton()
+        this.ensureMobileFabMenu()
         this.syncSettingsQuickButtonVisibility()
     }
 
@@ -1482,6 +1436,8 @@ class ViewerApp implements Component {
             getStreamInput: () => this.getStream()?.getInput() ?? null,
             getScreenKeyboard: () => this.sidebar.getScreenKeyboard(),
         })
+        this.softwareCursor.mount(document.body)
+        this.syncSoftwareCursorVisibility()
         setSidebar(this.sidebar)
         this.ensureSettingsQuickButton()
         window.addEventListener("resize", this.windowResizeForQuickDock)
@@ -1659,6 +1615,7 @@ class ViewerApp implements Component {
         // Apply viewer input config immediately (phone default touch mode, persisted modes, etc.)
         // so users don't need to manually reselect modes in the sidebar.
         this.stream.getInput().setConfig(this.inputConfig)
+        this.stream.getInput().setSoftwareCursorMotionListener(this.onSoftwareCursorMotion)
 
         // Add app info listener
         this.stream.addInfoListener(this.onInfo.bind(this))
@@ -1731,6 +1688,7 @@ class ViewerApp implements Component {
                 this.adaptivePointerLockReleaseTimer = null
             }
             this.adaptiveLog("reset adaptive mouse state (stream restart)")
+            this.syncSoftwareCursorVisibility()
             const success = await stream.stop()
             if (!success) {
                 console.debug("Restart: stream stop reported failure, continuing anyway")
@@ -1798,6 +1756,15 @@ class ViewerApp implements Component {
                 } else {
                     this.adaptivePointerLockActive = false
                     this.adaptiveLog("visible host cursor, no auto pointer lock active")
+                }
+            }
+            this.syncSoftwareCursorVisibility()
+        } else if (data.type == "hostCursorShape") {
+            if (isPhoneLikeDevice()) {
+                if (data.frame) {
+                    this.softwareCursor.setHostFrame(data.frame)
+                } else {
+                    this.softwareCursor.clearHostFrame()
                 }
             }
         } else if (data.type == "addDebugLine") {
@@ -1979,7 +1946,23 @@ class ViewerApp implements Component {
             } catch {
                 /* quota / private mode */
             }
+            this.syncMobileFabActiveState()
         }
+        this.syncSoftwareCursorVisibility({
+            recenter: this.inputConfig.touchMode === "mouseFollow" && prevTouch !== "mouseFollow",
+        })
+        if (this.inputConfig.touchMode === "mouseFollow" && prevTouch !== "mouseFollow") {
+            this.seedMouseFollowCursorFromStream()
+        }
+    }
+
+    private seedMouseFollowCursorFromStream() {
+        const inputEl = document.getElementById("input")
+        if (!inputEl) return
+        const rect = inputEl.getBoundingClientRect()
+        const cx = (rect.left + rect.right) / 2
+        const cy = (rect.top + rect.bottom) / 2
+        this.stream?.getInput().seedMouseFollowCursor(cx, cy, rect)
     }
 
     // Keyboard
@@ -2148,7 +2131,7 @@ class ViewerApp implements Component {
         if (targetElement.closest(".modal-settings-panel")) return true
         if (targetElement.closest("#sidebar-button")) return true
         if (targetElement.closest("#ml-settings-quick-button")) return true
-        if (targetElement.closest("#ml-keyboard-fallback-button")) return true
+        if (targetElement.closest("#ml-mobile-fab-menu")) return true
         if (targetElement.closest(".select-polyfill-list, .select-polyfill-display, .select-polyfill-wrapper")) {
             return true
         }
@@ -2736,12 +2719,12 @@ class ViewerApp implements Component {
         if (this.settingsQuickButton?.parentElement) {
             this.settingsQuickButton.parentElement.removeChild(this.settingsQuickButton)
         }
-        if (this.keyboardFallbackButton?.parentElement) {
-            this.keyboardFallbackButton.parentElement.removeChild(this.keyboardFallbackButton)
+        if (this.mobileFabMenu) {
+            this.mobileFabMenu.unmount()
+            this.mobileFabMenu = null
         }
-        if (this.controllerFallbackButton?.parentElement) {
-            this.controllerFallbackButton.parentElement.removeChild(this.controllerFallbackButton)
-        }
+        this.softwareCursor.unmount()
+        this.stream?.getInput().setSoftwareCursorMotionListener(null)
         this.virtualControllerOverlay.hide()
         if (this.hudTrayDragPointerId !== null) {
             document.removeEventListener("pointermove", this.onHudTrayDragPointerMove)
@@ -2766,8 +2749,7 @@ class ViewerApp implements Component {
             this.bitrateToastStack.parentElement.removeChild(this.bitrateToastStack)
         }
         this.settingsQuickButton = null
-        this.keyboardFallbackButton = null
-        this.controllerFallbackButton = null
+        this.mobileFabMenu = null
         this.fullscreenToggleButton = null
         this.overlayHudTray = null
         this.overlayHudCluster = null
@@ -3793,6 +3775,7 @@ class ViewerSidebar implements Component, Sidebar {
                 this.app.getVirtualControllerOverlay().releaseAllTouchInteraction(
                     visible ? "screenKeyboard:show" : "screenKeyboard:hide"
                 )
+                this.app.syncMobileFabActiveState()
             },
         })
 
@@ -4232,6 +4215,13 @@ class ViewerSidebar implements Component, Sidebar {
         const config = this.app.getInputConfig()
         config.touchMode = this.touchMode.getValue() as any
         this.app.setInputConfig(config)
+    }
+
+    /** Keep sidebar selects in sync when input modes change outside the sidebar (e.g. phone FAB). */
+    syncInputModeSelects() {
+        const config = this.app.getInputConfig()
+        this.touchMode.setValue(config.touchMode, { silent: true, force: true })
+        this.mouseMode.setValue(config.mouseMode, { silent: true, force: true })
     }
 
     extended(): void {
