@@ -20,11 +20,13 @@ export type MobileFabActiveState = {
 }
 
 const ROOT_ID = "ml-mobile-fab-menu"
-const POS_STORAGE_KEY = "ml.mobileFab.pos.v1"
-const LAST_ACTION_KEY = "ml.mobileFab.lastAction.v1"
+/** Bumped from v1 — that key often stored a bogus top-left from clamping while `display:none`. */
+const POS_STORAGE_KEY = "ml.mobileFab.pos.v2"
 const DRAG_THRESHOLD_PX = 6
-/** Hold primary FAB this long (without dragging) to show last action for slide-to-confirm. */
-const HOLD_QUICK_PICK_MS = 350
+/** Hold still this long to unlock FAB reposition (separate from slide-to-select). */
+const HOLD_TO_DRAG_MS = 480
+/** Extra hit padding when sliding from the primary FAB onto a satellite. */
+const SLIDE_HIT_PAD_PX = 14
 
 type ActionDef = {
     id: MobileFabActionId
@@ -40,8 +42,6 @@ const ACTIONS: ActionDef[] = [
     { id: "mouse", label: "Touch / Follow mouse", iconSrc: "resources/mouse-pointer-click.svg", invertIcon: true },
     { id: "hud", label: "Toggle HUD", iconSrc: "resources/layers-plus.svg", invertIcon: true },
 ]
-
-const ACTION_IDS = new Set<MobileFabActionId>(ACTIONS.map((a) => a.id))
 
 /** Standard math degrees: 0° = right, 90° = up, 180° = left, 270° = down. */
 function fanArcForPosition(centerX: number, centerY: number, vw: number, vh: number): {
@@ -82,6 +82,7 @@ export class MobileFabMenu {
     private readonly backdrop = document.createElement("button")
     private readonly primary = document.createElement("button")
     private readonly primaryIcon = document.createElement("span")
+    private readonly dragHint = document.createElement("div")
     private readonly satellites = new Map<MobileFabActionId, HTMLButtonElement>()
     private readonly deps: MobileFabMenuDeps
     private open = false
@@ -92,12 +93,15 @@ export class MobileFabMenu {
     private dragOffsetX = 0
     private dragOffsetY = 0
     private dragged = false
-    private suppressClickUntilMs = 0
+    /** True after hold timer — finger movement repositions the FAB. */
+    private dragArmed = false
     private holdTimer: ReturnType<typeof setTimeout> | null = null
-    private quickPick = false
-    private quickPickAction: MobileFabActionId | null = null
-    private quickPickHover = false
-    private lastActionId: MobileFabActionId | null = null
+    private suppressClickUntilMs = 0
+    /** True when this gesture opened the menu (tap should leave it open, not toggle closed). */
+    private openedByThisGesture = false
+    /** True when the finger slid onto a satellite during this gesture. */
+    private slideSelecting = false
+    private slideHoverId: MobileFabActionId | null = null
     private readonly onResize = () => this.clampToViewport()
 
     constructor(deps: MobileFabMenuDeps) {
@@ -105,7 +109,6 @@ export class MobileFabMenu {
         this.root.id = ROOT_ID
         this.root.className = "ml-mobile-fab"
         this.root.setAttribute("aria-expanded", "false")
-        this.lastActionId = this.loadLastAction()
 
         this.backdrop.type = "button"
         this.backdrop.className = "ml-mobile-fab__backdrop"
@@ -120,7 +123,7 @@ export class MobileFabMenu {
         this.primary.type = "button"
         this.primary.className = "ml-mobile-fab__primary"
         this.primary.setAttribute("aria-label", "Open stream controls")
-        this.primary.title = "Stream controls — hold for last action"
+        this.primary.title = "Stream controls — tap to open, slide to an option, hold to move"
         this.primaryIcon.className = "ml-mobile-fab__primary-icon"
         this.primaryIcon.setAttribute("aria-hidden", "true")
         const primaryImg = document.createElement("img")
@@ -129,11 +132,21 @@ export class MobileFabMenu {
         primaryImg.className = "ml-mobile-fab__primary-glyph"
         this.primaryIcon.appendChild(primaryImg)
         this.primary.appendChild(this.primaryIcon)
+
+        this.dragHint.className = "ml-mobile-fab__drag-hint"
+        this.dragHint.setAttribute("aria-hidden", "true")
+        for (const dir of ["n", "e", "s", "w"] as const) {
+            const arrow = document.createElement("span")
+            arrow.className = `ml-mobile-fab__drag-arrow ml-mobile-fab__drag-arrow--${dir}`
+            this.dragHint.appendChild(arrow)
+        }
+        this.root.appendChild(this.dragHint)
+
         this.installPrimaryPointer()
         this.primary.addEventListener("click", (e) => {
             e.preventDefault()
             e.stopPropagation()
-            if (this.dragged || this.quickPick) return
+            if (this.dragged || this.dragArmed || this.slideSelecting) return
             if (Date.now() < this.suppressClickUntilMs) return
             this.toggle()
         })
@@ -169,8 +182,9 @@ export class MobileFabMenu {
 
         this.root.appendChild(this.backdrop)
         this.root.appendChild(this.primary)
+        // Default = CSS `right`/`bottom`. Only override with left/top after a user drag (or restore).
+        this.applyCssDefaultBottomRight()
         this.restorePosition()
-        this.layoutSatelliteArc()
     }
 
     mount(parent: HTMLElement = document.body): void {
@@ -178,7 +192,7 @@ export class MobileFabMenu {
         parent.appendChild(this.root)
         window.addEventListener("resize", this.onResize)
         this.mounted = true
-        this.clampToViewport()
+        // Do not clamp here — root is still `display:none` until setVisible(true).
     }
 
     unmount(): void {
@@ -192,7 +206,15 @@ export class MobileFabMenu {
 
     setVisible(visible: boolean): void {
         this.root.classList.toggle("ml-mobile-fab--visible", visible)
-        if (!visible) this.close()
+        if (!visible) {
+            this.close()
+            return
+        }
+        // Measure only after the FAB is actually shown (avoids 0×0 → top-left clamp).
+        requestAnimationFrame(() => {
+            if (!this.root.classList.contains("ml-mobile-fab--visible")) return
+            this.clampToViewport()
+        })
     }
 
     isOpen(): boolean {
@@ -200,10 +222,9 @@ export class MobileFabMenu {
     }
 
     openMenu(): void {
-        this.endQuickPick(false)
         if (this.open) return
         this.layoutSatelliteArc()
-        this.showAllSatellites()
+        this.clearSlideHover()
         this.open = true
         this.root.classList.add("ml-mobile-fab--open")
         this.root.setAttribute("aria-expanded", "true")
@@ -212,9 +233,9 @@ export class MobileFabMenu {
     }
 
     close(): void {
-        this.endQuickPick(false)
         if (!this.open) return
         this.open = false
+        this.clearSlideHover()
         this.root.classList.remove("ml-mobile-fab--open")
         this.root.setAttribute("aria-expanded", "false")
         this.primary.setAttribute("aria-label", "Open stream controls")
@@ -251,7 +272,6 @@ export class MobileFabMenu {
     }
 
     private handleAction(id: MobileFabActionId): void {
-        this.rememberLastAction(id)
         switch (id) {
             case "keyboard":
                 this.deps.onKeyboard()
@@ -272,26 +292,38 @@ export class MobileFabMenu {
     private installPrimaryPointer(): void {
         this.primary.addEventListener("pointerdown", (event: PointerEvent) => {
             if (event.button !== 0 && event.pointerType === "mouse") return
+            this.clearHoldTimer()
             this.dragPointerId = event.pointerId
             this.dragged = false
-            this.quickPick = false
-            this.quickPickHover = false
+            this.dragArmed = false
+            this.slideSelecting = false
+            this.slideHoverId = null
+            this.openedByThisGesture = !this.open
             this.dragStartX = event.clientX
             this.dragStartY = event.clientY
             const rect = this.root.getBoundingClientRect()
             this.dragOffsetX = event.clientX - rect.left
             this.dragOffsetY = event.clientY - rect.top
+            this.setDragHintVisible(false)
             try {
                 this.primary.setPointerCapture(event.pointerId)
             } catch {
                 /* ignore */
             }
-            this.clearHoldTimer()
+            // Open immediately so the user can slide onto an option in the same gesture.
+            if (!this.open) {
+                this.openMenu()
+            }
             this.holdTimer = setTimeout(() => {
                 this.holdTimer = null
-                if (this.dragPointerId == null || this.dragged) return
-                this.beginQuickPick()
-            }, HOLD_QUICK_PICK_MS)
+                if (this.dragPointerId == null || this.slideSelecting) return
+                // Hold still long enough → unlock reposition; cancel slide-select for this gesture.
+                this.dragArmed = true
+                this.clearSlideHover()
+                this.close()
+                this.setDragHintVisible(true)
+                this.root.classList.add("ml-mobile-fab--drag-armed")
+            }, HOLD_TO_DRAG_MS)
             document.addEventListener("pointermove", this.onPointerMove)
             document.addEventListener("pointerup", this.onPointerEnd)
             document.addEventListener("pointercancel", this.onPointerEnd)
@@ -304,16 +336,25 @@ export class MobileFabMenu {
         const dy = event.clientY - this.dragStartY
         const dist = Math.hypot(dx, dy)
 
-        if (this.quickPick) {
-            event.preventDefault()
-            this.updateQuickPickHover(event.clientX, event.clientY)
+        // Before hold unlocks drag: movement is slide-to-select only (never reposition).
+        if (!this.dragArmed) {
+            if (dist > DRAG_THRESHOLD_PX) {
+                // Finger left the primary — cancel hold-to-drag so slide stays the gesture.
+                this.clearHoldTimer()
+            }
+            const hoverId = this.hitTestSatellite(event.clientX, event.clientY)
+            if (hoverId) {
+                this.slideSelecting = true
+                this.setSlideHover(hoverId)
+            } else {
+                this.setSlideHover(null)
+            }
             return
         }
 
+        // Drag-armed: reposition FAB.
         if (!this.dragged && dist > DRAG_THRESHOLD_PX) {
-            this.clearHoldTimer()
             this.dragged = true
-            this.close()
             this.root.classList.add("ml-mobile-fab--dragging")
         }
         if (!this.dragged) return
@@ -324,100 +365,80 @@ export class MobileFabMenu {
     private readonly onPointerEnd = (event: PointerEvent): void => {
         if (this.dragPointerId == null || event.pointerId !== this.dragPointerId) return
         const wasDragging = this.dragged
-        const wasQuickPick = this.quickPick
-        const hover = this.quickPickHover
-        const quickAction = this.quickPickAction
+        const wasDragArmed = this.dragArmed
+        const hoverId = this.slideHoverId
+        const openedByThisGesture = this.openedByThisGesture
+        const wasSlideSelecting = this.slideSelecting
 
-        this.clearHoldTimer()
+        this.clearSlideHover()
         this.endPointerSession()
 
-        if (wasDragging) {
+        if (wasDragging || wasDragArmed) {
             event.preventDefault()
             event.stopPropagation()
             this.suppressClickUntilMs = Date.now() + 500
-            this.persistPosition()
-            this.layoutSatelliteArc()
+            if (wasDragging) {
+                this.persistPosition()
+                this.layoutSatelliteArc()
+            }
             return
         }
 
-        if (wasQuickPick) {
+        if (hoverId) {
             event.preventDefault()
             event.stopPropagation()
             this.suppressClickUntilMs = Date.now() + 500
-            this.endQuickPick(false)
-            if (hover && quickAction) {
-                this.handleAction(quickAction)
+            this.handleAction(hoverId)
+            return
+        }
+
+        // Tap that opened the menu: leave it open. Tap while already open: close.
+        this.suppressClickUntilMs = Date.now() + 500
+        if (!openedByThisGesture && !wasSlideSelecting) {
+            this.close()
+        }
+    }
+
+    private hitTestSatellite(clientX: number, clientY: number): MobileFabActionId | null {
+        if (!this.open) return null
+        let best: MobileFabActionId | null = null
+        let bestDist = Infinity
+        for (const [id, btn] of this.satellites) {
+            const rect = btn.getBoundingClientRect()
+            const pad = SLIDE_HIT_PAD_PX
+            if (
+                clientX < rect.left - pad ||
+                clientX > rect.right + pad ||
+                clientY < rect.top - pad ||
+                clientY > rect.bottom + pad
+            ) {
+                continue
+            }
+            const cx = (rect.left + rect.right) / 2
+            const cy = (rect.top + rect.bottom) / 2
+            const dist = Math.hypot(clientX - cx, clientY - cy)
+            if (dist < bestDist) {
+                bestDist = dist
+                best = id
             }
         }
+        return best
     }
 
-    private beginQuickPick(): void {
-        const last = this.lastActionId
-        if (!last || !this.satellites.has(last)) {
-            // No history yet — fall back to full fan.
-            this.openMenu()
-            this.suppressClickUntilMs = Date.now() + 500
-            return
+    private setSlideHover(id: MobileFabActionId | null): void {
+        if (this.slideHoverId === id) return
+        if (this.slideHoverId) {
+            this.satellites.get(this.slideHoverId)?.classList.remove("ml-mobile-fab__action--slide-hover")
         }
-        if (this.open) {
-            this.open = false
-            this.root.classList.remove("ml-mobile-fab--open")
-            this.deps.onOpenChange?.(false)
-        }
-        this.layoutSatelliteArc()
-        this.quickPick = true
-        this.quickPickAction = last
-        this.quickPickHover = false
-        this.root.classList.add("ml-mobile-fab--quick")
-        this.root.setAttribute("aria-expanded", "true")
-        for (const [id, btn] of this.satellites) {
-            const isTarget = id === last
-            btn.classList.toggle("ml-mobile-fab__action--quick-target", isTarget)
-            btn.classList.toggle("ml-mobile-fab__action--quick-hover", false)
+        this.slideHoverId = id
+        if (id) {
+            this.satellites.get(id)?.classList.add("ml-mobile-fab__action--slide-hover")
         }
     }
 
-    private updateQuickPickHover(clientX: number, clientY: number): void {
-        if (!this.quickPick || !this.quickPickAction) return
-        const btn = this.satellites.get(this.quickPickAction)
-        if (!btn) return
-        const rect = btn.getBoundingClientRect()
-        // Slightly generous hit area for finger slide.
-        const pad = 12
-        const over =
-            clientX >= rect.left - pad &&
-            clientX <= rect.right + pad &&
-            clientY >= rect.top - pad &&
-            clientY <= rect.bottom + pad
-        if (over !== this.quickPickHover) {
-            this.quickPickHover = over
-            btn.classList.toggle("ml-mobile-fab__action--quick-hover", over)
-        }
-    }
-
-    private endQuickPick(_activate: boolean): void {
-        if (!this.quickPick && !this.root.classList.contains("ml-mobile-fab--quick")) {
-            this.quickPickAction = null
-            this.quickPickHover = false
-            return
-        }
-        this.quickPick = false
-        this.quickPickHover = false
-        this.quickPickAction = null
-        this.root.classList.remove("ml-mobile-fab--quick")
-        if (!this.open) {
-            this.root.setAttribute("aria-expanded", "false")
-        }
-        for (const btn of this.satellites.values()) {
-            btn.classList.remove("ml-mobile-fab__action--quick-target", "ml-mobile-fab__action--quick-hover")
-        }
-    }
-
-    private showAllSatellites(): void {
-        for (const btn of this.satellites.values()) {
-            btn.classList.remove("ml-mobile-fab__action--quick-target", "ml-mobile-fab__action--quick-hover")
-        }
-        this.root.classList.remove("ml-mobile-fab--quick")
+    private clearSlideHover(): void {
+        this.setSlideHover(null)
+        this.slideSelecting = false
     }
 
     private clearHoldTimer(): void {
@@ -427,39 +448,36 @@ export class MobileFabMenu {
         }
     }
 
+    private setDragHintVisible(visible: boolean): void {
+        this.root.classList.toggle("ml-mobile-fab--drag-hint", visible)
+    }
+
     private endPointerSession(): void {
+        this.clearHoldTimer()
         this.dragPointerId = null
+        this.dragArmed = false
+        this.openedByThisGesture = false
+        this.setDragHintVisible(false)
         this.root.classList.remove("ml-mobile-fab--dragging")
+        this.root.classList.remove("ml-mobile-fab--drag-armed")
         document.removeEventListener("pointermove", this.onPointerMove)
         document.removeEventListener("pointerup", this.onPointerEnd)
         document.removeEventListener("pointercancel", this.onPointerEnd)
     }
 
-    private rememberLastAction(id: MobileFabActionId): void {
-        this.lastActionId = id
-        try {
-            localStorage.setItem(LAST_ACTION_KEY, id)
-        } catch {
-            /* ignore */
-        }
-    }
-
-    private loadLastAction(): MobileFabActionId | null {
-        try {
-            const raw = localStorage.getItem(LAST_ACTION_KEY)
-            if (raw && ACTION_IDS.has(raw as MobileFabActionId)) {
-                return raw as MobileFabActionId
-            }
-        } catch {
-            /* ignore */
-        }
-        return null
+    private hasCustomPosition(): boolean {
+        return Boolean(this.root.style.left) && Boolean(this.root.style.top)
     }
 
     private setRootPosition(left: number, top: number): void {
         const size = this.root.offsetWidth || 48
         const { vw, vh } = viewportSize()
         const margin = 8
+        // Invalid / not-ready viewport — keep CSS bottom-right instead of clamping to (8,8).
+        if (vw < size + margin * 2 || vh < size + margin * 2) {
+            this.applyCssDefaultBottomRight()
+            return
+        }
         const clampedLeft = Math.max(margin, Math.min(vw - size - margin, left))
         const clampedTop = Math.max(margin, Math.min(vh - size - margin, top))
         this.root.style.right = "auto"
@@ -468,11 +486,29 @@ export class MobileFabMenu {
         this.root.style.top = `${Math.round(clampedTop)}px`
     }
 
+    /** Clear inline coords so CSS `right`/`bottom` place the FAB at bottom-right. */
+    private applyCssDefaultBottomRight(): void {
+        this.root.style.left = ""
+        this.root.style.top = ""
+        this.root.style.right = ""
+        this.root.style.bottom = ""
+    }
+
     private clampToViewport(): void {
-        if (!this.root.style.left && !this.root.style.top) return
+        if (!this.root.classList.contains("ml-mobile-fab--visible")) return
+        const { vw, vh } = viewportSize()
+        if (vw < 64 || vh < 64) return
+
+        if (!this.hasCustomPosition()) {
+            this.layoutSatelliteArc()
+            return
+        }
+
         const rect = this.root.getBoundingClientRect()
+        // Hidden / not laid out — never persist a 0×0 top-left reading.
+        if (rect.width < 1 || rect.height < 1) return
+
         this.setRootPosition(rect.left, rect.top)
-        this.persistPosition()
         this.layoutSatelliteArc()
     }
 
@@ -501,16 +537,16 @@ export class MobileFabMenu {
             const raw = localStorage.getItem(POS_STORAGE_KEY)
             if (!raw) return
             const o = JSON.parse(raw) as { left?: number; top?: number }
-            if (typeof o.left === "number" && typeof o.top === "number") {
-                this.setRootPosition(o.left, o.top)
-            }
+            if (typeof o.left !== "number" || typeof o.top !== "number") return
+            if (!Number.isFinite(o.left) || !Number.isFinite(o.top)) return
+            this.setRootPosition(o.left, o.top)
         } catch {
             /* ignore */
         }
     }
 
     private persistPosition(): void {
-        if (!this.root.style.left || !this.root.style.top) return
+        if (!this.hasCustomPosition()) return
         try {
             localStorage.setItem(
                 POS_STORAGE_KEY,

@@ -32,9 +32,17 @@ import {
 } from "./component/realtime_bitrate_hud.js"
 import {
     getBitrateTierForSettings,
+    persistStreamProfileChoice,
     snapBitrateMbpsForTier,
 } from "./stream_profile_presets.js"
-import { streamDebugLine, streamLogMatches, streamLogStartsWith, streamT } from "./stream_locale.js"
+import {
+    detectStreamLocale,
+    setStreamLocale,
+    streamDebugLine,
+    streamLogMatches,
+    streamLogStartsWith,
+    streamT,
+} from "./stream_locale.js"
 import {
     applyStreamDocumentTitle,
     getStreamMachineLabel,
@@ -387,7 +395,19 @@ async function startApp() {
     await loadStaticAppSettingsFile()
 
     if (ENABLE_STREAM_PROFILE_GATE) {
-        await runStreamProfileGate(queryParams)
+        // Phone: always Performance — skip the profile picker.
+        if (isPhoneLikeDevice()) {
+            try {
+                if (!localStorage.getItem("mlStreamLocale")) {
+                    setStreamLocale(detectStreamLocale())
+                }
+            } catch {
+                setStreamLocale(detectStreamLocale())
+            }
+            persistStreamProfileChoice("performance")
+        } else {
+            await runStreamProfileGate(queryParams)
+        }
     }
 
     // event propagation on overlays
@@ -686,15 +706,23 @@ class ViewerApp implements Component {
     }
 
     private shouldShowSoftwareCursor(): boolean {
+        // Overlay is phone FAB / mouse-follow only. PC uses CSS cursor on the stream surface.
         if (!isPhoneLikeDevice()) {
             return false
         }
+        // Pure touch UI: no overlay
         if (this.inputConfig.touchMode === "touch") {
             return false
         }
-        if (this.inputConfig.touchMode === "mouseFollow") {
-            return !this.latestHostCursorHidden
+        // Pointer lock is relative-only UI; overlay would drift from host OS cursor
+        if (document.pointerLockElement) {
+            return false
         }
+        // Host reports cursor hidden (game / exclusive) → no client overlay
+        if (this.latestHostCursorHidden) {
+            return false
+        }
+        // Host cursor visible (or no packet yet): show local software cursor (default arrow until shape arrives)
         return true
     }
 
@@ -706,6 +734,14 @@ class ViewerApp implements Component {
         this.softwareCursor.setVisible(visible, {
             recenter: opts?.recenter ?? (visible && !this.softwareCursor.isVisible()),
         })
+        // Avoid double cursor: hide browser arrow while the overlay is the single visible cursor
+        this.syncInputSurfaceCursorNone(visible)
+    }
+
+    private syncInputSurfaceCursorNone(hideBrowserCursor: boolean) {
+        const inputEl = document.getElementById("input")
+        if (!inputEl) return
+        inputEl.classList.toggle("hide-cursor", hideBrowserCursor)
     }
 
     private refreshSoftwareCursorClampRect() {
@@ -715,7 +751,6 @@ class ViewerApp implements Component {
     }
 
     private onSoftwareCursorMotion = (motion: SoftwareCursorMotion) => {
-        if (!isPhoneLikeDevice()) return
         this.softwareCursor.setClampRect(motion.rect)
         if (!this.softwareCursor.isVisible()) return
         if (motion.kind === "relative") {
@@ -1436,7 +1471,9 @@ class ViewerApp implements Component {
             getStreamInput: () => this.getStream()?.getInput() ?? null,
             getScreenKeyboard: () => this.sidebar.getScreenKeyboard(),
         })
-        this.softwareCursor.mount(document.body)
+        if (isPhoneLikeDevice()) {
+            this.softwareCursor.mount(document.body)
+        }
         this.syncSoftwareCursorVisibility()
         setSidebar(this.sidebar)
         this.ensureSettingsQuickButton()
@@ -1615,7 +1652,10 @@ class ViewerApp implements Component {
         // Apply viewer input config immediately (phone default touch mode, persisted modes, etc.)
         // so users don't need to manually reselect modes in the sidebar.
         this.stream.getInput().setConfig(this.inputConfig)
-        this.stream.getInput().setSoftwareCursorMotionListener(this.onSoftwareCursorMotion)
+        // Motion drives the phone software-cursor overlay only (PC uses native/CSS cursor).
+        this.stream.getInput().setSoftwareCursorMotionListener(
+            isPhoneLikeDevice() ? this.onSoftwareCursorMotion : null
+        )
 
         // Add app info listener
         this.stream.addInfoListener(this.onInfo.bind(this))
@@ -1760,13 +1800,13 @@ class ViewerApp implements Component {
             }
             this.syncSoftwareCursorVisibility()
         } else if (data.type == "hostCursorShape") {
-            if (isPhoneLikeDevice()) {
-                if (data.frame) {
-                    this.softwareCursor.setHostFrame(data.frame)
-                } else {
-                    this.softwareCursor.clearHostFrame()
-                }
+            // Phone overlay only; PC already applies the bitmap via CSS in Stream.applyHostCursorShape.
+            if (isPhoneLikeDevice() && data.frame) {
+                this.softwareCursor.setHostFrame(data.frame)
+            } else {
+                this.softwareCursor.clearHostFrame()
             }
+            this.syncSoftwareCursorVisibility()
         } else if (data.type == "addDebugLine") {
             const message = data.line.trim()
             const isTerminalFatal =
@@ -2690,11 +2730,13 @@ class ViewerApp implements Component {
                 this.hidePointerRelockNotice()
             }
             this.adaptiveLog(`pointer lock exited -> restored mouseMode=${this.inputConfig.mouseMode}`)
+            this.syncSoftwareCursorVisibility()
         } else {
             this.pendingEscRelockPrompt = false
             this.hideAdaptivePointerRelockOverlay()
             this.hidePointerRelockNotice()
             this.adaptiveLog("pointer lock entered")
+            this.syncSoftwareCursorVisibility()
         }
     }
 
@@ -2725,6 +2767,7 @@ class ViewerApp implements Component {
         }
         this.softwareCursor.unmount()
         this.stream?.getInput().setSoftwareCursorMotionListener(null)
+        this.syncInputSurfaceCursorNone(false)
         this.virtualControllerOverlay.hide()
         if (this.hudTrayDragPointerId !== null) {
             document.removeEventListener("pointermove", this.onHudTrayDragPointerMove)
@@ -2785,6 +2828,7 @@ class ViewerApp implements Component {
             this.adaptivePointerLockReleaseTimer = null
         }
         this.adaptiveLog("reset adaptive mouse state (viewer app unmount)")
+        this.syncInputSurfaceCursorNone(false)
         this.releaseAllKeys("viewer app unmount")
         parent.removeChild(this.div)
     }

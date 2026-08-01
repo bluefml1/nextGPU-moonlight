@@ -5,7 +5,7 @@
     "target": "ES6",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "strict": true,
+    "strict": false,
     "esModuleInterop": true
   },
   "include": [

@@ -2880,6 +2880,58 @@ canvas.video-stream {
     color: var(--text-2, #ffffff);
 }
 
+.ml-screen-keyboard-mode-switcher {
+    display: flex;
+    gap: 4px;
+}
+
+.ml-screen-keyboard-mode-btn {
+    margin: 0;
+    padding: 4px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    background: transparent;
+    font: 600 11px system-ui, sans-serif;
+    color: var(--text-2, #ffffff);
+    opacity: 0.6;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    touch-action: manipulation;
+}
+
+.ml-screen-keyboard-mode-btn:hover {
+    opacity: 0.85;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.ml-screen-keyboard-mode-btn.is-active {
+    opacity: 1;
+    background: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 25%, transparent);
+    border-color: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 50%, rgba(255, 255, 255, 0.2));
+    color: var(--accent-cyan-light, #00ffff);
+}
+
+.ml-screen-keyboard-mode {
+    font: 600 12px system-ui, sans-serif;
+    color: var(--accent-cyan-2, #00d4ff);
+    margin-left: auto;
+}
+
+.ml-screen-keyboard-modifier {
+    font: 600 12px system-ui, sans-serif;
+    color: var(--accent-cyan-light, #00ffff);
+    margin-left: 8px;
+    padding: 2px 8px;
+    background: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 20%, transparent);
+    border-radius: 4px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.ml-screen-keyboard-modifier.is-active {
+    opacity: 1;
+}
+
 .ml-screen-keyboard-rows {
     display: flex;
     flex-direction: column;
@@ -2906,6 +2958,30 @@ canvas.video-stream {
 
 .ml-screen-keyboard-row--bottom {
     grid-template-columns: repeat(10, minmax(0, 1fr));
+}
+
+.ml-screen-keyboard-row--fkeys {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+}
+
+.ml-screen-keyboard-row--modifiers {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.ml-screen-keyboard-row--nav {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.ml-screen-keyboard-row--arrows {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    max-width: 200px;
+    margin: 0 auto;
+}
+
+.ml-screen-keyboard-row--combos {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    padding: 4px 0;
+    border-top: 1px solid color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 30%, rgba(255, 255, 255, 0.1));
 }
 
 .ml-screen-keyboard .ml-screen-key {
@@ -3488,8 +3564,67 @@ canvas.video-stream {
     cursor: grabbing;
 }
 
+.ml-mobile-fab--drag-armed .ml-mobile-fab__primary,
+.ml-mobile-fab--drag-armed .ml-mobile-fab__primary:active {
+    transform: scale(1.06);
+}
+
 .ml-mobile-fab__primary:active {
     transform: scale(0.94);
+}
+
+/* Hold-to-move: directional arrows around the primary FAB */
+.ml-mobile-fab__drag-hint {
+    position: absolute;
+    inset: -18px;
+    z-index: 3;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity var(--ml-fab-duration) var(--ml-fab-ease);
+}
+
+.ml-mobile-fab--drag-hint .ml-mobile-fab__drag-hint {
+    opacity: 1;
+}
+
+.ml-mobile-fab__drag-arrow {
+    position: absolute;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+}
+
+.ml-mobile-fab__drag-arrow--n {
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    border-width: 0 5px 8px 5px;
+    border-color: transparent transparent rgba(255, 255, 255, 0.92) transparent;
+}
+
+.ml-mobile-fab__drag-arrow--e {
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    border-width: 5px 0 5px 8px;
+    border-color: transparent transparent transparent rgba(255, 255, 255, 0.92);
+}
+
+.ml-mobile-fab__drag-arrow--s {
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    border-width: 8px 5px 0 5px;
+    border-color: rgba(255, 255, 255, 0.92) transparent transparent transparent;
+}
+
+.ml-mobile-fab__drag-arrow--w {
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    border-width: 5px 8px 5px 0;
+    border-color: transparent rgba(255, 255, 255, 0.92) transparent transparent;
 }
 
 .ml-mobile-fab__primary-icon {
@@ -3521,7 +3656,9 @@ canvas.video-stream {
     transition:
         opacity var(--ml-fab-duration) var(--ml-fab-ease),
         transform var(--ml-fab-duration) var(--ml-fab-ease),
-        border-color var(--ml-fab-duration) var(--ml-fab-ease);
+        border-color var(--ml-fab-duration) var(--ml-fab-ease),
+        background-color var(--ml-fab-duration) var(--ml-fab-ease),
+        box-shadow var(--ml-fab-duration) var(--ml-fab-ease);
     transition-delay: 0ms;
     pointer-events: none;
 }
@@ -3538,33 +3675,16 @@ canvas.video-stream {
     pointer-events: auto;
 }
 
-/* Hold primary: show only last-used action for slide-to-confirm. */
-.ml-mobile-fab--quick .ml-mobile-fab__action {
-    opacity: 0;
-    pointer-events: none;
-    transition-delay: 0ms;
-}
-
-.ml-mobile-fab--quick .ml-mobile-fab__action--quick-target {
-    opacity: 1;
-    transform: translate3d(
-            calc(var(--ml-fab-x) * var(--ml-fab-radius)),
-            calc(var(--ml-fab-y) * var(--ml-fab-radius)),
-            0
-        )
-        scale(1);
-    pointer-events: none;
-    border-color: rgba(255, 255, 255, 0.35);
-}
-
-.ml-mobile-fab--quick .ml-mobile-fab__action--quick-target.ml-mobile-fab__action--quick-hover {
-    border-color: rgba(255, 255, 255, 0.7);
+/* Finger sliding from primary onto a satellite */
+.ml-mobile-fab__action--slide-hover {
+    border-color: rgba(255, 255, 255, 0.75);
     transform: translate3d(
             calc(var(--ml-fab-x) * var(--ml-fab-radius)),
             calc(var(--ml-fab-y) * var(--ml-fab-radius)),
             0
         )
         scale(1.12);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22);
 }
 
 .ml-mobile-fab__action:active {
@@ -3577,7 +3697,16 @@ canvas.video-stream {
 }
 
 .ml-mobile-fab__action--active {
-    border-color: rgba(255, 255, 255, 0.4);
+    border-color: rgba(226, 75, 74, 0.95);
+    background: var(--ml-fab-primary);
+    color: #fff;
+    box-shadow:
+        0 0 0 2px rgba(226, 75, 74, 0.35),
+        0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+.ml-mobile-fab__action--active .ml-mobile-fab__action-icon {
+    opacity: 1;
 }
 
 .ml-mobile-fab__action-icon {
@@ -3594,7 +3723,8 @@ canvas.video-stream {
 
 @media (prefers-reduced-motion: reduce) {
     .ml-mobile-fab__primary,
-    .ml-mobile-fab__action {
+    .ml-mobile-fab__action,
+    .ml-mobile-fab__drag-hint {
         transition: none !important;
         transition-delay: 0ms !important;
     }
@@ -3624,4 +3754,125 @@ canvas.video-stream {
     display: block;
     pointer-events: none;
     image-rendering: pixelated;
+}
+
+/* ---- Modifier Popup (F-keys panel) ---- */
+.ml-modifier-popup {
+    position: fixed;
+    z-index: 100130;
+    background: var(--bg-2, #0d1a24);
+    border: 1px solid var(--accent-cyan-2, #00d4ff);
+    border-radius: 10px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    min-width: 280px;
+    overflow: hidden;
+}
+
+.ml-modifier-popup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 15%, var(--bg-2, #0d1a24));
+    border-bottom: 1px solid color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 30%, rgba(255, 255, 255, 0.1));
+}
+
+.ml-modifier-popup-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent-cyan-light, #00ffff);
+}
+
+.ml-modifier-popup-close {
+    padding: 2px 8px;
+    font-size: 16px;
+    color: var(--text-2, #ccc);
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-left: auto;
+}
+
+.ml-modifier-popup-close:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary, #fff);
+}
+
+.ml-modifier-popup-tabs {
+    display: flex;
+    gap: 4px;
+}
+
+.ml-modifier-popup-tab {
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-2, #ccc);
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.ml-modifier-popup-tab:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.ml-modifier-popup-tab.is-active {
+    background: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 30%, transparent);
+    border-color: var(--accent-cyan-2, #00d4ff);
+    color: var(--accent-cyan-light, #00ffff);
+}
+
+.ml-modifier-popup-content {
+    padding: 8px;
+}
+
+.ml-popup-keyboard {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ml-popup-row {
+    display: grid;
+    grid-template-columns: repeat(10, 1fr);
+    gap: 4px;
+}
+
+.ml-popup-key {
+    padding: 8px 4px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary, #fff);
+    background: var(--bg-3, #1a2530);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.1s ease;
+    min-height: 36px;
+}
+
+.ml-popup-key:hover {
+    background: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 25%, var(--bg-3, #1a2530));
+    border-color: var(--accent-cyan-2, #00d4ff);
+}
+
+.ml-popup-key:active {
+    transform: scale(0.95);
+    background: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 40%, var(--bg-3, #1a2530));
+}
+
+.ml-popup-key--small {
+    font-size: 12px;
+    padding: 6px 2px;
+    min-height: 32px;
+}
+
+.ml-popup-key--action {
+    background: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 15%, var(--bg-3, #1a2530));
+    border-color: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 40%, rgba(255, 255, 255, 0.15));
 }
