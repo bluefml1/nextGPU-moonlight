@@ -29,21 +29,19 @@ type TierDef = {
     id: TierId
     labelKey: string
     fullLabelKey: string
-    hintKey: string
 }
 
 const TIER_DEFS: TierDef[] = [
-    { id: "warning", labelKey: "bitrateHud.tier.warning.label", fullLabelKey: "bitrateHud.tier.warning.fullLabel", hintKey: "bitrateHud.tier.warning.hint" },
-    { id: "info", labelKey: "bitrateHud.tier.info.label", fullLabelKey: "bitrateHud.tier.info.fullLabel", hintKey: "bitrateHud.tier.info.hint" },
-    { id: "success", labelKey: "bitrateHud.tier.success.label", fullLabelKey: "bitrateHud.tier.success.fullLabel", hintKey: "bitrateHud.tier.success.hint" },
-    { id: "accent", labelKey: "bitrateHud.tier.accent.label", fullLabelKey: "bitrateHud.tier.accent.fullLabel", hintKey: "bitrateHud.tier.accent.hint" },
+    { id: "warning", labelKey: "bitrateHud.tier.warning.label", fullLabelKey: "bitrateHud.tier.warning.fullLabel" },
+    { id: "info", labelKey: "bitrateHud.tier.info.label", fullLabelKey: "bitrateHud.tier.info.fullLabel" },
+    { id: "success", labelKey: "bitrateHud.tier.success.label", fullLabelKey: "bitrateHud.tier.success.fullLabel" },
+    { id: "accent", labelKey: "bitrateHud.tier.accent.label", fullLabelKey: "bitrateHud.tier.accent.fullLabel" },
 ]
 
-function tierText(def: TierDef): { label: string; fullLabel: string; hint: string } {
+function tierText(def: TierDef): { label: string; fullLabel: string } {
     return {
         label: streamT(def.labelKey),
         fullLabel: streamT(def.fullLabelKey),
-        hint: streamT(def.hintKey),
     }
 }
 
@@ -65,6 +63,7 @@ export type RealtimeBitrateHud = {
     setCommitted: (mbps: number) => void
     setBounds: (tier: StreamProfileBitrateTier) => void
     setApplyBusy: (busy: boolean) => void
+    setExpanded: (next: boolean) => void
     getPendingMbps: () => number
     getCommittedMbps: () => number
     revertToCommitted: () => void
@@ -201,6 +200,8 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
 
     const detailTop = document.createElement("div")
     detailTop.className = "ml-rt-bitrate__detail-top"
+    const valueGroup = document.createElement("div")
+    valueGroup.className = "ml-rt-bitrate__value-group"
     const bigNum = document.createElement("span")
     bigNum.className = "ml-rt-bitrate__big-num"
     const bigUnit = document.createElement("span")
@@ -208,9 +209,9 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
     bigUnit.textContent = streamT("bitrateHud.unit.mbps")
     const pill = document.createElement("span")
     pill.className = "ml-rt-bitrate__pill"
-    detailTop.appendChild(bigNum)
-    detailTop.appendChild(bigUnit)
-    detailTop.appendChild(pill)
+    valueGroup.appendChild(bigNum)
+    valueGroup.appendChild(bigUnit)
+    valueGroup.appendChild(pill)
 
     const presetsRow = document.createElement("div")
     presetsRow.className = "ml-rt-bitrate__presets"
@@ -240,13 +241,10 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
     }
     rebuildPresetButtons()
 
-    const hint = document.createElement("p")
-    hint.className = "ml-rt-bitrate__hint"
-
+    detailTop.appendChild(valueGroup)
+    detailTop.appendChild(presetsRow)
     detailInner.appendChild(intro)
     detailInner.appendChild(detailTop)
-    detailInner.appendChild(presetsRow)
-    detailInner.appendChild(hint)
     detail.appendChild(detailInner)
 
     root.appendChild(strip)
@@ -298,7 +296,6 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
             tierLabel.textContent = text.label
         }
         pill.textContent = text.fullLabel
-        hint.textContent = text.hint
         bigNum.textContent = formatStreamBitrateMbpsNumber(mbps)
         root.setAttribute("aria-valuetext", `${formatStreamBitrateMbpsDisplay(mbps)}, ${text.label}`)
         if (!editingValue) {
@@ -409,24 +406,28 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
 
     chevron.addEventListener("click", () => {
         if (range.disabled) return
-        expanded = !expanded
-        root.classList.toggle("ml-rt-bitrate--expanded", expanded)
-        chevron.setAttribute("aria-expanded", expanded ? "true" : "false")
+        setExpanded(!expanded)
     })
 
     closeBtn.addEventListener("click", (e) => {
         e.stopPropagation()
+        setExpanded(false)
         onCloseRequested?.()
     })
+
+    function setExpanded(next: boolean) {
+        expanded = next
+        root.classList.toggle("ml-rt-bitrate--expanded", expanded)
+        chevron.setAttribute("aria-expanded", expanded ? "true" : "false")
+    }
 
     function setDisabled(disabled: boolean) {
         range.disabled = disabled
         root.classList.toggle("ml-rt-bitrate--disabled", disabled)
         root.toggleAttribute("aria-disabled", disabled)
         if (disabled) {
-            expanded = false
-            root.classList.remove("ml-rt-bitrate--expanded", "ml-rt-bitrate--editing")
-            chevron.setAttribute("aria-expanded", "false")
+            setExpanded(false)
+            root.classList.remove("ml-rt-bitrate--editing")
             closeEditor(false)
         }
     }
@@ -472,6 +473,7 @@ export function createRealtimeBitrateHud(options: CreateRealtimeBitrateHudOption
         setCommitted,
         setBounds,
         setApplyBusy,
+        setExpanded,
         getPendingMbps: () => pendingMbps,
         getCommittedMbps: () => committedMbps,
         revertToCommitted,

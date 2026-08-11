@@ -558,6 +558,11 @@ class ViewerApp implements Component {
     private hudTrayDragOffsetY = 0
     private hudTrayDragWasDragging = false
     private hudTrayDragSuppressClickUntilMs = 0
+    /**
+     * Compact toolbar pose at position A, captured when the first overlay panel opens.
+     * Restored only when both Stats and Quality are closed — so both open-order flows return to A.
+     */
+    private hudTrayOriginPose: { left: number; top: number; width: number; height: number } | null = null
 
     private readonly streamConnectionConsoleLogger = new StreamConnectionInfoConsoleLogger()
 
@@ -883,6 +888,111 @@ class ViewerApp implements Component {
         tray.style.right = "12px"
     }
 
+    private isBitrateHudOpen(): boolean {
+        return getSettingsForApp(this.getAppId())?.showStreamBitrateHud !== false
+    }
+
+    private isStatsHudOpen(): boolean {
+        return !this.statsDiv.hidden && !this.statsClosed
+    }
+
+    /**
+     * Place the tray after a size change by keeping the nearest screen edges stable
+     * (so an expanded panel stays on-screen). Final close restores {@link hudTrayOriginPose}.
+     */
+    private withHudTrayEdgeAnchorsPreserved(update: () => void): void {
+        const tray = this.getOverlayHudDragEl()
+        if (!tray || this.fullscreenToggleButtonDragging) {
+            update()
+            return
+        }
+        const before = tray.getBoundingClientRect()
+        const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+        const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+        const distLeft = before.left
+        const distRight = viewportWidth - before.right
+        const distTop = before.top
+        const distBottom = viewportHeight - before.bottom
+        const anchorRight = distRight <= distLeft
+        const anchorBottom = distBottom <= distTop
+        const anchorX = anchorRight ? before.right : before.left
+        const anchorY = anchorBottom ? before.bottom : before.top
+        update()
+        void tray.offsetWidth
+        if (!this.fullscreenToggleButtonManualPosition) {
+            tray.style.left = "auto"
+            tray.style.top = "12px"
+            tray.style.right = "12px"
+            return
+        }
+        const width = tray.offsetWidth || Math.max(1, before.width)
+        const height = tray.offsetHeight || Math.max(1, before.height)
+        const maxLeft = Math.max(8, viewportWidth - width - 8)
+        const maxTop = Math.max(8, viewportHeight - height - 8)
+        const nextLeft = Math.min(Math.max(8, anchorRight ? anchorX - width : anchorX), maxLeft)
+        const nextTop = Math.min(Math.max(8, anchorBottom ? anchorY - height : anchorY), maxTop)
+        tray.style.right = "auto"
+        tray.style.left = `${Math.round(nextLeft)}px`
+        tray.style.top = `${Math.round(nextTop)}px`
+    }
+
+    /** Capture position A once — only when opening the first overlay from the compact toolbar. */
+    private ensureHudTrayOriginPose(): void {
+        if (this.hudTrayOriginPose) return
+        const tray = this.getOverlayHudDragEl()
+        if (!tray) return
+        const rect = tray.getBoundingClientRect()
+        this.hudTrayOriginPose = {
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+        }
+        this.fullscreenToggleButtonManualPosition = true
+        tray.style.right = "auto"
+        tray.style.left = `${Math.round(rect.left)}px`
+        tray.style.top = `${Math.round(rect.top)}px`
+    }
+
+    private syncHudTrayPosesAfterDrag(): void {
+        const tray = this.getOverlayHudDragEl()
+        if (!tray || !this.hudTrayOriginPose) return
+        const rect = tray.getBoundingClientRect()
+        const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+        const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+        const anchorRight = viewportWidth - rect.right <= rect.left
+        const anchorBottom = viewportHeight - rect.bottom <= rect.top
+        const pose = this.hudTrayOriginPose
+        this.hudTrayOriginPose = {
+            left: anchorRight ? rect.right - pose.width : rect.left,
+            top: anchorBottom ? rect.bottom - pose.height : rect.top,
+            width: pose.width,
+            height: pose.height,
+        }
+    }
+
+    /** Restore position A only when both Stats and Quality are closed. */
+    private restoreHudTrayOriginPoseIfIdle(): void {
+        if (this.isBitrateHudOpen() || this.isStatsHudOpen()) return
+        const pose = this.hudTrayOriginPose
+        this.hudTrayOriginPose = null
+        const tray = this.getOverlayHudDragEl()
+        if (!pose || !tray) return
+        void tray.offsetWidth
+        const width = tray.offsetWidth || pose.width || 200
+        const height = tray.offsetHeight || pose.height || 36
+        const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+        const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+        const maxLeft = Math.max(8, viewportWidth - width - 8)
+        const maxTop = Math.max(8, viewportHeight - height - 8)
+        const nextLeft = Math.min(Math.max(8, pose.left), maxLeft)
+        const nextTop = Math.min(Math.max(8, pose.top), maxTop)
+        this.fullscreenToggleButtonManualPosition = true
+        tray.style.right = "auto"
+        tray.style.left = `${Math.round(nextLeft)}px`
+        tray.style.top = `${Math.round(nextTop)}px`
+    }
+
     private syncOverlayBitrateRangeFromSettings(): void {
         const hud = this.realtimeBitrateHud
         if (!hud) return
@@ -937,6 +1047,9 @@ class ViewerApp implements Component {
         if (this.realtimeBitrateHud) {
             this.realtimeBitrateHud.root.style.display = showBitrate ? "" : "none"
         }
+        if (this.overlayHudTray) {
+            this.overlayHudTray.classList.toggle("video-overlay-hud-tray--bitrate-open", showBitrate)
+        }
         if (this.hudTrayQualityRestoreBtn) {
             this.hudTrayQualityRestoreBtn.style.display = showBitrate ? "none" : ""
         }
@@ -949,13 +1062,16 @@ class ViewerApp implements Component {
     private reopenStreamStatsFromTray(): void {
         const stats = this.getStream()?.getStats()
         if (!stats) return
-        this.statsClosed = false
-        this.statsDiv.hidden = false
-        if (!stats.isEnabled()) {
-            stats.setEnabled(true)
-        }
-        this.syncHudTrayToolbarButtons()
-        this.syncFullscreenToggleButtonPosition()
+        this.ensureHudTrayOriginPose()
+        this.withHudTrayEdgeAnchorsPreserved(() => {
+            this.statsClosed = false
+            this.statsDiv.hidden = false
+            if (!stats.isEnabled()) {
+                stats.setEnabled(true)
+            }
+            this.syncHudTrayToolbarButtons()
+            this.syncFullscreenToggleButtonPosition()
+        })
     }
 
     private startHudTrayDrag(event: PointerEvent, captureEl: HTMLElement): void {
@@ -1024,6 +1140,7 @@ class ViewerApp implements Component {
         document.removeEventListener("pointercancel", this.onHudTrayDragPointerEnd)
         if (this.hudTrayDragWasDragging) {
             this.hudTrayDragSuppressClickUntilMs = Date.now() + 500
+            this.syncHudTrayPosesAfterDrag()
         }
         this.hudTrayDragWasDragging = false
         this.statsDiv.classList.remove("video-stats-dragging")
@@ -1071,7 +1188,17 @@ class ViewerApp implements Component {
                 const s = getSettingsForApp(this.getAppId())
                 s.showStreamBitrateHud = false
                 setSettingsForApp(this.getAppId(), s)
-                this.refreshStreamOverlayBitrate()
+                this.realtimeBitrateHud?.setExpanded(false)
+                if (this.isStatsHudOpen()) {
+                    this.withHudTrayEdgeAnchorsPreserved(() => {
+                        this.refreshStreamOverlayBitrate()
+                        this.syncHudTrayToolbarButtons()
+                        this.syncFullscreenToggleButtonPosition()
+                    })
+                } else {
+                    this.refreshStreamOverlayBitrate()
+                    this.restoreHudTrayOriginPoseIfIdle()
+                }
             },
         })
         bitrateHud.setDisabled(true)
@@ -1096,7 +1223,17 @@ class ViewerApp implements Component {
             const s = getSettingsForApp(this.getAppId())
             s.showStreamBitrateHud = true
             setSettingsForApp(this.getAppId(), s)
-            this.refreshStreamOverlayBitrate()
+            this.ensureHudTrayOriginPose()
+            void this.getOverlayHudDragEl()?.offsetWidth
+            this.withHudTrayEdgeAnchorsPreserved(() => {
+                // Show + expand in one turn so layout never passes through a half-open frame.
+                if (this.realtimeBitrateHud) {
+                    this.realtimeBitrateHud.root.style.display = ""
+                    this.realtimeBitrateHud.setExpanded(true)
+                }
+                this.overlayHudTray?.classList.add("video-overlay-hud-tray--bitrate-open")
+                this.refreshStreamOverlayBitrate()
+            })
         })
 
         const statsBtn = document.createElement("button")
@@ -1497,15 +1634,23 @@ class ViewerApp implements Component {
             this.statsMinimized = !this.statsMinimized
             localStorage.setItem("streamStatsMinimized", this.statsMinimized ? "1" : "0")
         })
-        this.statsCloseButton.classList.add("video-stats-action-btn")
+        this.statsCloseButton.classList.add("video-stats-action-btn", "video-stats-action-btn--close")
         this.statsCloseButton.type = "button"
         this.statsCloseButton.textContent = "×"
         this.statsCloseButton.addEventListener("click", () => {
             this.statsClosed = true
             this.statsDiv.hidden = true
             this.getStream()?.getStats().setEnabled(false)
-            this.syncHudTrayToolbarButtons()
-            this.syncFullscreenToggleButtonPosition()
+            if (this.isBitrateHudOpen()) {
+                this.withHudTrayEdgeAnchorsPreserved(() => {
+                    this.syncHudTrayToolbarButtons()
+                    this.syncFullscreenToggleButtonPosition()
+                })
+            } else {
+                this.syncHudTrayToolbarButtons()
+                this.syncFullscreenToggleButtonPosition()
+                this.restoreHudTrayOriginPoseIfIdle()
+            }
         })
         this.statsSummaryDiv.classList.add("video-stats-summary")
         this.statsDetailsDiv.classList.add("video-stats-details")
@@ -2936,6 +3081,17 @@ class ViewerApp implements Component {
         this.syncFullscreenToggleButtonPosition()
     }
     private connectionStatusLabel(statsData: StreamStatsData): string {
+        const level = this.connectionQualityLevel(statsData)
+        if (level === "veryBad") return streamT("stats.quality.veryBad")
+        if (level === "bad") return streamT("stats.quality.bad")
+        if (level === "normal") return streamT("stats.quality.normal")
+        if (level === "good") return streamT("stats.quality.good")
+        return streamT("stats.quality.veryGood")
+    }
+
+    private connectionQualityLevel(
+        statsData: StreamStatsData,
+    ): "veryBad" | "bad" | "normal" | "good" | "veryGood" {
         const latency = this.getConnectionLatencyMs(statsData)
         const packetLoss = typeof statsData.transport.webrtcPacketsLost === "number"
             ? statsData.transport.webrtcPacketsLost
@@ -2954,18 +3110,69 @@ class ViewerApp implements Component {
             : statsData.videoFps
 
         if ((latency != null && latency >= 120) || (lossPercent != null && lossPercent >= 8) || (jitter != null && jitter >= 20) || (fps != null && fps < 20)) {
-            return streamT("stats.quality.veryBad")
+            return "veryBad"
         }
         if ((latency != null && latency >= 80) || (lossPercent != null && lossPercent >= 4) || (jitter != null && jitter >= 12) || (fps != null && fps < 35)) {
-            return streamT("stats.quality.bad")
+            return "bad"
         }
         if ((latency != null && latency >= 55) || (lossPercent != null && lossPercent >= 2) || (jitter != null && jitter >= 8) || (fps != null && fps < 50)) {
-            return streamT("stats.quality.normal")
+            return "normal"
         }
         if ((latency != null && latency >= 35) || (lossPercent != null && lossPercent >= 0.6) || (jitter != null && jitter >= 4) || (fps != null && fps < 58)) {
-            return streamT("stats.quality.good")
+            return "good"
         }
-        return streamT("stats.quality.veryGood")
+        return "veryGood"
+    }
+
+    /** Map a quality level / metric band to green / yellow / red. */
+    private statsValueTone(
+        level: "good" | "warn" | "bad" | "neutral" | "veryBad" | "normal" | "veryGood",
+    ): "good" | "warn" | "bad" | "neutral" {
+        if (level === "veryGood" || level === "good") return "good"
+        if (level === "normal" || level === "warn") return "warn"
+        if (level === "bad" || level === "veryBad") return "bad"
+        return "neutral"
+    }
+
+    private coloredStatsValue(text: string, tone: "good" | "warn" | "bad" | "neutral"): string {
+        const toneClass =
+            tone === "neutral" ? "video-stats-value" : `video-stats-value video-stats-value--${tone}`
+        return `<span class="${toneClass}">${text}</span>`
+    }
+
+    private toneForHigherBetter(value: number | null, badBelow: number, warnBelow: number): "good" | "warn" | "bad" | "neutral" {
+        if (value == null || !Number.isFinite(value)) return "neutral"
+        if (value < badBelow) return "bad"
+        if (value < warnBelow) return "warn"
+        return "good"
+    }
+
+    private toneForLowerBetter(value: number | null, warnAt: number, badAt: number): "good" | "warn" | "bad" | "neutral" {
+        if (value == null || !Number.isFinite(value)) return "neutral"
+        if (value >= badAt) return "bad"
+        if (value >= warnAt) return "warn"
+        return "good"
+    }
+
+    private toneForIcePairState(state: string): "good" | "warn" | "bad" | "neutral" {
+        const s = state.toLowerCase()
+        if (s.includes("succeed") || s.includes("connected") || s === "completed") return "good"
+        if (s.includes("fail") || s.includes("disconnect") || s.includes("closed")) return "bad"
+        if (s.includes("check") || s.includes("connect") || s.includes("new")) return "warn"
+        return "neutral"
+    }
+
+    private toneForBitrateVsTarget(
+        bitrate: number | null,
+        targetMbps: number | null | undefined,
+    ): "good" | "warn" | "bad" | "neutral" {
+        if (bitrate == null || targetMbps == null || !Number.isFinite(bitrate) || !Number.isFinite(targetMbps) || targetMbps <= 0) {
+            return "neutral"
+        }
+        const ratio = bitrate / targetMbps
+        if (ratio >= 0.85) return "good"
+        if (ratio >= 0.6) return "warn"
+        return "bad"
     }
 
     private showBitrateToast(text: string, variant: "sent" | "applied" | "rejected") {
@@ -3042,6 +3249,12 @@ class ViewerApp implements Component {
         const iceCandidatePair = this.iceCandidatePairType(statsData)
         const connectionStateLabel = iceCandidatePair ? `${icePairState} (${iceCandidatePair})` : icePairState
         const connectionStatusLabel = this.connectionStatusLabel(statsData)
+        const statusTone = this.statsValueTone(this.connectionQualityLevel(statsData))
+        const fpsTone = this.toneForHigherBetter(fps, 35, 50)
+        const latencyTone = this.toneForLowerBetter(latency, 55, 80)
+        const jitterTone = this.toneForLowerBetter(jitter, 8, 12)
+        const lossTone = this.toneForLowerBetter(packetLossPercent, 2, 4)
+        const iceTone = this.toneForIcePairState(icePairState)
         const na = streamT("stats.na")
         const resolution = statsData.videoWidth != null && statsData.videoHeight != null
             ? `${statsData.videoWidth}x${statsData.videoHeight}`
@@ -3051,12 +3264,14 @@ class ViewerApp implements Component {
         const formattedBitrate = this.formatWithUnit(bitrate, "Mbps", 2)
         const rawTargetMbps =
             this.stream?.getRequestedVideoBitrateMbps() ?? getSettingsForApp(this.getAppId())?.bitrate
+        const bitrateTone = this.toneForBitrateVsTarget(bitrate, rawTargetMbps)
         const targetBitrateRow =
             rawTargetMbps != null && Number.isFinite(rawTargetMbps)
-                ? `<span class="video-stats-row"><span class="video-stats-label">${streamT("stats.targetBitrate")}</span><span>${formatStreamBitrateMbpsDisplay(
-                      rawTargetMbps,
-                  )}</span></span>`
-                : `<span class="video-stats-row"><span class="video-stats-label">${streamT("stats.targetBitrate")}</span><span>${na}</span></span>`
+                ? `<span class="video-stats-row"><span class="video-stats-label">${streamT("stats.targetBitrate")}</span>${this.coloredStatsValue(
+                      formatStreamBitrateMbpsDisplay(rawTargetMbps),
+                      "neutral",
+                  )}</span>`
+                : `<span class="video-stats-row"><span class="video-stats-label">${streamT("stats.targetBitrate")}</span>${this.coloredStatsValue(na, "neutral")}</span>`
         this.statsMinimizeButton.textContent = this.statsMinimized ? "▢" : "—"
         this.statsTopBar.classList.toggle("video-stats-topbar-mini", this.statsMinimized)
         this.statsDetailsDiv.classList.remove("video-stats-mini", "video-stats-details-visible")
@@ -3064,10 +3279,10 @@ class ViewerApp implements Component {
 
         if (this.statsMinimized) {
             this.statsTitleDiv.innerHTML = `
-                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.fps")}</span>${this.formatWithUnit(fps, "fps", 0)}</span>
-                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.latency")}</span>${this.formatWithUnit(latency, "ms", 0)}</span>
-                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.status")}</span>${connectionStatusLabel}</span>
-                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.bitrate")}</span>${formattedBitrate}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.fps")}</span>${this.coloredStatsValue(this.formatWithUnit(fps, "fps", 0), fpsTone)}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.latency")}</span>${this.coloredStatsValue(this.formatWithUnit(latency, "ms", 0), latencyTone)}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.status")}</span>${this.coloredStatsValue(connectionStatusLabel, statusTone)}</span>
+                <span class="video-stats-chip"><span class="video-stats-label">${streamT("stats.bitrate")}</span>${this.coloredStatsValue(formattedBitrate, bitrateTone)}</span>
             `
             this.statsSummaryDiv.hidden = true
             this.statsSummaryDiv.innerHTML = ""
@@ -3077,16 +3292,16 @@ class ViewerApp implements Component {
         this.statsTitleDiv.textContent = streamT("stats.title")
         this.statsSummaryDiv.hidden = false
         this.statsSummaryDiv.innerHTML = `
-            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.connectionState")}</span><span>${connectionStateLabel}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.status")}</span><span>${connectionStatusLabel}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.fps")}</span><span>${this.formatWithUnit(fps, "fps", 0)}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.latency")}</span><span>${this.formatWithUnit(latency, "ms", 0)}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.videoCodec")}</span><span>${codec}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.resolution")}</span><span>${resolution}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.jitter")}</span><span>${this.formatWithUnit(jitter, "ms", 2)}</span></span>
-            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.loss")}</span><span>${packetLossPercent != null ? `${packetLossPercent.toFixed(2)}%` : na}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.connectionState")}</span>${this.coloredStatsValue(connectionStateLabel, iceTone)}</span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.status")}</span>${this.coloredStatsValue(connectionStatusLabel, statusTone)}</span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.fps")}</span>${this.coloredStatsValue(this.formatWithUnit(fps, "fps", 0), fpsTone)}</span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.latency")}</span>${this.coloredStatsValue(this.formatWithUnit(latency, "ms", 0), latencyTone)}</span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.videoCodec")}</span>${this.coloredStatsValue(codec, "neutral")}</span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.resolution")}</span>${this.coloredStatsValue(resolution, "neutral")}</span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.jitter")}</span>${this.coloredStatsValue(this.formatWithUnit(jitter, "ms", 2), jitterTone)}</span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.loss")}</span>${this.coloredStatsValue(packetLossPercent != null ? `${packetLossPercent.toFixed(2)}%` : na, lossTone)}</span>
             ${targetBitrateRow}
-            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.bitrate")}</span><span>${formattedBitrate}</span></span>
+            <span class="video-stats-row"><span class="video-stats-label">${streamT("stats.bitrate")}</span>${this.coloredStatsValue(formattedBitrate, bitrateTone)}</span>
         `
         this.statsDetailsDiv.classList.remove("video-stats-details-visible")
     }

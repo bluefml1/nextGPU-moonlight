@@ -359,6 +359,21 @@ export class Stream implements Component {
     }
 
     private async onMessage(message: StreamServerMessage) {
+        if (message === "SessionCancelled") {
+            this.streamingVideoActive = false
+            this.lastAppliedBitrateMbps = null
+            this.pendingBitrateAckKbps = null
+            this.pendingBitrateAckSource = null
+            if (this.bitrateRequestDebounceTimer != null) {
+                clearTimeout(this.bitrateRequestDebounceTimer)
+                this.bitrateRequestDebounceTimer = null
+            }
+            this.debugLog(streamDebugLine("log.connectionTerminated", { code: "SessionCancelled" }), {
+                type: "fatalDescription",
+            })
+            return
+        }
+
         if ("DebugLog" in message) {
             const debugLog = message.DebugLog
 

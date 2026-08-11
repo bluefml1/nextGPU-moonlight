@@ -1762,9 +1762,10 @@ canvas.video-stream {
     flex: 1 1 auto;
     min-width: 0;
     font-size: 10px;
+    font-weight: 700;
     letter-spacing: .09em;
     text-transform: uppercase;
-    color: rgba(240, 245, 255, 0.72);
+    color: rgba(245, 248, 255, 0.92);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1800,6 +1801,20 @@ canvas.video-stream {
     color: rgba(240,245,255,.9);
     line-height: 1;
     font-size: 12px;
+}
+
+.video-stats-action-btn--close {
+    border-color: rgba(248, 113, 113, 0.55);
+    background: rgba(239, 68, 68, 0.22);
+    color: #f87171;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.video-stats-action-btn--close:hover {
+    border-color: rgba(248, 113, 113, 0.8);
+    background: rgba(239, 68, 68, 0.36);
+    color: #fecaca;
 }
 
 .video-fullscreen-toggle-btn {
@@ -1892,12 +1907,28 @@ canvas.video-stream {
     z-index: auto;
     box-sizing: border-box;
     width: fit-content;
-    max-width: min(520px, calc(100vw - 16px));
+    max-width: min(420px, calc(100vw - 16px));
 }
 
 .video-overlay-hud-tray:has(.video-overlay-hud-tray__stats .video-stats:not([hidden])) {
-    width: 100%;
+    width: min(460px, calc(100vw - 16px));
+    max-width: min(460px, calc(100vw - 16px));
     align-items: stretch;
+}
+
+/* Bitrate HUD open: fixed tray width from the first frame (no grow-to-fit text) */
+.video-overlay-hud-tray--bitrate-open,
+.video-overlay-hud-tray:has(.ml-rt-bitrate--expanded) {
+    width: min(460px, calc(100vw - 16px));
+    max-width: min(460px, calc(100vw - 16px));
+}
+
+/* Stats + Quality together: same fixed width, no animated resize */
+.video-overlay-hud-tray--bitrate-open:has(.video-overlay-hud-tray__stats .video-stats:not([hidden])),
+.video-overlay-hud-tray:has(.ml-rt-bitrate--expanded):has(.video-overlay-hud-tray__stats .video-stats:not([hidden])) {
+    width: min(460px, calc(100vw - 16px));
+    max-width: min(460px, calc(100vw - 16px));
+    transition: none;
 }
 
 .video-overlay-hud-tray__toolbar {
@@ -1915,6 +1946,7 @@ canvas.video-stream {
 }
 
 .video-overlay-hud-tray__toolbar:has(.ml-rt-bitrate--expanded),
+.video-overlay-hud-tray--bitrate-open .video-overlay-hud-tray__toolbar,
 .video-overlay-hud-tray:has(.video-overlay-hud-tray__stats .video-stats:not([hidden]))
     .video-overlay-hud-tray__toolbar {
     width: 100%;
@@ -1935,6 +1967,26 @@ canvas.video-stream {
 .video-overlay-hud-tray__toolbar .ml-rt-bitrate__strip {
     flex: 0 0 auto;
     order: 1;
+}
+
+/* Keep strip + Stats + fullscreen on one row when bitrate panel is open */
+.video-overlay-hud-tray--bitrate-open .ml-rt-bitrate__strip {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: calc(100% - 128px);
+}
+
+.video-overlay-hud-tray--bitrate-open .ml-rt-bitrate__track-wrap {
+    flex: 1 1 56px;
+    width: auto;
+    min-width: 56px;
+    max-width: 88px;
+}
+
+.video-overlay-hud-tray--bitrate-open .video-overlay-hud-tray__tool-btn--stats,
+.video-overlay-hud-tray--bitrate-open .video-fullscreen-toggle-btn,
+.video-overlay-hud-tray--bitrate-open .video-overlay-bitrate-apply {
+    flex: 0 0 auto;
 }
 
 .video-overlay-hud-tray__toolbar .video-overlay-bitrate-apply {
@@ -1963,10 +2015,11 @@ canvas.video-stream {
 }
 
 .video-overlay-hud-tray__toolbar .ml-rt-bitrate--expanded .ml-rt-bitrate__detail {
+    /* width:0 + min-width:100% = fill row without contributing intrinsic width (stops text from widening tray) */
     flex: 1 1 100%;
     flex-basis: 100%;
     order: 20;
-    width: 100%;
+    width: 0;
     min-width: 100%;
     max-width: 100%;
     align-self: stretch;
@@ -2394,18 +2447,18 @@ canvas.video-stream {
     display: inline-grid;
     place-items: center;
     border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.24);
-    background: rgba(255, 255, 255, 0.06);
-    color: rgba(255, 255, 255, 0.88);
+    border: 1px solid rgba(255, 90, 90, 0.7);
+    background: rgba(220, 40, 40, 0.42);
+    color: #ff6b6b;
     cursor: pointer;
     font-size: 14px;
     line-height: 1;
-    font-weight: 500;
+    font-weight: 700;
 }
 
 .ml-rt-bitrate__close:hover {
-    background: rgba(255, 80, 80, 0.18);
-    border-color: rgba(255, 120, 120, 0.45);
+    background: rgba(235, 50, 50, 0.62);
+    border-color: rgba(255, 120, 120, 0.9);
     color: #ffffff;
 }
 
@@ -2425,19 +2478,20 @@ canvas.video-stream {
     opacity: 0;
     overflow: hidden;
     pointer-events: none;
-    transition: max-height 0.28s ease, opacity 0.22s ease;
+    transition: none;
     border-radius: 0 0 8px 8px;
 }
 
 .ml-rt-bitrate--expanded .ml-rt-bitrate__detail {
     align-self: stretch;
-    width: 100%;
+    width: 0;
     min-width: 100%;
     max-width: 100%;
     border-top: 0.5px solid rgba(255, 255, 255, 0.2);
-    max-height: 340px;
+    max-height: none;
     opacity: 1;
     pointer-events: auto;
+    overflow: visible;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2455,11 +2509,17 @@ canvas.video-stream {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .ml-rt-bitrate__intro {
     margin: 0;
     padding: 0 0 2px;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .ml-rt-bitrate__intro-title {
@@ -2474,16 +2534,38 @@ canvas.video-stream {
     font-size: 11px;
     line-height: 1.45;
     color: rgba(235, 240, 248, 0.72);
+    min-width: 0;
+    max-width: 100%;
+    min-height: calc(11px * 1.45 * 2);
+    max-height: calc(11px * 1.45 * 2);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .ml-rt-bitrate__detail-top {
     display: flex;
     flex-direction: row;
-    justify-content: flex-end;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 10px;
+    width: 100%;
+    min-width: 0;
+}
+
+.ml-rt-bitrate__value-group {
+    display: flex;
+    flex-direction: row;
     align-items: baseline;
     flex-wrap: wrap;
-    gap: 8px;
-    width: 100%;
+    gap: 6px 8px;
+    flex: 0 1 auto;
+    min-width: 0;
 }
 
 .ml-rt-bitrate__big-num {
@@ -2531,15 +2613,21 @@ canvas.video-stream {
 }
 
 .ml-rt-bitrate__presets {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
     gap: 6px;
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 240px;
+    margin-left: auto;
 }
 
 .ml-rt-bitrate__preset {
     margin: 0;
+    flex: 1 1 0;
     min-width: 0;
-    padding: 6px 2px;
+    padding: 5px 4px;
     border-radius: 8px;
     cursor: pointer;
     border: 0.5px solid rgba(255, 255, 255, 0.22);
@@ -2584,13 +2672,6 @@ canvas.video-stream {
 .ml-rt-bitrate--tier-accent .ml-rt-bitrate__preset.is-active {
     border-color: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 55%, rgba(255, 255, 255, 0.2));
     background: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 18%, rgba(0, 0, 0, 0.45));
-}
-
-.ml-rt-bitrate__hint {
-    margin: 0;
-    font-size: 11px;
-    line-height: 1.4;
-    color: rgba(235, 240, 248, 0.55);
 }
 
 .ml-bitrate-toast-stack {
@@ -2697,6 +2778,25 @@ canvas.video-stream {
     font-size: 9px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
+}
+
+.video-stats-value {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: rgba(240, 245, 255, 0.92);
+    text-align: right;
+}
+
+.video-stats-value--good {
+    color: #4ade80;
+}
+
+.video-stats-value--warn {
+    color: #fbbf24;
+}
+
+.video-stats-value--bad {
+    color: #f87171;
 }
 
 .video-stats-dot {

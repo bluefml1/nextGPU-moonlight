@@ -88,7 +88,7 @@ const CATALOG: Record<StreamLocale, Record<string, string>> = {
         "bitrateHud.aria.apply": "Apply bitrate and restart stream",
         "bitrateHud.title": "Realtime stream bitrate",
         "bitrateHud.intro":
-            "Adjust target video bitrate (Mbps) for this profile's allowed range. Changes take effect after you click Apply, which restarts the stream with the new bitrate (you will not be asked to pick a profile again). Use Min, Default, or Max presets, or drag the slider, then Apply. Decrease if you see stutter or disconnects.",
+            "Set Mbps within this profile's range, then Apply to restart the stream. Lower it if the stream stutters or drops.",
         "bitrateHud.apply": "Apply",
         "bitrateHud.unit.mbps": "Mbps",
         "bitrateHud.preset.min": "Min",
@@ -96,20 +96,12 @@ const CATALOG: Record<StreamLocale, Record<string, string>> = {
         "bitrateHud.preset.max": "Max",
         "bitrateHud.tier.warning.label": "Low",
         "bitrateHud.tier.warning.fullLabel": "Lower bandwidth",
-        "bitrateHud.tier.warning.hint":
-            "Toward the minimum for this profile. Increase if the image looks blocky.",
         "bitrateHud.tier.info.label": "Mid-low",
         "bitrateHud.tier.info.fullLabel": "Below default",
-        "bitrateHud.tier.info.hint":
-            "Below the profile default. Good when the network is uneven.",
         "bitrateHud.tier.success.label": "Mid-high",
         "bitrateHud.tier.success.fullLabel": "Above default",
-        "bitrateHud.tier.success.hint":
-            "Above the profile default. Use when the picture still looks soft.",
         "bitrateHud.tier.accent.label": "High",
         "bitrateHud.tier.accent.fullLabel": "Near maximum",
-        "bitrateHud.tier.accent.hint":
-            "Near the top of this profile's range. Prefer a stable wired link.",
 
         "stats.title": "Stream Stats",
         "stats.connectionState": "Connection State",
@@ -245,7 +237,7 @@ const CATALOG: Record<StreamLocale, Record<string, string>> = {
         "bitrateHud.aria.apply": "Áp dụng bitrate và khởi động lại stream",
         "bitrateHud.title": "Bitrate stream thời gian thực",
         "bitrateHud.intro":
-            "Điều chỉnh bitrate video mục tiêu (Mbps) trong phạm vi của hồ sơ này. Thay đổi có hiệu lực sau khi bạn nhấn Áp dụng — stream sẽ khởi động lại với bitrate mới (bạn sẽ không phải chọn lại hồ sơ). Dùng Min, Mặc định hoặc Max, hoặc kéo thanh trượt rồi Áp dụng. Giảm nếu bị giật hoặc mất kết nối.",
+            "Chọn Mbps trong phạm vi mạng và máy của bạn rồi áp dụng để restart stream. Giảm nếu giật hoặc mất kết nối.",
         "bitrateHud.apply": "Áp dụng",
         "bitrateHud.unit.mbps": "Mbps",
         "bitrateHud.preset.min": "Min",
@@ -253,20 +245,12 @@ const CATALOG: Record<StreamLocale, Record<string, string>> = {
         "bitrateHud.preset.max": "Max",
         "bitrateHud.tier.warning.label": "Thấp",
         "bitrateHud.tier.warning.fullLabel": "Băng thông thấp",
-        "bitrateHud.tier.warning.hint":
-            "Gần mức tối thiểu của hồ sơ. Tăng nếu hình bị vỡ khối.",
         "bitrateHud.tier.info.label": "Trung thấp",
         "bitrateHud.tier.info.fullLabel": "Dưới mặc định",
-        "bitrateHud.tier.info.hint":
-            "Dưới mặc định của hồ sơ. Phù hợp khi mạng không ổn định.",
         "bitrateHud.tier.success.label": "Trung cao",
         "bitrateHud.tier.success.fullLabel": "Trên mặc định",
-        "bitrateHud.tier.success.hint":
-            "Trên mặc định của hồ sơ. Dùng khi hình vẫn còn mờ.",
         "bitrateHud.tier.accent.label": "Cao",
         "bitrateHud.tier.accent.fullLabel": "Gần tối đa",
-        "bitrateHud.tier.accent.hint":
-            "Gần mức tối đa của hồ sơ. Nên dùng kết nối có dây ổn định.",
 
         "stats.title": "Thống kê stream",
         "stats.connectionState": "Trạng thái kết nối",
