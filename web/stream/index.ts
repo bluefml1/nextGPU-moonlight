@@ -413,6 +413,8 @@ export class Stream implements Component {
             this.eventTarget.dispatchEvent(event)
 
             this.input.onStreamStart(capabilities, [width, height])
+            // Refresh host lock state; first client keydown will toggle host if mismatched.
+            this.sendGeneralMessage("QueryKeyboardLocks")
 
             this.stats.setVideoInfo(format ?? "Unknown", width, height, fps)
             // HDR state will be set when server sends HdrModeUpdate message
@@ -737,6 +739,15 @@ export class Stream implements Component {
                 },
             })
             this.eventTarget.dispatchEvent(hostRejected)
+        } else if ("KeyboardLocks" in message) {
+            const locks = message.KeyboardLocks
+            this.debugLog(
+                `[Keyboard] Host locks caps=${locks.caps_lock} num=${locks.num_lock}`,
+            )
+            this.input.setHostKeyboardLocks({
+                caps_lock: locks.caps_lock,
+                num_lock: locks.num_lock,
+            })
         }
     }
 

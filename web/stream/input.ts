@@ -1,4 +1,4 @@
-import { StreamCapabilities, StreamControllerCapabilities, StreamMouseButton, TransportChannelId } from "../api_bindings.js"
+import { HostKeyboardLocks, StreamCapabilities, StreamControllerCapabilities, StreamKeys, StreamMouseButton, TransportChannelId } from "../api_bindings.js"
 import { ByteBuffer, I16_MAX, U16_MAX, U8_MAX } from "./buffer.js"
 import { ControllerConfig, areGamepadStatesEqual, emptyGamepadState, extractGamepadState, GamepadState, SUPPORTED_BUTTONS } from "./gamepad.js"
 import { convertToKey, convertToModifiers } from "./keyboard.js"
@@ -229,18 +229,87 @@ export class StreamInput {
         this.capabilities = capabilities
         this.streamerSize = streamerSize
         this.registerBufferedControllers()
+        this.setHostKeyboardLocks(capabilities.keyboard_locks)
+    }
+
+    /** Update cached host Caps/Num lock; next keydown will pulse toggles if client differs. */
+    setHostKeyboardLocks(locks: HostKeyboardLocks | null) {
+        this.hostKeyboardLocks = locks ? { ...locks } : null
+        this.keyboardLockSyncPending = locks != null
     }
 
     // -- Keyboard
     private pressedKeys: Set<number> = new Set()
     private lastKeyboardEventAtMs = 0
     private static readonly WATCHDOG_STUCK_KEY_MS = 5000
+    private hostKeyboardLocks: HostKeyboardLocks | null = null
+    private keyboardLockSyncPending = false
 
     onKeyDown(event: KeyboardEvent) {
+        this.syncHostKeyboardLocksFromClient(event)
         this.sendKeyEvent(true, event)
+        this.trackHostLockToggleFromClient(event)
     }
     onKeyUp(event: KeyboardEvent) {
         this.sendKeyEvent(false, event)
+    }
+
+    /**
+     * Align host Caps/Num lock with the client before the first real key after connect/query.
+     * Skip while the event itself is a lock key — that press already toggles the host once.
+     */
+    private syncHostKeyboardLocksFromClient(event: KeyboardEvent) {
+        if (!this.keyboardLockSyncPending || !this.hostKeyboardLocks || !this.connected) {
+            return
+        }
+        if (event.code === "NumLock" || event.code === "CapsLock") {
+            return
+        }
+
+        this.keyboardLockSyncPending = false
+
+        let clientNumLock = false
+        let clientCapsLock = false
+        try {
+            if (typeof event.getModifierState === "function") {
+                clientNumLock = event.getModifierState("NumLock")
+                clientCapsLock = event.getModifierState("CapsLock")
+            }
+        } catch {
+            return
+        }
+
+        if (this.hostKeyboardLocks.num_lock !== clientNumLock) {
+            this.sendKey(true, StreamKeys.VK_NUMLOCK, 0)
+            this.sendKey(false, StreamKeys.VK_NUMLOCK, 0)
+            this.hostKeyboardLocks.num_lock = clientNumLock
+            console.debug(
+                `[Keyboard] Synced host NumLock -> ${clientNumLock ? "on" : "off"}`,
+            )
+        }
+        if (this.hostKeyboardLocks.caps_lock !== clientCapsLock) {
+            this.sendKey(true, StreamKeys.VK_CAPITAL, 0)
+            this.sendKey(false, StreamKeys.VK_CAPITAL, 0)
+            this.hostKeyboardLocks.caps_lock = clientCapsLock
+            console.debug(
+                `[Keyboard] Synced host CapsLock -> ${clientCapsLock ? "on" : "off"}`,
+            )
+        }
+    }
+
+    /** After a lock key is forwarded, cache the client state as the new host state. */
+    private trackHostLockToggleFromClient(event: KeyboardEvent) {
+        if (!this.hostKeyboardLocks) return
+        try {
+            if (typeof event.getModifierState !== "function") return
+            if (event.code === "NumLock") {
+                this.hostKeyboardLocks.num_lock = event.getModifierState("NumLock")
+            } else if (event.code === "CapsLock") {
+                this.hostKeyboardLocks.caps_lock = event.getModifierState("CapsLock")
+            }
+        } catch {
+            /* ignore */
+        }
     }
 
     /** Send clipboard plain text to the host (same path as paste event text). */

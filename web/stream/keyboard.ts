@@ -592,9 +592,49 @@ const VK_MAPPINGS: Record<string, number | null> = {
 }
 
 export function convertToKey(event: KeyboardEvent): number | null {
+    // Numpad digits/decimal: honor the *client* NumLock state so host lock mismatch
+    // does not turn numbers into arrows (or the reverse).
+    const numpadNav = NUMPAD_NAV_WHEN_NUMLOCK_OFF[event.code]
+    if (numpadNav != null) {
+        if (!isClientNumLockOn(event)) {
+            return numpadNav
+        }
+        const numpadKey = VK_MAPPINGS[event.code]
+        if (numpadKey != null) {
+            return numpadKey
+        }
+    }
+
     let key = VK_MAPPINGS[event.code] ?? null
     if (key == null) {
         key = VK_MAPPINGS[event.key] ?? null
     }
     return key
+}
+
+/** Numpad keys that become navigation when NumLock is off. */
+const NUMPAD_NAV_WHEN_NUMLOCK_OFF: Record<string, number> = {
+    Numpad0: StreamKeys.VK_INSERT,
+    Numpad1: StreamKeys.VK_END,
+    Numpad2: StreamKeys.VK_DOWN,
+    Numpad3: StreamKeys.VK_NEXT,
+    Numpad4: StreamKeys.VK_LEFT,
+    Numpad5: StreamKeys.VK_CLEAR,
+    Numpad6: StreamKeys.VK_RIGHT,
+    Numpad7: StreamKeys.VK_HOME,
+    Numpad8: StreamKeys.VK_UP,
+    Numpad9: StreamKeys.VK_PRIOR,
+    NumpadDecimal: StreamKeys.VK_DELETE,
+}
+
+function isClientNumLockOn(event: KeyboardEvent): boolean {
+    try {
+        if (typeof event.getModifierState === "function") {
+            return event.getModifierState("NumLock")
+        }
+    } catch {
+        /* some synthetic events throw */
+    }
+    // Fallback: when NumLock is on, key is typically a digit or decimal separator.
+    return event.key.length === 1 && /[0-9.,]/.test(event.key)
 }
