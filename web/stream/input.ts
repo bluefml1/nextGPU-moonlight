@@ -27,6 +27,15 @@ const MAX_CONTROLLER_SLOTS = 16
 /** Sentinel `gamepadIndex` for a browser-driven virtual controller slot (not `navigator.getGamepads()`). */
 export const VIRTUAL_GAMEPAD_INDEX = -1
 
+/** Win32 VK_PACKET (0xE7): IME/Unicode final character (e.g. Vietnamese Telex "ắ"). */
+const VK_PACKET = 0xE7
+
+function isVkPacketUnicode(event: KeyboardEvent): boolean {
+    return event.keyCode === VK_PACKET
+        && typeof event.key === "string"
+        && event.key.length > 0
+}
+
 function trySendChannel(channel: DataTransportChannel | null, buffer: ByteBuffer) {
     if (!channel) {
         return
@@ -245,6 +254,17 @@ export class StreamInput {
     private hostKeyboardLocks: HostKeyboardLocks | null = null
     private keyboardLockSyncPending = false
 
+    /**
+     * Mark host Caps/Num cache for re-compare on next non-lock keydown
+     * (e.g. after tab switch / blur / visibility change). Does not send packets or query host.
+     */
+    markKeyboardLockSyncPending() {
+        if (!this.connected || !this.hostKeyboardLocks) {
+            return
+        }
+        this.keyboardLockSyncPending = true
+    }
+
     onKeyDown(event: KeyboardEvent) {
         this.syncHostKeyboardLocksFromClient(event)
         this.sendKeyEvent(true, event)
@@ -339,6 +359,15 @@ export class StreamInput {
 
     private sendKeyEvent(isDown: boolean, event: KeyboardEvent) {
         this.lastKeyboardEventAtMs = Date.now()
+
+        // IME Unicode (VK_PACKET): reuse type=1 text path; never convertToKey/sendKey.
+        if (isVkPacketUnicode(event)) {
+            if (isDown) {
+                console.debug(`VK_PACKET Unicode input: key=${JSON.stringify(event.key)}, keyCode=${event.keyCode}`)
+                this.sendText(event.key)
+            }
+            return
+        }
 
         const key = convertToKey(event)
         if (key == null) {

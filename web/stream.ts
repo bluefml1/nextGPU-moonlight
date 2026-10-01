@@ -1727,11 +1727,16 @@ class ViewerApp implements Component {
 
         window.addEventListener("blur", () => {
             this.releaseAllKeys("window blur")
+            this.stream?.getInput().markKeyboardLockSyncPending()
+        })
+        window.addEventListener("focus", () => {
+            this.stream?.getInput().markKeyboardLockSyncPending()
         })
         document.addEventListener("visibilitychange", () => {
             if (document.visibilityState !== "visible") {
                 this.releaseAllKeys("document hidden")
             }
+            this.stream?.getInput().markKeyboardLockSyncPending()
         })
         window.addEventListener("ml-modal-visibility", () => {
             this.releaseAllKeys("modal visibility changed")

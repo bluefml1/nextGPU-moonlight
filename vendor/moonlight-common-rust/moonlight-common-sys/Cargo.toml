@@ -1,0 +1,20 @@
+[package]
+name = "moonlight-common-sys"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+openssl-sys = "0.9.109"
+
+printf-compat = "0.3.1"
+
+[features]
+default = ["vendored", "openssl-sys/vendored"]
+
+# Vendored
+vendored = ["dep:cmake"]
+
+[build-dependencies]
+bindgen = "0.72.1"
+cmake = { version = "0.1.57", optional = true }

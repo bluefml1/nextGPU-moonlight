@@ -9,6 +9,10 @@ const SETTINGS_FAB_POS_KEY = "ml.virtualController.settingsFab.v1"
 const DRAG_THRESHOLD_PX = 6
 const LISTEN_CANCEL_KEYS = new Set(["Escape"])
 const STICK_KEY_DEADZONE = 0.2
+const STICK_DEADZONE = 0.08
+/** Knob center travel in % of the disc, so the knob edge stops at the rim (knob is 46% wide). */
+const KNOB_TRAVEL_PCT = 27
+const STICK_DISC_DRAGGING_CLASS = "ml-virtual-controller-stick-disc--dragging"
 /** Default translucent face / stick background alpha (0–1). */
 const DEFAULT_BG_OPACITY = 0.58
 const MIN_BG_OPACITY = 0
@@ -198,8 +202,8 @@ function defaultLayout(): VirtualLayoutFile {
             { id: "tr", role: "triangle", rect: { x: 0.81, y: 0.26, w: 0.09, h: 0.09 }, enabled: true },
             { id: "cr", role: "circle", rect: { x: 0.9, y: 0.34, w: 0.09, h: 0.09 }, enabled: true },
             { id: "cx", role: "cross", rect: { x: 0.81, y: 0.42, w: 0.09, h: 0.09 }, enabled: true },
-            { id: "sl", role: "stickL", rect: { x: 0.22, y: 0.62, w: 0.18, h: 0.2 }, enabled: true },
-            { id: "sr", role: "stickR", rect: { x: 0.6, y: 0.62, w: 0.18, h: 0.2 }, enabled: true },
+            { id: "sl", role: "stickL", rect: { x: 0.2, y: 0.62, w: 0.24, h: 0.3 }, enabled: true },
+            { id: "sr", role: "stickR", rect: { x: 0.56, y: 0.62, w: 0.24, h: 0.3 }, enabled: true },
             { id: "sel", role: "select", rect: { x: 0.06, y: 0.68, w: 0.10, h: 0.07 }, enabled: true },
             { id: "sta", role: "start", rect: { x: 0.84, y: 0.68, w: 0.10, h: 0.07 }, enabled: true },
         ],
@@ -365,6 +369,14 @@ function digitalFaceLabel(def: VirtualControlDef): string {
     return roleLabel(def.role)
 }
 
+/** Radial clamp to the unit circle with a radial dead zone; `dx`/`dy` are in disc radii. */
+function radialStick(dx: number, dy: number): { x: number, y: number } {
+    const mag = Math.hypot(dx, dy)
+    if (mag < STICK_DEADZONE) return { x: 0, y: 0 }
+    const scaled = (Math.min(1, mag) - STICK_DEADZONE) / (1 - STICK_DEADZONE)
+    return { x: (dx / mag) * scaled, y: (dy / mag) * scaled }
+}
+
 function stickDirFromVector(mx: number, my: number, deadzone: number): keyof VirtualStickKeys | null {
     if (Math.abs(mx) < deadzone && Math.abs(my) < deadzone) {
         return null
@@ -430,11 +442,11 @@ export class VirtualControllerOverlay {
     private stickKeyVisual = new Map<string, { x: number, y: number }>()
     private stickKeyDir = new Map<string, keyof VirtualStickKeys | null>()
     /** Active stick drags keyed by pointerId so left/right (and WASD sticks) can move simultaneously. */
+    /** `startX`/`startY` is the floating stick center (first touch point). */
     private stickDrags = new Map<number, {
         id: string
         role: StickDragRole
-        ox: number
-        oy: number
+        radiusPx: number
         startX: number
         startY: number
     }>()
@@ -930,7 +942,7 @@ export class VirtualControllerOverlay {
         this.layout.controls.push({
             id,
             role: "stickWasd",
-            rect: { x: 0.38, y: 0.44, w: 0.16, h: 0.18 },
+            rect: { x: 0.38, y: 0.44, w: 0.2, h: 0.26 },
             enabled: true,
             stickKeys: defaultStickKeys(),
         })
@@ -1169,8 +1181,8 @@ export class VirtualControllerOverlay {
     }
 
     private positionKnob(knob: HTMLElement, stick: { x: number, y: number }) {
-        const cx = 50 + stick.x * 35
-        const cy = 50 - stick.y * 35
+        const cx = 50 + stick.x * KNOB_TRAVEL_PCT
+        const cy = 50 - stick.y * KNOB_TRAVEL_PCT
         knob.style.left = `${cx}%`
         knob.style.top = `${cy}%`
     }
@@ -1207,14 +1219,20 @@ export class VirtualControllerOverlay {
             }
             if (isAnyStick && stickRole) {
                 const disc = face.querySelector(".ml-virtual-controller-stick-disc") as HTMLElement | null
+                if (disc) {
+                    disc.classList.add(STICK_DISC_DRAGGING_CLASS)
+                    disc.style.transform = ""
+                }
                 const rect = (disc ?? face).getBoundingClientRect()
-                const ox = (e.clientX - rect.left) / rect.width - 0.5
-                const oy = 0.5 - (e.clientY - rect.top) / rect.height
+                const homeX = rect.left + rect.width / 2
+                const homeY = rect.top + rect.height / 2
+                if (disc) {
+                    disc.style.transform = `translate(${e.clientX - homeX}px, ${e.clientY - homeY}px)`
+                }
                 this.stickDrags.set(e.pointerId, {
                     id: def.id,
                     role: stickRole,
-                    ox,
-                    oy,
+                    radiusPx: Math.max(1, Math.min(rect.width, rect.height) / 2),
                     startX: e.clientX,
                     startY: e.clientY,
                 })
@@ -1253,12 +1271,10 @@ export class VirtualControllerOverlay {
             }
             const drag = this.stickDrags.get(e.pointerId)
             if (drag?.id === def.id) {
-                const disc = face.querySelector(".ml-virtual-controller-stick-disc") as HTMLElement | null
-                const rect = (disc ?? face).getBoundingClientRect()
-                const nx = (e.clientX - rect.left) / rect.width - 0.5
-                const ny = 0.5 - (e.clientY - rect.top) / rect.height
-                const mx = Math.max(-1, Math.min(1, nx * 2))
-                const my = Math.max(-1, Math.min(1, ny * 2))
+                const { x: mx, y: my } = radialStick(
+                    (e.clientX - drag.startX) / drag.radiusPx,
+                    (drag.startY - e.clientY) / drag.radiusPx,
+                )
                 const role = drag.role
                 if (role === "stickL") {
                     this.stickL.x = mx
@@ -1290,6 +1306,11 @@ export class VirtualControllerOverlay {
         const endStick = (e: PointerEvent) => {
             const drag = this.stickDrags.get(e.pointerId)
             if (drag?.id === def.id) {
+                const disc = face.querySelector(".ml-virtual-controller-stick-disc") as HTMLElement | null
+                if (disc) {
+                    disc.classList.remove(STICK_DISC_DRAGGING_CLASS)
+                    disc.style.transform = ""
+                }
                 const role = drag.role
                 if (this.settingsMode) {
                     if (role === "stickL") {
