@@ -2,7 +2,10 @@ use std::{
     env,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -26,9 +29,15 @@ use tokio::{
     io::AsyncWriteExt,
     process::Command,
     spawn,
-    time::sleep,
+    time::{interval, sleep, timeout},
 };
 use tracing::{Level, instrument, span};
+
+/// How long one stream start waits for session prep; the prep itself keeps running past this.
+const SESSION_PREP_WAIT: Duration = Duration::from_secs(15);
+
+/// Well below Cloudflare's 100 s idle limit for proxied WebSockets.
+const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 use crate::{
     api::{cancel_session, start_session},
@@ -225,19 +234,30 @@ pub async fn start_host(
             )
             .await;
 
-            if let Err(err) =
-                start_session::run_start_session(
-                    &script_path,
-                    web_app.domain_txt_path().map(|path| path.as_path()),
-                )
-                .await
-            {
-                warn!("[StartSession]: prep failed for host {host_id:?}: {err}");
+            let prep = start_session::ensure_prep(
+                host_id,
+                script_path,
+                web_app.domain_txt_path().cloned(),
+            );
+            let prep_error = match timeout(SESSION_PREP_WAIT, prep).await {
+                Ok(Ok(())) => None,
+                Ok(Err(err)) => {
+                    warn!("[StartSession]: prep failed for host {host_id:?}: {err}");
+                    Some(format!("Session prep failed: {err}"))
+                }
+                Err(_) => {
+                    warn!(
+                        "[StartSession]: prep for host {host_id:?} still running after {SESSION_PREP_WAIT:?}, it keeps running for the next attempt"
+                    );
+                    Some("Session prep timed out".to_string())
+                }
+            };
 
+            if let Some(message) = prep_error {
                 let _ = send_ws_message(
                     &mut session,
                     StreamServerMessage::DebugLog {
-                        message: format!("Session prep failed: {err}"),
+                        message,
                         ty: Some(LogMessageType::FatalDescription),
                     },
                 )
@@ -248,14 +268,18 @@ pub async fn start_host(
         }
 
         // -- Starting stage: launch streamer
-        let _ = send_ws_message(
+        if let Err(Closed) = send_ws_message(
             &mut session,
             StreamServerMessage::DebugLog {
                 message: "Launching streamer".to_string(),
                 ty: None,
             },
         )
-        .await;
+        .await
+        {
+            info!("[Stream]: client left before the streamer was launched");
+            return;
+        }
 
         // Spawn child
         let (mut child, stdin, stdout) = match Command::new(&web_app.config().streamer_path)
@@ -317,22 +341,53 @@ pub async fn start_host(
         >(span, stdin, stdout, child.stderr.take())
         .await;
 
+        // Set once the streamer reports ConnectionComplete. From then on the WebRTC peer state
+        // decides when the streamer stops (it terminates itself 10 s after the peer is lost),
+        // so a WebSocket closed by a proxy must not kill a running stream.
+        let stream_started = Arc::new(AtomicBool::new(false));
+
+        // Proxies in front of the server (Cloudflare) close WebSockets that carry no traffic,
+        // and after WebRTC is up nothing else is sent on this socket.
+        let keepalive = spawn({
+            let mut session = session.clone();
+            async move {
+                let mut tick = interval(WS_KEEPALIVE_INTERVAL);
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    if session.ping(b"").await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
         // Redirect ipc message into ws
         spawn({
             let mut ipc_sender = ipc_sender.clone();
+            let stream_started = stream_started.clone();
             async move {
                 let mut warned_closed = false;
                 while let Some(message) = ipc_receiver.recv().await {
                     match message {
                         StreamerIpcMessage::WebSocket(message) => {
+                            if matches!(message, StreamServerMessage::ConnectionComplete { .. }) {
+                                stream_started.store(true, Ordering::Release);
+                            }
                             if let Err(Closed) = send_ws_message(&mut session, message).await
                                 && !warned_closed
                             {
-                                warn!(
-                                    "[Ipc]: Tried to send a ws message (text) but the socket is already closed"
-                                );
-                                ipc_sender.send(ServerIpcMessage::Stop).await;
                                 warned_closed = true;
+                                if stream_started.load(Ordering::Acquire) {
+                                    warn!(
+                                        "[Ipc]: Tried to send a ws message (text) but the socket is already closed, keeping the running stream"
+                                    );
+                                } else {
+                                    warn!(
+                                        "[Ipc]: Tried to send a ws message (text) but the socket is already closed"
+                                    );
+                                    ipc_sender.send(ServerIpcMessage::Stop).await;
+                                }
                             }
                         }
                         StreamerIpcMessage::WebSocketTransport(data) => {
@@ -404,8 +459,24 @@ pub async fn start_host(
                         .send(ServerIpcMessage::WebSocketTransport(binary))
                         .await;
                 }
+                Message::Close(reason) => {
+                    info!("[Stream]: client closed the web socket: {reason:?}");
+                    break;
+                }
                 _ => {}
             }
+        }
+        keepalive.abort();
+
+        if stream_started.load(Ordering::Acquire) {
+            info!(
+                "[Stream]: web socket ended after the stream started, leaving the streamer to the WebRTC peer state"
+            );
+        } else {
+            // Abandoned startup attempt: stop the streamer now. It may be blocked in the host app
+            // launch and would otherwise only notice on its next failed ws send.
+            info!("[Stream]: web socket ended during startup, stopping streamer");
+            ipc_sender.send(ServerIpcMessage::Stop).await;
         }
     });
 

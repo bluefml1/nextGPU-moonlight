@@ -28,7 +28,9 @@ const GATE_CSS = `
     justify-content: center;
     padding: 24px 16px 32px;
     box-sizing: border-box;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     color: rgba(255,255,255,.92);
     overflow: auto;
 }
@@ -119,7 +121,7 @@ const GATE_CSS = `
     margin: 0 0 8px;
     font-size: clamp(1.25rem, 2.5vw, 1.75rem);
     font-weight: 650;
-    letter-spacing: .02em;
+    letter-spacing: -.02em;
     text-align: center;
 }
 #ml-profile-gate .ml-profile-gate-sub {
@@ -181,10 +183,10 @@ const GATE_CSS = `
     margin-bottom: 8px;
 }
 .ml-profile-card-title {
-    font-size: 1.1rem;
-    font-weight: 700;
+    font-size: 1rem;
+    font-weight: 650;
     margin: 0;
-    letter-spacing: .03em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: rgba(255,255,255,.95);
 }
@@ -207,8 +209,8 @@ const GATE_CSS = `
 .ml-profile-card-desc {
     margin: 0 0 10px;
     font-size: .86rem;
-    line-height: 1.4;
-    color: rgba(255,255,255,.58);
+    line-height: 1.5;
+    color: rgba(255,255,255,.62);
 }
 .ml-profile-card-tagline {
     font-size: .78rem;

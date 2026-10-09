@@ -2,6 +2,7 @@ import { globalObject } from "../../util.js";
 import { Pipe, PipeInfo } from "../pipeline/index.js";
 import { addPipePassthrough } from "../pipeline/pipes.js";
 import { emptyVideoCodecs, maybeVideoCodecs, VideoCodecSupport } from "../video.js";
+import { watchVideoElementFirstFrame } from "./first_frame.js";
 import { getStreamRectCorrected, TrackVideoRenderer, UrlVideoRenderer, VideoRenderer, VideoRendererSetup } from "./index.js";
 
 const VIDEO_DECODER_CODECS: Record<keyof VideoCodecSupport, string> = {
@@ -86,6 +87,7 @@ export class VideoElementRenderer implements TrackVideoRenderer, VideoRenderer {
             }
         }
 
+        watchVideoElementFirstFrame(this.videoElement)
         addPipePassthrough(this)
     }
 
@@ -213,6 +215,7 @@ export class UrlVideoElementRenderer implements UrlVideoRenderer, VideoRenderer 
         this.videoElement.playsInline = true
         this.videoElement.muted = true
 
+        watchVideoElementFirstFrame(this.videoElement)
         addPipePassthrough(this)
     }
 

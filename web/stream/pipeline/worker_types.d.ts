@@ -17,7 +17,9 @@ export type WorkerMessage =
     { data: ArrayBuffer } |
     { videoData: VideoDecodeUnit } |
     // Canvas stuff
-    { canvas: OffscreenCanvas }
+    { canvas: OffscreenCanvas } |
+    // Worker -> main: the offscreen canvas drew its first frame
+    { firstFrame: true }
 
 export type ToMainMessage =
     { checkSupport: PipeInfo } |

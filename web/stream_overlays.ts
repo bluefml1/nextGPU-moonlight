@@ -46,7 +46,9 @@ export const MoonlightLoadingScreen = (() => {
             align-items: center;
             justify-content: center;
             animation: ml-screenfade .35s ease both;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
             overflow: hidden;
         }
 
@@ -111,18 +113,19 @@ export const MoonlightLoadingScreen = (() => {
         }
 
         #ml-title {
-            color: rgba(255,255,255,.92);
-            font-size: 17px;
-            font-weight: 500;
-            letter-spacing: .03em;
-            margin-bottom: 6px;
+            color: rgba(255,255,255,.94);
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: -.01em;
+            margin-bottom: 8px;
             animation: ml-fadein .6s ease both;
         }
 
         #ml-subtitle {
-            color: rgba(255,255,255,.32);
+            color: rgba(255,255,255,.42);
             font-size: 11px;
-            letter-spacing: .12em;
+            font-weight: 500;
+            letter-spacing: .1em;
             text-transform: uppercase;
             margin-bottom: 22px;
             animation: ml-fadein .8s ease .1s both;
@@ -162,6 +165,67 @@ export const MoonlightLoadingScreen = (() => {
                 transparent
             );
             animation: ml-bar 2s ease-in-out infinite;
+        }
+
+        #ml-progress {
+            display: none;
+            width: min(280px, 70vw);
+            margin-top: 6px;
+            animation: ml-fadein .6s ease both;
+        }
+
+        #ml-loading-screen.ml-determinate #ml-progress { display: block; }
+        #ml-loading-screen.ml-determinate #ml-subtitle,
+        #ml-loading-screen.ml-determinate #ml-dots,
+        #ml-loading-screen.ml-determinate #ml-bar-wrap { display: none; }
+
+        #ml-progress-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+
+        #ml-step {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: rgba(255,255,255,.6);
+            font-size: 12.5px;
+            font-weight: 500;
+        }
+
+        #ml-percent {
+            flex-shrink: 0;
+            color: rgba(255,255,255,.92);
+            font-size: 13px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+
+        #ml-progress-track {
+            height: 4px;
+            border-radius: 999px;
+            overflow: hidden;
+            background: rgba(255,255,255,.08);
+        }
+
+        #ml-progress-fill {
+            height: 100%;
+            width: 0;
+            border-radius: inherit;
+            background: linear-gradient(90deg, #4a6fff, #00c8ff);
+            box-shadow: 0 0 10px rgba(0,200,255,.35);
+            transition: width .45s ease;
+        }
+
+        #ml-loading-screen.ml-failed #ml-step { color: rgba(255,130,130,.95); }
+        #ml-loading-screen.ml-failed #ml-percent { visibility: hidden; }
+        #ml-loading-screen.ml-failed #ml-progress-fill {
+            background: linear-gradient(90deg, #ff4a5a, #ff8a4a);
+            box-shadow: 0 0 10px rgba(255,74,90,.35);
         }
     `
 
@@ -310,9 +374,28 @@ export const MoonlightLoadingScreen = (() => {
             dotsEl.appendChild(d)
         }
 
+        const progressEl = document.createElement("div")
+        progressEl.id = "ml-progress"
+        const progressRow = document.createElement("div")
+        progressRow.id = "ml-progress-row"
+        const stepEl = document.createElement("span")
+        stepEl.id = "ml-step"
+        const percentEl = document.createElement("span")
+        percentEl.id = "ml-percent"
+        progressRow.appendChild(stepEl)
+        progressRow.appendChild(percentEl)
+        const track = document.createElement("div")
+        track.id = "ml-progress-track"
+        const fill = document.createElement("div")
+        fill.id = "ml-progress-fill"
+        track.appendChild(fill)
+        progressEl.appendChild(progressRow)
+        progressEl.appendChild(track)
+
         root.appendChild(titleEl)
         root.appendChild(subtitleEl)
         root.appendChild(dotsEl)
+        root.appendChild(progressEl)
 
         const barWrap = document.createElement("div")
         barWrap.id = "ml-bar-wrap"
@@ -337,22 +420,46 @@ export const MoonlightLoadingScreen = (() => {
         hide(fadeMs = 300) {
             if (!el) return
             console.info("[Overlay:Loading] hide", { fadeMs })
-            el.style.transition = `opacity ${fadeMs}ms ease`
-            el.style.opacity = "0"
+            // Detach right away so a show() during the fade builds a fresh screen instead of being ignored.
+            const fading = el
+            el = null
+            fading.style.transition = `opacity ${fadeMs}ms ease`
+            fading.style.opacity = "0"
+            fading.style.pointerEvents = "none"
             setTimeout(() => {
-                if (el?.parentNode) {
-                    el.parentNode.removeChild(el)
-                }
-                el = null
+                fading.parentNode?.removeChild(fading)
             }, fadeMs)
         },
         setTitle(text: string) {
-            const t = document.getElementById("ml-title")
+            const t = el?.querySelector<HTMLElement>("#ml-title")
             if (t) t.textContent = text
         },
         setSubtitle(text: string) {
-            const s = document.getElementById("ml-subtitle")
+            if (!el) return
+            const s = el.querySelector<HTMLElement>("#ml-subtitle")
             if (s) s.textContent = text
+            const step = el.querySelector<HTMLElement>("#ml-step")
+            if (step) step.textContent = text
+        },
+        /** Replace the indeterminate dots with a progress bar showing `label` and the percentage. */
+        setProgress(percent: number, label: string) {
+            if (!el) return
+            const clamped = Math.max(0, Math.min(100, percent))
+            el.classList.remove("ml-failed")
+            el.classList.add("ml-determinate")
+            const fill = el.querySelector<HTMLElement>("#ml-progress-fill")
+            if (fill) fill.style.width = `${clamped}%`
+            const step = el.querySelector<HTMLElement>("#ml-step")
+            if (step) step.textContent = label
+            const percentEl = el.querySelector<HTMLElement>("#ml-percent")
+            if (percentEl) percentEl.textContent = `${Math.floor(clamped)}%`
+        },
+        /** Turn the bar red and show `label`; the bar keeps its last width. */
+        setFailed(label: string) {
+            if (!el) return
+            el.classList.add("ml-determinate", "ml-failed")
+            const step = el.querySelector<HTMLElement>("#ml-step")
+            if (step) step.textContent = label
         },
     }
 })()
@@ -393,7 +500,7 @@ const MoonlightPointerLockOverlayImpl = (() => {
             justify-content: flex-end;
             user-select: none;
             animation: mlplo-fadein .24s ease both;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
             pointer-events: none;
         }
 

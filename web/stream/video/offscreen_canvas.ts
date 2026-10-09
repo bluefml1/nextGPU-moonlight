@@ -4,6 +4,7 @@ import { addPipePassthrough } from "../pipeline/pipes.js";
 import { WorkerReceiver } from "../pipeline/worker_pipe.js";
 import { WorkerMessage } from "../pipeline/worker_types.js";
 import { BaseCanvasVideoRenderer } from "./canvas.js";
+import { notifyFirstVideoFrame } from "./first_frame.js";
 import { VideoRendererSetup } from "./index.js";
 
 export class OffscreenCanvasRenderer extends BaseCanvasVideoRenderer implements WorkerReceiver {
@@ -49,6 +50,8 @@ export class OffscreenCanvasRenderer extends BaseCanvasVideoRenderer implements 
     onWorkerMessage(message: WorkerMessage): void {
         if ("videoSetup" in message) {
             this.setup(message.videoSetup)
+        } else if ("firstFrame" in message) {
+            notifyFirstVideoFrame(this.mainCanvas)
         }
     }
 

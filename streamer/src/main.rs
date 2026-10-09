@@ -53,7 +53,7 @@ use tokio::{
         mpsc::{self, error::TrySendError},
     },
     task::spawn_blocking,
-    time::sleep,
+    time::{sleep, timeout},
 };
 use tracing::{Level, level_filters::LevelFilter, span};
 use tracing::{debug, error, info, trace, warn};
@@ -76,6 +76,10 @@ use crate::{
 pub type RequestClient = TokioHyperClient;
 
 pub const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
+
+/// Limit for the host's `/launch` or `/resume` call. If the app is still launching when this
+/// expires, Sunshine keeps launching it and the browser's next attempt uses the fast `/resume`.
+const HOST_START_STREAM_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Host string from Moonlight config (no scheme). Used to default TLS verify behavior for Sunshine's self-signed HTTPS.
 fn is_loopback_sunshine_host(host: &str) -> bool {
@@ -467,6 +471,16 @@ impl StreamConnection {
 
                                 if let Err(err) = this.start_stream(settings).await {
                                     error!("Failed to start stream, stopping: {err}");
+
+                                    let mut ipc_sender = this.ipc_sender.clone();
+                                    ipc_sender
+                                        .send(StreamerIpcMessage::WebSocket(
+                                            StreamServerMessage::DebugLog {
+                                                message: format!("Failed to start stream: {err}"),
+                                                ty: Some(LogMessageType::FatalDescription),
+                                            },
+                                        ))
+                                        .await;
 
                                     this.stop().await;
                                 }
@@ -1002,6 +1016,10 @@ impl StreamConnection {
                             Ok(value) => value,
                             Err(err) => {
                                 error!("Failed to start webrtc transport: {err}");
+                                self.send_fatal(format!(
+                                    "Failed to start the WebRTC transport: {err}"
+                                ))
+                                .await;
                                 return;
                             }
                         };
@@ -1014,6 +1032,10 @@ impl StreamConnection {
                             Ok(value) => value,
                             Err(err) => {
                                 error!("Failed to start web socket transport: {err}");
+                                self.send_fatal(format!(
+                                    "Failed to start the Web Socket transport: {err}"
+                                ))
+                                .await;
                                 return;
                             }
                         };
@@ -1135,18 +1157,20 @@ impl StreamConnection {
         let aes_key = AesKey::new_random(&OpenSSLCryptoBackend)?;
         let aes_iv = AesIv::new_random(&OpenSSLCryptoBackend)?;
 
-        let stream_config = match host
-            .start_stream(
+        let host_start = timeout(
+            HOST_START_STREAM_TIMEOUT,
+            host.start_stream(
                 self.info.app_id,
                 &settings,
                 aes_key,
                 aes_iv,
                 self.moonlight.launch_query_parameters(),
-            )
-            .await
-        {
-            Ok(value) => value,
-            Err(err) => {
+            ),
+        )
+        .await;
+        let stream_config = match host_start {
+            Ok(Ok(value)) => value,
+            Ok(Err(err)) => {
                 warn!("[Stream]: failed to start moonlight stream: {err}");
 
                 #[allow(clippy::single_match)]
@@ -1154,7 +1178,10 @@ impl StreamConnection {
                     MoonlightClientError::Moonlight(MoonlightError::ConnectionAlreadyExists) => {
                         ipc_sender
                             .send(StreamerIpcMessage::WebSocket(
-                                StreamServerMessage::DebugLog { message: "Failed to start stream because this streamer is already streaming".to_string(), ty: None },
+                                StreamServerMessage::DebugLog {
+                                    message: "Failed to start stream because this streamer is already streaming".to_string(),
+                                    ty: Some(LogMessageType::FatalDescription),
+                                },
                             ))
                             .await;
                     }
@@ -1163,7 +1190,20 @@ impl StreamConnection {
 
                 return Err(err.into());
             }
+            Err(_) => {
+                warn!(
+                    "[Stream]: host did not start the app within {HOST_START_STREAM_TIMEOUT:?}"
+                );
+                return Err(anyhow::anyhow!(
+                    "the host did not start the app within {} seconds",
+                    HOST_START_STREAM_TIMEOUT.as_secs()
+                ));
+            }
         };
+
+        if self.is_terminating.load(Ordering::Acquire) {
+            return Err(anyhow::anyhow!("streamer stopped while the host was starting the app"));
+        }
 
         let settings_clone = settings.clone();
         let moonlight_instance = self.moonlight.clone();
@@ -1228,9 +1268,28 @@ impl StreamConnection {
         });
 
         let mut stream_guard = self.stream.write().await;
+        // stop() only tears down a connection that is already stored; one that finished
+        // connecting after stop() ran must be closed here instead of being kept alive.
+        if self.is_terminating.load(Ordering::Acquire) {
+            drop(stream_guard);
+            spawn_blocking(move || {
+                stream.stop();
+            });
+            return Err(anyhow::anyhow!("streamer stopped while the connection was starting"));
+        }
         stream_guard.replace(stream);
 
         Ok(())
+    }
+
+    async fn send_fatal(&self, message: String) {
+        let mut ipc_sender = self.ipc_sender.clone();
+        ipc_sender
+            .send(StreamerIpcMessage::WebSocket(StreamServerMessage::DebugLog {
+                message,
+                ty: Some(LogMessageType::FatalDescription),
+            }))
+            .await;
     }
 
     // -- Termination

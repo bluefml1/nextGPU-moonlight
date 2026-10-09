@@ -172,7 +172,13 @@ export class WorkerOffscreenCanvasSendPipe extends WorkerSenderPipe implements C
         this.renderer.setCanvasSize(width, height)
     }
 
+    private firstFrameSent = false
+
     commitFrame(): void {
         this.renderer.commitFrame()
+        if (!this.firstFrameSent) {
+            this.firstFrameSent = true
+            this.getBase().onWorkerMessage({ firstFrame: true })
+        }
     }
 }

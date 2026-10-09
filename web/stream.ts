@@ -2,8 +2,8 @@ import "./polyfill/index.js"
 import { Api, getApi } from "./api.js";
 import { Component } from "./component/index.js";
 import { showErrorPopup } from "./component/error.js";
-import { InfoEvent, Stream } from "./stream/index.js"
-import { getModalBackground, Modal, showMessage, showModal } from "./component/modal/index.js";
+import { InfoEvent, StartupStep, StartupTransport, Stream } from "./stream/index.js"
+import { getModalBackground, Modal, showMessage, showModal, showPrompt } from "./component/modal/index.js";
 import { getSidebarDragOffsetY, getSidebarRoot, isSidebarExtended, setSidebar, setSidebarExtended, setSidebarStyle, Sidebar } from "./component/sidebar/index.js";
 import { defaultStreamInputConfig, MouseMode, ScreenKeyboardSetVisibleEvent, StreamInputConfig, SoftwareCursorMotion } from "./stream/input.js";
 import {
@@ -53,6 +53,63 @@ import {
 /** Matches stream index.ts — host bitrate POST feedback from streamer. */
 const MOONLIGHT_BITRATE_LOG_PREFIX = "[Moonlight][Bitrate]"
 
+const STARTUP_ATTEMPT_LIMIT_MS = 20_000
+const STARTUP_MAX_ATTEMPTS = 3
+const STARTUP_RETRY_PAUSE_MS = 2_500
+const STARTUP_CLOSE_LIMIT_MS = 3_000
+const STARTUP_IDR_REQUEST_AFTER_MS = 5_000
+const STARTUP_CREEP_PER_SECOND = 0.3
+const STARTUP_HIDE_AFTER_CONNECTED_MS = 500
+
+/** Fail an attempt early when its current step makes no progress for this long (server timeouts are 15 s). */
+const STARTUP_STEP_STALL_MS: Record<StartupStep, number | null> = {
+    connect: 5_000,
+    appCheck: 8_000,
+    prep: 16_000,
+    launchStreamer: 8_000,
+    negotiate: 8_000,
+    startStream: 8_000,
+    hostLaunch: 16_000,
+    stages: 8_000,
+    decoders: 8_000,
+    firstFrame: null,
+}
+
+const STARTUP_STEP_LABEL_KEY: Record<StartupStep, string> = {
+    connect: "loading.step.connecting",
+    appCheck: "loading.step.checkingMachine",
+    prep: "loading.step.preparingSession",
+    launchStreamer: "loading.step.launchingStreamer",
+    negotiate: "loading.step.negotiating",
+    startStream: "loading.step.launchingApp",
+    hostLaunch: "loading.step.launchingApp",
+    stages: "loading.step.startingStream",
+    decoders: "loading.step.preparingVideo",
+    firstFrame: "loading.step.preparingVideo",
+}
+
+/** Creep never passes the next milestone the stream would report for this step. */
+function startupNextMilestone(step: StartupStep, realPercent: number): number {
+    switch (step) {
+        case "connect": return 5
+        case "appCheck": return 15
+        case "prep": return 22
+        case "launchStreamer": return 32
+        case "negotiate": return Math.min(realPercent + 3, 45)
+        case "startStream": return 50
+        case "hostLaunch": return 53
+        case "stages": return Math.min(realPercent + 3, 90)
+        case "decoders": return 95
+        case "firstFrame": return 100
+    }
+}
+
+type StartStreamOptions = {
+    /** Silent background retry: keep the overlay and progress as they are. */
+    silent?: boolean
+    transportHint?: StartupTransport
+}
+
 /** When false, skip `runStreamProfileGate` — stream uses `default_settings.ts` / saved mlSettings only (no picker, no `?profile=` merge from `stream_profile_presets.ts`). */
 const ENABLE_STREAM_PROFILE_GATE = true
 
@@ -75,6 +132,18 @@ function loadPhoneStreamHudVisible(): boolean {
         /* ignore */
     }
     return true
+}
+
+/** SHA-256 (hex) of the developer settings unlock password — plaintext is not shipped. */
+const DEV_SETTINGS_PASSWORD_SHA256 = "568b708d1a14fab824625a3a7db593f4ac147f37864c9bc3f7d1f8dec2246f62"
+
+async function hashUtf8Sha256Hex(text: string): Promise<string> {
+    const bytes = new TextEncoder().encode(text)
+    const digest = await crypto.subtle.digest("SHA-256", bytes)
+    return Array.from(new Uint8Array(digest), (b) => {
+        const hex = b.toString(16)
+        return hex.length === 1 ? "0" + hex : hex
+    }).join("")
 }
 
 function isPhoneLikeDevice(): boolean {
@@ -509,6 +578,30 @@ class ViewerApp implements Component {
     private startupConnectionResolved = false
     private hasConnectedOnce = false
 
+    /** Bumped per attempt and on failure; info events from older attempts are dropped. */
+    private startupAttemptId = 0
+    private startupAttempt = 1
+    private startupInProgress = false
+    private attemptDeadline = 0
+    /** The attempt limit restarts when the streamer launches, so session prep (bounded by its stall limit) is not counted. */
+    private attemptTimerFromLaunch = false
+    /** Shown percent when the current attempt started; the attempt's own 0..100 maps into base..99. */
+    private attemptBase = 0
+    private attemptRealPercent = 0
+    private shownPercent = 0
+    private shownLabel = ""
+    private currentStep: StartupStep = "connect"
+    private lastProgressAt = 0
+    private lastCreepAt = 0
+    private decodersReadyAt: number | null = null
+    private idrRequestedThisAttempt = false
+    private startupWatchdog: ReturnType<typeof setInterval> | null = null
+    private startupFailureChecksActive = false
+    private pendingRetryToken = 0
+    private lastStartupFatalMessage: string | null = null
+    private startupHideTimer: ReturnType<typeof setTimeout> | null = null
+    private frameLoopsStarted = false
+
     private devConnectionLog: DevStreamConnectionLog | null = null
     private devConnectionLogPoll: ReturnType<typeof setInterval> | null = null
     private lastSidebarAnchorKey = ""
@@ -558,6 +651,8 @@ class ViewerApp implements Component {
     private hudTrayDragOffsetY = 0
     private hudTrayDragWasDragging = false
     private hudTrayDragSuppressClickUntilMs = 0
+    /** PC-only: cursor is over the HUD tray (Stats/Quality hover reveal). */
+    private hudTrayHovered = false
     /**
      * Compact toolbar pose at position A, captured when the first overlay panel opens.
      * Restored only when both Stats and Quality are closed — so both open-order flows return to A.
@@ -581,17 +676,12 @@ class ViewerApp implements Component {
     private syncSettingsQuickButtonVisibility() {
         const button = this.settingsQuickButton
         if (!button) return
-        if (isPhoneLikeDevice()) {
-            button.style.display = "none"
-            this.syncMobileFabMenuVisibility()
-            return
-        }
-        // Keep quick arrow visible on touch/tablet devices in fullscreen so it can toggle keyboard.
-        button.style.display = this.isFullscreen() ? "none" : "flex"
-        // In fullscreen, keep arrow above any overlay layers so taps always reach it.
-        button.style.zIndex = this.isFullscreen() ? "200000" : "200000"
+        // Hidden for end users on every device; developers open Moonlight Settings via Ctrl+Shift+Alt+L.
+        button.style.display = "none"
         this.syncMobileFabMenuVisibility()
-        this.scheduleSyncSettingsQuickButtonDock()
+        if (!isPhoneLikeDevice()) {
+            this.scheduleSyncSettingsQuickButtonDock()
+        }
     }
 
     private scheduleSyncSettingsQuickButtonDock() {
@@ -1050,12 +1140,19 @@ class ViewerApp implements Component {
         if (this.overlayHudTray) {
             this.overlayHudTray.classList.toggle("video-overlay-hud-tray--bitrate-open", showBitrate)
         }
+        const eligibleQuality = !showBitrate
+        const streamStats = this.getStream()?.getStats()
+        const eligibleStats = !!(streamStats && this.statsDiv.hidden)
+        // PC: reveal restore buttons on tray hover; pin the other button while one panel is open.
+        // Phone: keep eligibility-only visibility (no hover gating).
+        const pcHoverReveal = !isPhoneLikeDevice()
+        const showQuality = eligibleQuality && (!pcHoverReveal || this.hudTrayHovered || this.isStatsHudOpen())
+        const showStats = eligibleStats && (!pcHoverReveal || this.hudTrayHovered || this.isBitrateHudOpen())
         if (this.hudTrayQualityRestoreBtn) {
-            this.hudTrayQualityRestoreBtn.style.display = showBitrate ? "none" : ""
+            this.hudTrayQualityRestoreBtn.style.display = showQuality ? "" : "none"
         }
         if (this.hudTrayStatsRestoreBtn) {
-            const streamStats = this.getStream()?.getStats()
-            this.hudTrayStatsRestoreBtn.style.display = streamStats && this.statsDiv.hidden ? "" : "none"
+            this.hudTrayStatsRestoreBtn.style.display = showStats ? "" : "none"
         }
     }
 
@@ -1155,6 +1252,18 @@ class ViewerApp implements Component {
 
         const hudTray = document.createElement("div")
         hudTray.classList.add("video-overlay-hud-tray")
+        hudTray.addEventListener("pointerenter", () => {
+            if (isPhoneLikeDevice()) return
+            this.hudTrayHovered = true
+            this.syncHudTrayToolbarButtons()
+            this.syncFullscreenToggleButtonPosition()
+        })
+        hudTray.addEventListener("pointerleave", () => {
+            if (isPhoneLikeDevice()) return
+            this.hudTrayHovered = false
+            this.syncHudTrayToolbarButtons()
+            this.syncFullscreenToggleButtonPosition()
+        })
         const toolbar = document.createElement("div")
         toolbar.classList.add("video-overlay-hud-tray__toolbar")
         const statsSlot = document.createElement("div")
@@ -1490,10 +1599,203 @@ class ViewerApp implements Component {
     private beginStartupOverlays() {
         this.loadingShownForCurrentStart = false
         this.startupConnectionResolved = false
+        this.cancelStartupTracking()
+        this.startupAttempt = 1
+        this.attemptBase = 0
+        this.attemptRealPercent = 0
+        this.shownPercent = 0
+        this.currentStep = "connect"
+        this.shownLabel = streamT(STARTUP_STEP_LABEL_KEY.connect)
+        this.lastStartupFatalMessage = null
         this.activateLoadingOverlayOnce()
+        MoonlightLoadingScreen.setProgress(0, this.shownLabel)
+    }
+
+    /** Stop the watchdog and any scheduled retry; used on success, final failure, user restart and unmount. */
+    private cancelStartupTracking() {
+        this.startupInProgress = false
+        this.startupFailureChecksActive = false
+        this.pendingRetryToken++
+        this.stopStartupWatchdog()
+        if (this.startupHideTimer != null) {
+            clearTimeout(this.startupHideTimer)
+            this.startupHideTimer = null
+        }
+    }
+
+    private beginStartupAttempt() {
+        const now = performance.now()
+        this.startupInProgress = true
+        this.startupFailureChecksActive = true
+        this.attemptDeadline = now + STARTUP_ATTEMPT_LIMIT_MS
+        this.attemptTimerFromLaunch = false
+        this.attemptBase = this.shownPercent
+        this.attemptRealPercent = 0
+        this.currentStep = "connect"
+        this.lastProgressAt = now
+        this.lastCreepAt = now
+        this.decodersReadyAt = null
+        this.idrRequestedThisAttempt = false
+        if (this.startupWatchdog == null) {
+            this.startupWatchdog = setInterval(() => this.onStartupWatchdogTick(), 1000)
+        }
+    }
+
+    private stopStartupWatchdog() {
+        if (this.startupWatchdog != null) {
+            clearInterval(this.startupWatchdog)
+            this.startupWatchdog = null
+        }
+    }
+
+    private mapAttemptPercent(realPercent: number): number {
+        return Math.min(99, this.attemptBase + (realPercent * (99 - this.attemptBase)) / 100)
+    }
+
+    private onStartupProgress(percent: number, step: StartupStep) {
+        if (!this.startupInProgress) return
+        const now = performance.now()
+        this.lastProgressAt = now
+        this.currentStep = step
+        if (!this.attemptTimerFromLaunch) {
+            if (step === "prep") {
+                this.attemptDeadline = Number.POSITIVE_INFINITY
+            } else if (step !== "connect" && step !== "appCheck") {
+                this.attemptTimerFromLaunch = true
+                this.attemptDeadline = now + STARTUP_ATTEMPT_LIMIT_MS
+            }
+        }
+        this.attemptRealPercent = Math.max(this.attemptRealPercent, percent)
+        if (step === "firstFrame" && this.decodersReadyAt == null) {
+            this.decodersReadyAt = now
+        }
+        const mapped = this.mapAttemptPercent(this.attemptRealPercent)
+        if (mapped > this.shownPercent) {
+            this.shownPercent = mapped
+            this.shownLabel = streamT(STARTUP_STEP_LABEL_KEY[step])
+        }
+        MoonlightLoadingScreen.setProgress(this.shownPercent, this.shownLabel)
+    }
+
+    private onStartupWatchdogTick() {
+        if (!this.startupInProgress) {
+            this.stopStartupWatchdog()
+            return
+        }
+        const now = performance.now()
+
+        const elapsedSeconds = (now - this.lastCreepAt) / 1000
+        this.lastCreepAt = now
+        const creepCap = this.mapAttemptPercent(startupNextMilestone(this.currentStep, this.attemptRealPercent)) - 1
+        if (this.shownPercent < creepCap) {
+            this.shownPercent = Math.min(creepCap, this.shownPercent + STARTUP_CREEP_PER_SECOND * elapsedSeconds)
+            MoonlightLoadingScreen.setProgress(this.shownPercent, this.shownLabel)
+        }
+
+        if (!this.startupFailureChecksActive) return
+
+        if (
+            this.decodersReadyAt != null &&
+            !this.idrRequestedThisAttempt &&
+            now - this.decodersReadyAt >= STARTUP_IDR_REQUEST_AFTER_MS
+        ) {
+            this.idrRequestedThisAttempt = true
+            console.info("[Startup] no video frame yet, requesting a keyframe")
+            this.stream?.requestVideoIdr()
+        }
+
+        if (now > this.attemptDeadline) {
+            this.onStartupAttemptFailed(`attempt over ${STARTUP_ATTEMPT_LIMIT_MS / 1000}s at ${this.currentStep}`)
+            return
+        }
+        const stallLimit = STARTUP_STEP_STALL_MS[this.currentStep]
+        if (stallLimit != null && now - this.lastProgressAt > stallLimit) {
+            this.onStartupAttemptFailed(`no progress for ${stallLimit / 1000}s at ${this.currentStep}`)
+        }
+    }
+
+    /** Runs at most once per attempt: the id bump drops every later event from the dying stream. */
+    private onStartupAttemptFailed(reason: string) {
+        if (!this.startupInProgress || !this.startupFailureChecksActive) return
+        this.startupFailureChecksActive = false
+        this.startupAttemptId++
+        console.info(`[Startup] attempt ${this.startupAttempt}/${STARTUP_MAX_ATTEMPTS} failed: ${reason}`)
+
+        if (this.startupAttempt < STARTUP_MAX_ATTEMPTS) {
+            void this.silentRestart()
+        } else {
+            this.failStartup()
+        }
+    }
+
+    private async silentRestart() {
+        const token = ++this.pendingRetryToken
+        const previous = this.stream
+        const transportHint = previous?.usedTransport
+        if (previous) {
+            this.stream = null
+            previous.unmount(this.div)
+            await Promise.race([
+                previous.close(),
+                new Promise<void>((resolve) => setTimeout(resolve, STARTUP_CLOSE_LIMIT_MS)),
+            ])
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, STARTUP_RETRY_PAUSE_MS))
+        if (token !== this.pendingRetryToken) return
+
+        this.startupAttempt++
+        console.info(
+            `[Startup] attempt ${this.startupAttempt}/${STARTUP_MAX_ATTEMPTS} starting` +
+            (transportHint && transportHint != "direct" ? ` (transport hint: ${transportHint})` : "")
+        )
+        const browserWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
+        const browserHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0)
+        await this.startStream(this.hostId, this.appId, this.settings, [browserWidth, browserHeight], {
+            silent: true,
+            transportHint,
+        })
+    }
+
+    private failStartup(message?: string) {
+        this.cancelStartupTracking()
+        this.startupAttemptId++
+        const token = this.pendingRetryToken
+        this.latestConnectionState = "Failed"
+        console.info("[Startup] giving up")
+
+        const stream = this.stream
+        void stream?.close()
+
+        MoonlightLoadingScreen.setFailed(streamT("loading.step.failed"))
+        const popupMessage = message ?? this.lastStartupFatalMessage
+        if (popupMessage) {
+            showErrorPopup(popupMessage)
+        }
+        setTimeout(() => {
+            if (token !== this.pendingRetryToken) return
+            this.showConnectionRecovery(streamT("recovery.streamFailed"))
+        }, 900)
+    }
+
+    private onStartupFirstFrame() {
+        if (!this.startupInProgress) return
+        this.cancelStartupTracking()
+        this.hasConnectedOnce = true
+        this.startupConnectionResolved = true
+        this.latestConnectionState = "Connected"
+        this.recoveryOverlay.hide()
+        this.recoveryShown = false
+        this.shownPercent = 100
+        console.info(`[Startup] connected on attempt ${this.startupAttempt}/${STARTUP_MAX_ATTEMPTS}`)
+        MoonlightLoadingScreen.setProgress(100, streamT("loading.step.connected"))
+        this.startupHideTimer = setTimeout(() => {
+            this.startupHideTimer = null
+            MoonlightLoadingScreen.hide()
+        }, STARTUP_HIDE_AFTER_CONNECTED_MS)
     }
 
     private cleanupStartupOverlaysOnAbortOrUnmount() {
+        this.cancelStartupTracking()
         this.loadingShownForCurrentStart = false
         this.startupConnectionResolved = true
         MoonlightLoadingScreen.hide()
@@ -1693,7 +1995,7 @@ class ViewerApp implements Component {
 
         this.recoveryOverlay = new StreamRecoveryOverlay(
             () => { void this.retryAfterConnectionIssue() },
-            () => this.openSettingsModal(),
+            () => this.requestMoonlightSettings(),
             () => { void this.exitToLibrary() },
         )
 
@@ -1786,19 +2088,30 @@ class ViewerApp implements Component {
         element.addEventListener("touchmove", this.onTouchMove.bind(this), { passive: false })
     }
 
-    private async startStream(hostId: number, appId: number, settings: Settings, browserSize: [number, number]) {
+    private async startStream(
+        hostId: number,
+        appId: number,
+        settings: Settings,
+        browserSize: [number, number],
+        options: StartStreamOptions = {},
+    ) {
         // Anchor sidebar/icon to the right edge by default.
         setSidebarStyle({
             edge: "right",
         })
 
-        this.beginStartupOverlays()
-        this.recoveryOverlay.hide()
-        this.recoveryShown = false
+        if (!options.silent) {
+            this.beginStartupOverlays()
+            this.recoveryOverlay.hide()
+            this.recoveryShown = false
+        }
         this.latestConnectionState = "Connecting"
         this.hasConnectedOnce = false
+        this.beginStartupAttempt()
 
-        this.stream = new Stream(this.api, hostId, appId, settings, browserSize)
+        this.stream = new Stream(this.api, hostId, appId, settings, browserSize, {
+            transportHint: options.transportHint,
+        })
         // Apply viewer input config immediately (phone default touch mode, persisted modes, etc.)
         // so users don't need to manually reselect modes in the sidebar.
         this.stream.getInput().setConfig(this.inputConfig)
@@ -1807,16 +2120,24 @@ class ViewerApp implements Component {
             isPhoneLikeDevice() ? this.onSoftwareCursorMotion : null
         )
 
-        // Add app info listener
-        this.stream.addInfoListener(this.onInfo.bind(this))
+        // Add app info listener; events from a replaced or failed attempt are dropped.
+        const attemptId = ++this.startupAttemptId
+        this.stream.addInfoListener((event) => {
+            if (attemptId === this.startupAttemptId) {
+                void this.onInfo(event)
+            }
+        })
         this.stream.addInfoListener(this.streamConnectionConsoleLogger.onInfo.bind(this.streamConnectionConsoleLogger))
         if (this.devConnectionLog) {
             this.stream.addInfoListener(this.devConnectionLog.onInfo.bind(this.devConnectionLog))
         }
 
-        // Start animation frame loop
-        this.onTouchUpdate()
-        this.onGamepadUpdate()
+        // Start animation frame loops once; they keep rescheduling themselves.
+        if (!this.frameLoopsStarted) {
+            this.frameLoopsStarted = true
+            this.onTouchUpdate()
+            this.onGamepadUpdate()
+        }
 
         this.stream.getInput().addScreenKeyboardVisibleEvent(this.onScreenKeyboardSetVisible.bind(this))
 
@@ -1825,9 +2146,43 @@ class ViewerApp implements Component {
     }
 
     private openSettingsModal() {
+        setSidebarExtended(false)
+        const sidebarRoot = getSidebarRoot()
+        sidebarRoot?.classList.add("sidebar-settings-hidden")
         this.recoveryOverlay.hide()
         this.recoveryShown = false
-        showModal(new SettingsPanelModal(this))
+        const clearSidebarHide = () => {
+            sidebarRoot?.classList.remove("sidebar-settings-hidden")
+        }
+        void showModal(new SettingsPanelModal(this)).then(clearSidebarHide, clearSidebarHide)
+    }
+
+    /**
+     * Only password-gated entry point for Moonlight Settings.
+     * Used by Ctrl+Shift+Alt+L, recovery overlay, and any leftover Settings UI.
+     */
+    requestMoonlightSettings() {
+        void this.promptDeveloperSettingsUnlock()
+    }
+
+    private async promptDeveloperSettingsUnlock() {
+        const pw = await showPrompt("Developer password", {
+            type: "password",
+            name: "ml-dev-settings",
+        })
+        if (pw == null || pw === "") return
+        try {
+            const digest = await hashUtf8Sha256Hex(pw)
+            if (digest !== DEV_SETTINGS_PASSWORD_SHA256) {
+                await showMessage("Incorrect password")
+                return
+            }
+        } catch (e) {
+            console.warn("[Stream]: developer settings unlock hash failed", e)
+            await showMessage("Unable to verify password")
+            return
+        }
+        this.openSettingsModal()
     }
 
     private async retryAfterConnectionIssue() {
@@ -1837,6 +2192,7 @@ class ViewerApp implements Component {
     }
 
     async exitToLibrary() {
+        this.cancelStartupTracking()
         const stream = this.stream
         if (stream) {
             const success = await stream.stop()
@@ -1863,6 +2219,8 @@ class ViewerApp implements Component {
 
     /** Graceful restart: stop current stream, then start again with new settings (no page refresh). */
     async restartStreamWithNewSettings(settings: Settings): Promise<void> {
+        this.cancelStartupTracking()
+        this.startupAttemptId++
         const stream = this.stream
         if (stream) {
             this.releaseAllKeys("before stream restart")
@@ -1879,12 +2237,12 @@ class ViewerApp implements Component {
             }
             this.adaptiveLog("reset adaptive mouse state (stream restart)")
             this.syncSoftwareCursorVisibility()
-            const success = await stream.stop()
-            if (!success) {
-                console.debug("Restart: stream stop reported failure, continuing anyway")
-            }
-            stream.unmount(this.div)
             this.stream = null
+            stream.unmount(this.div)
+            await Promise.race([
+                stream.close(),
+                new Promise<void>((resolve) => setTimeout(resolve, STARTUP_CLOSE_LIMIT_MS)),
+            ])
         }
         this.settings = settings
         const browserWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
@@ -1897,15 +2255,23 @@ class ViewerApp implements Component {
 
         if (data.type == "app") {
             applyStreamDocumentTitle()
+        } else if (data.type === "startupProgress") {
+            this.onStartupProgress(data.percent, data.step)
+        } else if (data.type === "firstVideoFrame") {
+            this.onStartupFirstFrame()
+        } else if (data.type === "transportClosed") {
+            if (this.startupInProgress) {
+                this.onStartupAttemptFailed(data.reason)
+            }
+        } else if (data.type === "sessionCancelled") {
+            if (this.startupInProgress) {
+                this.failStartup(streamT("log.connectionTerminated", { code: "SessionCancelled" }))
+            }
         } else if (data.type == "connectionComplete") {
+            // The loading overlay and hasConnectedOnce wait for the first drawn video frame.
             this.latestConnectionState = "Connected"
-            this.hasConnectedOnce = true
-            this.startupConnectionResolved = true
             this.sidebar.onCapabilitiesChange(data.capabilities)
             this.virtualControllerOverlay.onStreamConnected()
-            MoonlightLoadingScreen.hide()
-            this.recoveryOverlay.hide()
-            this.recoveryShown = false
         } else if (data.type === "generalChannelReady") {
             this.enableRealtimeBitrateHud()
         } else if (data.type == "hostCursorHidden") {
@@ -1969,7 +2335,10 @@ class ViewerApp implements Component {
                 data.additional &&
                 (data.additional.type === "fatal" || data.additional.type === "fatalDescription")
             ) {
-                if (!this.hasConnectedOnce || isTerminalFatal) {
+                if (this.startupInProgress) {
+                    this.lastStartupFatalMessage = message
+                    this.onStartupAttemptFailed(message)
+                } else if (!this.hasConnectedOnce || isTerminalFatal) {
                     showErrorPopup(message)
                     this.latestConnectionState = "Failed"
                     this.showConnectionRecovery(streamT("recovery.streamFailed"))
@@ -1988,7 +2357,9 @@ class ViewerApp implements Component {
                 streamLogMatches(message, "log.wsClosed") ||
                 streamLogMatches(message, "log.wsOrWebrtcError")
             ) {
-                if (!this.hasConnectedOnce) {
+                if (this.startupInProgress) {
+                    // Handled by the transportClosed event.
+                } else if (!this.hasConnectedOnce) {
                     this.latestConnectionState = "Disconnected"
                     this.showConnectionRecovery(streamT("recovery.connectionLost"))
                 }
@@ -2005,7 +2376,9 @@ class ViewerApp implements Component {
                 statusText.includes("terminated") ||
                 statusText.includes("failed") ||
                 (!this.hasConnectedOnce && statusText.includes("disconnected"))
-            if (shouldShowRecovery) {
+            if (shouldShowRecovery && this.startupInProgress) {
+                this.onStartupAttemptFailed(`connection status ${data.status}`)
+            } else if (shouldShowRecovery) {
                 if (this.hasConnectedOnce && this.realtimeBitrateHud) {
                     this.realtimeBitrateHud.setDisabled(true)
                 }
@@ -2182,6 +2555,16 @@ class ViewerApp implements Component {
                 })
                 return
             }
+        }
+
+        // Ctrl+Shift+Alt+L: developer unlock for Moonlight Settings.
+        if (event.ctrlKey && event.shiftKey && event.altKey && event.code === "KeyL") {
+            event.preventDefault()
+            event.stopPropagation()
+            this.addConsumedShortcutSuppressions(event, "KeyL")
+            this.releaseAllKeys("consumed Ctrl+Shift+Alt+L developer settings shortcut")
+            this.requestMoonlightSettings()
+            return
         }
 
         // Ctrl/Cmd+Shift+V: read clipboard and send text to host (Ctrl/Cmd+V is forwarded as normal keys).
@@ -4069,13 +4452,8 @@ class ViewerSidebar implements Component, Sidebar {
         document.body.appendChild(this.uploadDoneAnnouncementButton)
 
         const openSettings = () => {
-            setSidebarExtended(false)
-            const sidebarRoot = getSidebarRoot()
-            sidebarRoot?.classList.add("sidebar-settings-hidden")
-            ;(showModal(new SettingsPanelModal(this.app)) as any)
-                .finally(() => {
-                    sidebarRoot?.classList.remove("sidebar-settings-hidden")
-                })
+            // Always password-gated — never open SettingsPanelModal directly from UI.
+            this.app.requestMoonlightSettings()
         }
 
         // ---- Mode selection view (tier 1) ----
@@ -4153,6 +4531,10 @@ class ViewerSidebar implements Component, Sidebar {
 
         const settingsButtonPhone = document.createElement("button")
         settingsButtonPhone.classList.add("sidebar-btn-with-icon")
+        settingsButtonPhone.type = "button"
+        settingsButtonPhone.style.display = "none"
+        settingsButtonPhone.setAttribute("aria-hidden", "true")
+        settingsButtonPhone.tabIndex = -1
         const settingsIconPhone = document.createElement("img")
         settingsIconPhone.src = "resources/settings-gear.svg"
         settingsIconPhone.alt = ""
@@ -4251,6 +4633,10 @@ class ViewerSidebar implements Component, Sidebar {
 
         const settingsButtonPc = document.createElement("button")
         settingsButtonPc.classList.add("sidebar-btn-with-icon")
+        settingsButtonPc.type = "button"
+        settingsButtonPc.style.display = "none"
+        settingsButtonPc.setAttribute("aria-hidden", "true")
+        settingsButtonPc.tabIndex = -1
         const settingsIconPc = document.createElement("img")
         settingsIconPc.src = "resources/settings-gear.svg"
         settingsIconPc.alt = ""

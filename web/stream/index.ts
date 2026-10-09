@@ -16,6 +16,7 @@ import { Transport, TransportShutdown } from "./transport/index.js"
 import { WebSocketTransport } from "./transport/web_socket.js"
 import { WebRTCIceMode, WebRTCTransport } from "./transport/webrtc.js"
 import { allVideoCodecs, andVideoCodecs, createSupportedVideoFormatsBits, emptyVideoCodecs, getSelectedVideoCodec, hasAnyCodec, VideoCodecSupport } from "./video.js"
+import { FIRST_VIDEO_FRAME_EVENT } from "./video/first_frame.js"
 import { VideoRenderer } from "./video/index.js"
 import { buildVideoPipeline, VideoPipelineOptions } from "./video/pipeline.js"
 
@@ -41,9 +42,35 @@ export type InfoEvent = CustomEvent<
     { type: "bitrateRequestApplied", mbps: number, source: VideoBitrateChangeSource } |
     { type: "bitrateHostApplied", mbps: number, kbps: number, source?: VideoBitrateChangeSource } |
     { type: "bitrateHostRejected", mbps: number, kbps: number, reason: string, source?: VideoBitrateChangeSource } |
-    { type: "generalChannelReady" }
+    { type: "generalChannelReady" } |
+    { type: "startupProgress", percent: number, step: StartupStep } |
+    { type: "firstVideoFrame" } |
+    { type: "transportClosed", reason: string } |
+    { type: "sessionCancelled" }
 >
 export type InfoEventListener = (event: InfoEvent) => void
+
+/** What the stream is currently waiting for during startup. */
+export type StartupStep =
+    "connect" |
+    "appCheck" |
+    "prep" |
+    "launchStreamer" |
+    "negotiate" |
+    "startStream" |
+    "hostLaunch" |
+    "stages" |
+    "decoders" |
+    "firstFrame"
+
+export type StartupTransport = "direct" | "relay" | "websocket"
+
+export type StreamStartOptions = {
+    /** Skip transports that failed on the previous attempt. */
+    transportHint?: StartupTransport
+}
+
+const MOONLIGHT_STAGE_PERCENT_CAP = 83
 
 export function getStreamerSize(settings: Settings, viewerScreenSize: [number, number]): [number, number] {
     let width, height
@@ -136,10 +163,36 @@ export class Stream implements Component {
     private dragOverHandler = (event: DragEvent) => this.onDragOver(event)
     private dropHandler = (event: DragEvent) => this.onDrop(event)
 
-    constructor(api: Api, hostId: number, appId: number, settings: Settings, viewerScreenSize: [number, number]) {
+    private readonly transportHint: StartupTransport
+    private reachedTransport: StartupTransport = "direct"
+    private startupPercent = 0
+    private moonlightStreamStarted = false
+    private completedMoonlightStages = 0
+    private firstFrameSeen = false
+    private decodersReady = false
+    private firstFrameEmitted = false
+    private closed = false
+    private readonly firstFrameHandler = () => {
+        this.firstFrameSeen = true
+        this.maybeEmitFirstVideoFrame()
+    }
+
+    constructor(
+        api: Api,
+        hostId: number,
+        appId: number,
+        settings: Settings,
+        viewerScreenSize: [number, number],
+        options: StreamStartOptions = {},
+    ) {
+        this.transportHint = options.transportHint ?? "direct"
         this.logger.addInfoListener((info, type) => {
             this.debugLog(info, { type: type ?? undefined })
         })
+        // Renderers can draw before ConnectionComplete arrives, so listen from the start.
+        this.divElement.addEventListener(FIRST_VIDEO_FRAME_EVENT, this.firstFrameHandler)
+        // Info listeners are attached right after construction.
+        queueMicrotask(() => this.emitStartupProgress(2, "connect"))
 
         this.api = api
 
@@ -358,8 +411,55 @@ export class Stream implements Component {
         )
     }
 
+    private dispatchInfo(detail: InfoEvent["detail"]) {
+        const event: InfoEvent = new CustomEvent("stream-info", { detail })
+        this.eventTarget.dispatchEvent(event)
+    }
+
+    private emitStartupProgress(percent: number, step: StartupStep) {
+        if (this.closed || this.firstFrameEmitted) return
+        this.startupPercent = Math.max(this.startupPercent, percent)
+        this.dispatchInfo({ type: "startupProgress", percent: this.startupPercent, step })
+    }
+
+    /** Server startup stages arrive as plain DebugLog lines; map them to progress before log filtering. */
+    private trackStartupDebugLog(message: string) {
+        if (message === "Preparing nextGPU session...") {
+            this.emitStartupProgress(15, "prep")
+        } else if (message === "Launching streamer") {
+            this.emitStartupProgress(22, "launchStreamer")
+        } else if (message === "Completed Stage: Launch Streamer") {
+            this.emitStartupProgress(28, "launchStreamer")
+        } else if (message === "Waiting for Transport to negotiate") {
+            this.emitStartupProgress(32, "negotiate")
+        } else if (message === "Moonlight Stream") {
+            this.moonlightStreamStarted = true
+            this.emitStartupProgress(50, "hostLaunch")
+        } else if (this.moonlightStreamStarted && message.startsWith("Starting Stage: ")) {
+            this.emitStartupProgress(this.startupPercent, "stages")
+        } else if (this.moonlightStreamStarted && message.startsWith("Completed Stage: ")) {
+            this.completedMoonlightStages += 1
+            this.emitStartupProgress(
+                Math.min(MOONLIGHT_STAGE_PERCENT_CAP, 50 + 3 * this.completedMoonlightStages),
+                "stages",
+            )
+        }
+    }
+
+    private maybeEmitFirstVideoFrame() {
+        if (this.closed || this.firstFrameEmitted || !this.firstFrameSeen || !this.decodersReady) return
+        this.firstFrameEmitted = true
+        this.dispatchInfo({ type: "firstVideoFrame" })
+    }
+
+    /** Transport that the last negotiation used or fell back to; pass as a hint to the next attempt. */
+    get usedTransport(): StartupTransport {
+        return this.reachedTransport
+    }
+
     private async onMessage(message: StreamServerMessage) {
         if (message === "SessionCancelled") {
+            this.dispatchInfo({ type: "sessionCancelled" })
             this.streamingVideoActive = false
             this.lastAppliedBitrateMbps = null
             this.pendingBitrateAckKbps = null
@@ -377,6 +477,7 @@ export class Stream implements Component {
         if ("DebugLog" in message) {
             const debugLog = message.DebugLog
 
+            this.trackStartupDebugLog(debugLog.message)
             this.debugLog(debugLog.message, {
                 type: debugLog.ty ?? undefined
             })
@@ -386,7 +487,9 @@ export class Stream implements Component {
             })
 
             this.eventTarget.dispatchEvent(event)
+            this.emitStartupProgress(10, "appCheck")
         } else if ("ConnectionComplete" in message) {
+            this.emitStartupProgress(90, "decoders")
             const capabilities = message.ConnectionComplete.capabilities
             const formatRaw = message.ConnectionComplete.format
             const width = message.ConnectionComplete.width
@@ -430,27 +533,37 @@ export class Stream implements Component {
             }
 
             if (!this.videoRenderer || !this.audioPlayer) {
-                throw "Video renderer or audio player not initialized!"
+                this.debugLog("Failed to start stream because the video renderer or audio player is not initialized", { type: "fatalDescription" })
+                return
             }
 
-            await Promise.all([
-                this.videoRenderer.setup({
-                    codec: format,
-                    fps,
-                    width,
-                    height,
-                }),
-                this.audioPlayer.setup({
-                    sampleRate: audioSampleRate,
-                    channels: audioChannelCount,
-                    streams: audioStreams,
-                    coupledStreams: audioCoupledStreams,
-                    samplesPerFrame: audioSamplesPerFrame,
-                    mapping: audioMapping,
-                })
-            ])
+            try {
+                await Promise.all([
+                    this.videoRenderer.setup({
+                        codec: format,
+                        fps,
+                        width,
+                        height,
+                    }),
+                    this.audioPlayer.setup({
+                        sampleRate: audioSampleRate,
+                        channels: audioChannelCount,
+                        streams: audioStreams,
+                        coupledStreams: audioCoupledStreams,
+                        samplesPerFrame: audioSamplesPerFrame,
+                        mapping: audioMapping,
+                    })
+                ])
+            } catch (err) {
+                console.error("[Stream]: decoder setup failed", err)
+                this.debugLog(`Failed to set up the video or audio decoder: ${err}`, { type: "fatalDescription" })
+                return
+            }
             this.streamingVideoActive = true
             this.lastAppliedBitrateMbps = this.settings.bitrate
+            this.emitStartupProgress(95, "firstFrame")
+            this.decodersReady = true
+            this.maybeEmitFirstVideoFrame()
         } else if ("ConnectionTerminated" in message) {
             const code = message.ConnectionTerminated.error_code
 
@@ -485,6 +598,7 @@ export class Stream implements Component {
                 prettyIceUrls
             )}`)
 
+            this.emitStartupProgress(35, "negotiate")
             await this.startConnection()
         }
         // -- WebRTC
@@ -550,11 +664,16 @@ export class Stream implements Component {
         this.resetKeyboardState("before connection start")
 
         if (this.settings.dataTransport == "auto") {
-            let shutdownReason = await this.tryWebRTCTransport()
-
-            if (shutdownReason == "failednoconnect") {
-                this.debugLog("Failed to establish WebRTC connection. Falling back to Web Socket transport.", { type: "ifErrorDescription" })
+            if (this.transportHint == "websocket") {
+                this.debugLog("Previous attempt needed the Web Socket transport, skipping WebRTC")
                 await this.tryWebSocketTransport()
+            } else {
+                let shutdownReason = await this.tryWebRTCTransport()
+
+                if (shutdownReason == "failednoconnect" && !this.closed) {
+                    this.debugLog("Failed to establish WebRTC connection. Falling back to Web Socket transport.", { type: "ifErrorDescription" })
+                    await this.tryWebSocketTransport()
+                }
             }
         } else if (this.settings.dataTransport == "webrtc") {
             await this.tryWebRTCTransport()
@@ -562,6 +681,7 @@ export class Stream implements Component {
             await this.tryWebSocketTransport()
         }
 
+        if (this.closed) return
         this.debugLog("Tried all configured transport options but no connection was possible", { type: "fatal" })
     }
 
@@ -1013,20 +1133,32 @@ export class Stream implements Component {
             return "failednoconnect"
         }
 
-        // Staggered direct retries before relay fallback increases UDP P2P success under CGNAT.
-        const directAttempt = await this.connectWebRTCWithMode("prefer-direct", 3200)
-        let transport = directAttempt.transport
-        let result = directAttempt.connected
+        let transport: WebRTCTransport | null = null
+        let result = false
 
-        if (!result) {
-            this.debugLog("Direct WebRTC attempt failed, retrying direct once with refreshed NAT warmup")
-            const secondDirectAttempt = await this.connectWebRTCWithMode("prefer-direct", 2600)
-            transport = secondDirectAttempt.transport
-            result = secondDirectAttempt.connected
+        if (this.transportHint == "relay") {
+            this.debugLog("Previous attempt needed relay, skipping direct WebRTC attempts")
+        } else {
+            // Staggered direct retries before relay fallback increases UDP P2P success under CGNAT.
+            this.reachedTransport = "direct"
+            this.emitStartupProgress(37, "negotiate")
+            const directAttempt = await this.connectWebRTCWithMode("prefer-direct", 3200)
+            transport = directAttempt.transport
+            result = directAttempt.connected
+
+            if (!result && !this.closed) {
+                this.debugLog("Direct WebRTC attempt failed, retrying direct once with refreshed NAT warmup")
+                this.emitStartupProgress(40, "negotiate")
+                const secondDirectAttempt = await this.connectWebRTCWithMode("prefer-direct", 2600)
+                transport = secondDirectAttempt.transport
+                result = secondDirectAttempt.connected
+            }
         }
 
-        if (!result) {
+        if (!result && !this.closed) {
             this.debugLog("Direct WebRTC retries failed, retrying with relay-only fallback window")
+            this.reachedTransport = "relay"
+            this.emitStartupProgress(43, "negotiate")
             const relayAttempt = await this.connectWebRTCWithMode("relay-only", 6000)
             transport = relayAttempt.transport
             result = relayAttempt.connected
@@ -1034,9 +1166,11 @@ export class Stream implements Component {
 
         this.debugLog(`WebRTC negotiation success: ${result}`)
 
-        if (!result) {
+        if (!result || !transport) {
             return "failednoconnect"
         }
+        const connectedTransport = transport
+        this.emitStartupProgress(45, "startStream")
 
         // Print pipe support
         const pipesInfo = await gatherPipeInfo()
@@ -1053,14 +1187,14 @@ export class Stream implements Component {
         if (!videoCodecSupport) {
             this.debugLog("No video pipeline was found for the codec that was specified. If you're unsure which codecs are supported use H264.", { type: "fatalDescription" })
 
-            await transport.close()
+            await connectedTransport.close()
             return "failednoconnect"
         }
 
         await this.startStream(videoCodecSupport)
 
         return new Promise((resolve, reject) => {
-            transport.onclose = (shutdown) => {
+            connectedTransport.onclose = (shutdown) => {
                 this.resetKeyboardState(`transport closed (${shutdown})`)
                 resolve(shutdown)
             }
@@ -1068,6 +1202,8 @@ export class Stream implements Component {
     }
     private async tryWebSocketTransport() {
         this.debugLog("Trying Web Socket transport")
+        this.reachedTransport = "websocket"
+        this.emitStartupProgress(44, "startStream")
 
         this.sendWsMessage({
             SetTransport: "WebSocket"
@@ -1119,7 +1255,15 @@ export class Stream implements Component {
 
         return supportedVideoCodecs
     }
+    private sendVideoIdrRequest: (() => void) | null = null
+
+    /** Ask the host for a keyframe. Only the data video channel needs this; WebRTC tracks request their own. */
+    requestVideoIdr(): void {
+        this.sendVideoIdrRequest?.()
+    }
+
     private async createVideoRenderer(): Promise<VideoCodecSupport | null> {
+        this.sendVideoIdrRequest = null
         if (this.videoRenderer) {
             this.debugLog("Found an old video renderer -> cleaning it up")
 
@@ -1187,18 +1331,23 @@ export class Stream implements Component {
 
             videoRenderer.mount(this.divElement)
 
+            const sendIdrRequest = () => {
+                const buffer = new ByteBuffer(1)
+
+                buffer.putU8(0)
+
+                buffer.flip()
+
+                video.send(buffer.getRemainingBuffer().buffer)
+            }
+            this.sendVideoIdrRequest = sendIdrRequest
+
             video.addReceiveListener((data) => {
                 videoRenderer.submitPacket(data)
 
                 // data pipeline support requesting idrs over video channel
                 if (videoRenderer.pollRequestIdr()) {
-                    const buffer = new ByteBuffer(1)
-
-                    buffer.putU8(0)
-
-                    buffer.flip()
-
-                    video.send(buffer.getRemainingBuffer().buffer)
+                    sendIdrRequest()
                 }
             })
 
@@ -1302,6 +1451,7 @@ export class Stream implements Component {
         document.removeEventListener("pointerlockchange", this.pointerLockChangeHandler)
         this.divElement.removeEventListener("dragover", this.dragOverHandler)
         this.divElement.removeEventListener("drop", this.dropHandler)
+        this.divElement.removeEventListener(FIRST_VIDEO_FRAME_EVENT, this.firstFrameHandler)
         parent.removeChild(this.divElement)
     }
 
@@ -1317,6 +1467,7 @@ export class Stream implements Component {
 
     private onWsOpen() {
         this.debugLog(`Web Socket Open`)
+        this.emitStartupProgress(5, "appCheck")
 
         for (const raw of this.wsSendBuffer.splice(0)) {
             this.ws.send(raw)
@@ -1324,6 +1475,9 @@ export class Stream implements Component {
     }
     private onWsClose() {
         this.debugLog(`Web Socket Closed`)
+        if (!this.closed) {
+            this.dispatchInfo({ type: "transportClosed", reason: "web socket closed" })
+        }
         this.streamingVideoActive = false
         this.lastAppliedBitrateMbps = null
         this.pendingBitrateAckKbps = null
@@ -1339,6 +1493,9 @@ export class Stream implements Component {
         this.resetKeyboardState("transport error")
 
         console.error(`Web Socket or WebRtcPeer Error`, event)
+        if (!this.closed) {
+            this.dispatchInfo({ type: "transportClosed", reason: "web socket error" })
+        }
     }
 
     private sendWsMessage(message: StreamClientMessage) {
@@ -1376,6 +1533,38 @@ export class Stream implements Component {
         return new Promise((resolve, _reject) => {
             setTimeout(() => resolve(true), 100)
         })
+    }
+
+    /**
+     * Tear the whole session down, including the web socket, so the server stops the streamer.
+     * `stop()` alone only works once the general data channel exists.
+     */
+    async close(): Promise<void> {
+        if (this.closed) return
+        try {
+            await this.stop()
+        } catch (err) {
+            console.debug("[Stream]: stop before close failed", err)
+        }
+        this.closed = true
+        const transport = this.transport
+        this.transport = null
+        try {
+            await transport?.close()
+        } catch (err) {
+            console.debug("[Stream]: transport close failed", err)
+        }
+        if (this.ws.readyState == WebSocket.CONNECTING || this.ws.readyState == WebSocket.OPEN) {
+            this.ws.close()
+        }
+        this.stopRttKeepalive()
+        this.sendVideoIdrRequest = null
+        try {
+            this.videoRenderer?.cleanup()
+            this.audioPlayer?.cleanup()
+        } catch (err) {
+            console.debug("[Stream]: renderer cleanup on close failed", err)
+        }
     }
 
     // -- Class Api

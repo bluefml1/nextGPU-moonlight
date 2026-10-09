@@ -1,7 +1,84 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
+};
 
 use common::config::Config;
 use log::{info, warn};
+use tokio::sync::watch;
+
+use crate::app::host::HostId;
+
+/// A prep that finished this recently is reused by the next stream start for the same host.
+const PREP_REUSE_WINDOW: Duration = Duration::from_secs(60);
+
+type PrepResult = Option<Result<(), String>>;
+
+enum PrepState {
+    Running(watch::Receiver<PrepResult>),
+    Done(Instant),
+}
+
+static PREP_STATES: LazyLock<Mutex<HashMap<HostId, PrepState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Make sure `startSession.ps1` has run for this host, at most one copy at a time.
+///
+/// The script recreates a Windows user, so it must never be killed halfway or run twice
+/// in parallel. It runs in a detached task: a caller that gives up (timeout, closed socket)
+/// leaves it running, and the next caller waits for the same run instead of starting another.
+pub async fn ensure_prep(
+    host_id: HostId,
+    script: PathBuf,
+    domain_txt_path: Option<PathBuf>,
+) -> Result<(), String> {
+    let mut receiver = {
+        let mut states = PREP_STATES.lock().unwrap_or_else(|err| err.into_inner());
+        match states.get(&host_id) {
+            Some(PrepState::Done(at)) if at.elapsed() < PREP_REUSE_WINDOW => {
+                info!("[StartSession]: host {host_id:?} was prepared {:?} ago, skipping prep", at.elapsed());
+                return Ok(());
+            }
+            Some(PrepState::Running(receiver)) => {
+                info!("[StartSession]: prep already running for host {host_id:?}, waiting for it");
+                receiver.clone()
+            }
+            _ => {
+                let (sender, receiver) = watch::channel::<PrepResult>(None);
+                states.insert(host_id, PrepState::Running(receiver.clone()));
+
+                tokio::spawn(async move {
+                    let result = run_start_session(&script, domain_txt_path.as_deref()).await;
+                    {
+                        let mut states = PREP_STATES.lock().unwrap_or_else(|err| err.into_inner());
+                        if result.is_ok() {
+                            states.insert(host_id, PrepState::Done(Instant::now()));
+                        } else {
+                            states.remove(&host_id);
+                        }
+                    }
+                    let _ = sender.send(Some(result));
+                });
+
+                receiver
+            }
+        }
+    };
+
+    match receiver.wait_for(|result| result.is_some()).await {
+        Ok(result) => result.clone().unwrap_or(Ok(())),
+        Err(_) => {
+            // The prep task died without reporting; let the next caller start a fresh one.
+            let mut states = PREP_STATES.lock().unwrap_or_else(|err| err.into_inner());
+            if matches!(states.get(&host_id), Some(PrepState::Running(_))) {
+                states.remove(&host_id);
+            }
+            Err("session prep stopped unexpectedly".to_string())
+        }
+    }
+}
 
 /// Resolve `startSession.ps1` from config or the Sunshine install `script` folder.
 pub fn resolve_start_session_script(config: &Config) -> Option<PathBuf> {

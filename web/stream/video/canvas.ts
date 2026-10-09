@@ -3,6 +3,7 @@ import { Logger } from "../log.js"
 import { Pipe, PipeInfo } from "../pipeline/index.js"
 import { addPipePassthrough } from "../pipeline/pipes.js"
 import { allVideoCodecs } from "../video.js"
+import { notifyFirstVideoFrame } from "./first_frame.js"
 import { CanvasRenderer, getStreamRectCorrected, UseCanvasResult, VideoRendererSetup } from "./index.js"
 
 function getColorSpace(hdrEnabled: boolean): string {
@@ -218,5 +219,15 @@ export class MainCanvasRenderer extends BaseCanvasVideoRenderer {
 
     mount(parent: HTMLElement): void {
         super.mount(parent)
+    }
+
+    private firstFrameNotified = false
+
+    commitFrame(): void {
+        super.commitFrame()
+        if (!this.firstFrameNotified && this.canvas instanceof HTMLCanvasElement) {
+            this.firstFrameNotified = true
+            notifyFirstVideoFrame(this.canvas)
+        }
     }
 }
