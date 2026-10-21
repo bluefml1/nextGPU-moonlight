@@ -123,6 +123,8 @@ export class StreamInput {
     private lastLeftButtonDownTime = -Infinity
     private lastLeftButtonUpTime = -Infinity
     private touch: DataTransportChannel | null = null
+    // Touch mode: fingers the host has pressed, with their last sent normalized position
+    private hostTouches: Map<number, [number, number]> = new Map()
     private controllers: DataTransportChannel | null = null
     private controllerInputs: Array<DataTransportChannel | null> = []
 
@@ -165,6 +167,7 @@ export class StreamInput {
         }
         this.touch = this.getDataChannel(transport, TransportChannelId.TOUCH)
         this.touch.addReceiveListener(this.onTouchData.bind(this))
+        this.hostTouches.clear()
 
         if (this.controllers) {
             this.controllers.removeReceiveListener(this.onTouchData.bind(this))
@@ -189,6 +192,7 @@ export class StreamInput {
         }
 
         // Touch
+        this.releaseHostTouches()
         this.primaryTouch = null
         this.touchTracker.clear()
     }
@@ -943,6 +947,10 @@ export class StreamInput {
             for (const touch of event.changedTouches) {
                 this.sendTouch(2, touch, rect)
             }
+            // No finger left on the screen: the host must not keep any finger pressed
+            if (event.touches.length == 0) {
+                this.releaseHostTouches()
+            }
         } else if (this.isMouseEmulationTouchMode()) {
             for (const touch of event.changedTouches) {
                 if (this.primaryTouch != touch.identifier) {
@@ -1059,27 +1067,54 @@ export class StreamInput {
         return [x, y]
     }
     private sendTouch(type: number, touch: Touch, rect: DOMRect) {
+        let position = this.calcNormalizedPosition(touch.clientX, touch.clientY, rect)
+
+        if (type == 0) {
+            // Touches starting outside the stream (e.g. letterbox bars) are not sent
+            if (!position) {
+                return
+            }
+        } else {
+            // A finger that started on the stream can slide off it: keep it on the edge so the host still
+            // gets its moves and, above all, its lift (else the host keeps that finger pressed)
+            if (!this.hostTouches.has(touch.identifier)) {
+                return
+            }
+            position ??= [
+                Math.min(1, Math.max(0, (touch.clientX - rect.left) / rect.width)),
+                Math.min(1, Math.max(0, (touch.clientY - rect.top) / rect.height)),
+            ]
+        }
+
+        const [x, y] = position
+        if (type == 2) {
+            this.hostTouches.delete(touch.identifier)
+        } else {
+            this.hostTouches.set(touch.identifier, [x, y])
+        }
+
+        this.sendTouchPacket(type, touch.identifier, x, y, touch.force, touch.radiusX, touch.radiusY, touch.rotationAngle)
+    }
+    private sendTouchPacket(type: number, id: number, x: number, y: number, force: number, radiusX: number, radiusY: number, rotationAngle: number) {
         this.buffer.reset()
 
         this.buffer.putU8(type)
-
-        this.buffer.putU32(touch.identifier)
-
-        const position = this.calcNormalizedPosition(touch.clientX, touch.clientY, rect)
-        if (!position) {
-            return
-        }
-        const [x, y] = position
+        this.buffer.putU32(id)
         this.buffer.putF32(x)
         this.buffer.putF32(y)
-
-        this.buffer.putF32(touch.force)
-
-        this.buffer.putF32(touch.radiusX)
-        this.buffer.putF32(touch.radiusY)
-        this.buffer.putU16(touch.rotationAngle)
+        this.buffer.putF32(force)
+        this.buffer.putF32(radiusX)
+        this.buffer.putF32(radiusY)
+        this.buffer.putU16(rotationAngle)
 
         trySendChannel(this.touch, this.buffer)
+    }
+    /** Lifts every finger the host still has pressed (e.g. when the browser never delivered its touchend). */
+    private releaseHostTouches() {
+        for (const [id, [x, y]] of this.hostTouches) {
+            this.sendTouchPacket(2, id, x, y, 0, 0, 0, 0)
+        }
+        this.hostTouches.clear()
     }
 
     isTouchSupported(): boolean | null {
@@ -1117,6 +1152,7 @@ export class StreamInput {
                 this.sendMouseButton(false, StreamMouseButton.LEFT)
             }
         }
+        this.releaseHostTouches()
         this.touchTracker.clear()
         this.primaryTouch = null
         this.touchMouseAction = "default"
