@@ -9,18 +9,20 @@ import { DataTransportChannel, Transport, TransportChannelIdKey, TransportChanne
 const TOUCH_HIGH_RES_SCROLL_MULTIPLIER = 10
 // Normal scrolling multiplier
 const TOUCH_SCROLL_MULTIPLIER = 1
-// Distance until a touch cannot be a click anymore
-const TOUCH_AS_CLICK_MAX_DISTANCE = 2
+// Distance until a touch cannot be a click anymore (CSS px; fingertips jitter several px during a tap)
+const TOUCH_AS_CLICK_MAX_DISTANCE = 10
 // Time till it's registered as a click, else it might be scrolling
 const TOUCH_AS_CLICK_MIN_TIME_MS = 100
 // Everything greater than this is a right click
 const TOUCH_AS_CLICK_MAX_TIME_MS = 350
 // How much to move to open up the screen keyboard when having three touches at the same time
 const TOUCHES_AS_KEYBOARD_DISTANCE = 100
-// How long is the first tap allowed to be for it to maybe be a double tap
-const DOUBLE_TAP_FIRST_TAP_MAX_TIME_MS = 100
 // How much time is allowed after a touch release for a new tap to count both taps as a double tap
-const DOUBLE_TAP_SECOND_TAP_MAX_TIME_MS = 200
+const DOUBLE_TAP_SECOND_TAP_MAX_TIME_MS = 300
+// The host briefly delays left-button releases; a press arriving inside that window turns a double-click
+// into one long press. Keep left presses and releases at least this far apart when sending.
+const MOUSE_LEFT_PRESS_AFTER_RELEASE_MS = 60
+const MOUSE_LEFT_RELEASE_AFTER_PRESS_MS = 30
 
 const CONTROLLER_RUMBLE_INTERVAL_MS = 60
 const MAX_CONTROLLER_SLOTS = 16
@@ -73,6 +75,23 @@ export function defaultStreamInputConfig(): StreamInputConfig {
 }
 
 export type PredictedTouchAction = "default" | "drag" | "scroll" | "screenKeyboard"
+
+type TrackedTouch = {
+    startTime: number
+    originX: number
+    originY: number
+    x: number
+    y: number
+    // number is StreamMouseButton
+    mouseClicked: null | number
+    // point and drag: if we've moved the mouse to the touch
+    // trackpad modes: the finger left the tap distance, so the cursor follows it and it can't be a click
+    mouseMoved: boolean
+    // Farthest distance from the origin during this touch; a tap must stay within TOUCH_AS_CLICK_MAX_DISTANCE
+    maxDistance: number
+    // Trackpad modes: second touch of a double tap, which holds the left button for dragging
+    doubleTapDrag: boolean
+}
 export type ScreenKeyboardSetVisibleEvent = CustomEvent<{ visible: boolean }>
 
 /** Client-pixel motion for the adaptive software cursor overlay. */
@@ -98,6 +117,11 @@ export class StreamInput {
     private mouseReliable: DataTransportChannel | null = null
     private mouseAbsolute: DataTransportChannel | null = null
     private mouseRelative: DataTransportChannel | null = null
+    // All mouse packets go through this queue so they stay in order behind a held-back left click
+    private mouseSendQueue: Array<{ channel: DataTransportChannel, data: ArrayBuffer, leftButtonDown: boolean | null }> = []
+    private mouseSendTimer: ReturnType<typeof setTimeout> | null = null
+    private lastLeftButtonDownTime = -Infinity
+    private lastLeftButtonUpTime = -Infinity
     private touch: DataTransportChannel | null = null
     private controllers: DataTransportChannel | null = null
     private controllerInputs: Array<DataTransportChannel | null> = []
@@ -130,6 +154,11 @@ export class StreamInput {
         this.mouseReliable = this.getDataChannel(transport, TransportChannelId.MOUSE_RELIABLE)
         this.mouseAbsolute = this.getDataChannel(transport, TransportChannelId.MOUSE_ABSOLUTE)
         this.mouseRelative = this.getDataChannel(transport, TransportChannelId.MOUSE_RELATIVE)
+        this.mouseSendQueue.length = 0
+        if (this.mouseSendTimer != null) {
+            clearTimeout(this.mouseSendTimer)
+            this.mouseSendTimer = null
+        }
 
         if (this.touch) {
             this.touch.removeReceiveListener(this.onTouchData.bind(this))
@@ -217,13 +246,9 @@ export class StreamInput {
         this.sendMousePositionClientCoordinates(this.mouseFollowClientX, this.mouseFollowClientY, rect, false)
     }
 
-    private beginMouseFollowDrag(
-        rect: DOMRect,
-        touch: { mouseClicked: null | number; mouseMoved: boolean }
-    ) {
+    private beginMouseFollowDrag(rect: DOMRect, touch: { mouseClicked: null | number }) {
         this.ensureMouseFollowCursor(rect)
         this.sendMousePositionClientCoordinates(this.mouseFollowClientX, this.mouseFollowClientY, rect, true)
-        touch.mouseMoved = true
         if (touch.mouseClicked == null) {
             this.sendMouseButton(true, StreamMouseButton.LEFT)
             touch.mouseClicked = StreamMouseButton.LEFT
@@ -507,6 +532,53 @@ export class StreamInput {
         }
     }
 
+    private sendMousePacket(channel: DataTransportChannel | null, leftButtonDown: boolean | null = null) {
+        if (!channel) {
+            return
+        }
+
+        this.buffer.flip()
+        const data = this.buffer.getRemainingBuffer()
+        if (data.length == 0) {
+            throw "illegal buffer size"
+        }
+
+        this.mouseSendQueue.push({ channel, data: data.buffer, leftButtonDown })
+        this.flushMouseSendQueue()
+    }
+    private flushMouseSendQueue() {
+        if (this.mouseSendTimer != null) {
+            return
+        }
+
+        while (this.mouseSendQueue.length > 0) {
+            const packet = this.mouseSendQueue[0]
+            const now = performance.now()
+
+            let sendAt = now
+            if (packet.leftButtonDown === true) {
+                sendAt = this.lastLeftButtonUpTime + MOUSE_LEFT_PRESS_AFTER_RELEASE_MS
+            } else if (packet.leftButtonDown === false) {
+                sendAt = this.lastLeftButtonDownTime + MOUSE_LEFT_RELEASE_AFTER_PRESS_MS
+            }
+            if (sendAt > now) {
+                this.mouseSendTimer = setTimeout(() => {
+                    this.mouseSendTimer = null
+                    this.flushMouseSendQueue()
+                }, sendAt - now)
+                return
+            }
+
+            this.mouseSendQueue.shift()
+            if (packet.leftButtonDown === true) {
+                this.lastLeftButtonDownTime = now
+            } else if (packet.leftButtonDown === false) {
+                this.lastLeftButtonUpTime = now
+            }
+            packet.channel.send(packet.data)
+        }
+    }
+
     sendMouseMove(movementX: number, movementY: number) {
         this.buffer.reset()
 
@@ -514,7 +586,7 @@ export class StreamInput {
         this.buffer.putI16(movementX)
         this.buffer.putI16(movementY)
 
-        trySendChannel(this.mouseRelative, this.buffer)
+        this.sendMousePacket(this.mouseRelative)
     }
     sendMouseMoveClientCoordinates(movementX: number, movementY: number, rect: DOMRect) {
         const scaledMovementX = movementX / rect.width * this.streamerSize[0];
@@ -533,7 +605,7 @@ export class StreamInput {
         this.buffer.putI16(referenceHeight)
 
         if (reliable) {
-            trySendChannel(this.mouseReliable, this.buffer)
+            this.sendMousePacket(this.mouseReliable)
         } else {
             const PACKET_SIZE = 1 + 2 + 2 + 2 + 2;
 
@@ -541,7 +613,7 @@ export class StreamInput {
             if (this.mouseAbsolute && estimatedBufferedBytes != null && estimatedBufferedBytes > PACKET_SIZE) {
                 return
             }
-            trySendChannel(this.mouseAbsolute, this.buffer)
+            this.sendMousePacket(this.mouseAbsolute)
         }
     }
     sendMousePositionClientCoordinates(clientX: number, clientY: number, rect: DOMRect, reliable: boolean, mouseButton?: number) {
@@ -564,7 +636,7 @@ export class StreamInput {
         this.buffer.putBool(isDown)
         this.buffer.putU8(button)
 
-        trySendChannel(this.mouseReliable, this.buffer)
+        this.sendMousePacket(this.mouseReliable, button == StreamMouseButton.LEFT ? isDown : null)
     }
     sendMouseWheelHighRes(deltaX: number, deltaY: number) {
         this.buffer.reset()
@@ -573,7 +645,7 @@ export class StreamInput {
         this.buffer.putI16(deltaX)
         this.buffer.putI16(deltaY)
 
-        trySendChannel(this.mouseRelative, this.buffer)
+        this.sendMousePacket(this.mouseRelative)
     }
     sendMouseWheel(deltaX: number, deltaY: number) {
         this.buffer.reset()
@@ -582,22 +654,11 @@ export class StreamInput {
         this.buffer.putI8(deltaX)
         this.buffer.putI8(deltaY)
 
-        trySendChannel(this.mouseRelative, this.buffer)
+        this.sendMousePacket(this.mouseRelative)
     }
 
     // -- Touch
-    private touchTracker: Map<number, {
-        startTime: number
-        originX: number
-        originY: number
-        x: number
-        y: number
-        // number is StreamMouseButton
-        mouseClicked: null | number,
-        // point and drag: if we've moved the mouse to the touch
-        // mouse relative: we've moved the mouse enough that it shouldn't be a click anymore
-        mouseMoved: boolean
-    }> = new Map()
+    private touchTracker: Map<number, TrackedTouch> = new Map()
     // The current action of all touches on screen
     // - default -> the default action for this touch mode / we're still trying to figure out what the user is trying to do
     // - drag -> mouse is down and only relative movement is done
@@ -610,6 +671,13 @@ export class StreamInput {
     private primaryTouch: number | null = null
     // If the next touch is a double tap?
     private nextTouchDoubleTap: boolean = false
+    // Bumped whenever a new primary touch starts; a pending single-tap click is dropped if it changed
+    private primaryTouchStartSeq = 0
+    // mouseFollow: cursor position of a tap that may be the first half of a double tap. The second click
+    // goes to the same spot because Windows only accepts a double-click within a few host pixels.
+    private lastTapCursor: { x: number, y: number } | null = null
+    // Farthest any finger moved from its origin since the primary touch started; a two-finger tap must stay small
+    private gestureMaxDistance = 0
 
     private isMouseEmulationTouchMode(): boolean {
         return (
@@ -635,10 +703,46 @@ export class StreamInput {
                 y: touch.clientY,
                 mouseClicked: null,
                 mouseMoved: false,
+                maxDistance: 0,
+                doubleTapDrag: false,
             })
         } else {
             oldTouch.x = touch.clientX
             oldTouch.y = touch.clientY
+            oldTouch.maxDistance = Math.max(oldTouch.maxDistance, this.calcTouchOriginDistance(touch, oldTouch))
+            this.gestureMaxDistance = Math.max(this.gestureMaxDistance, oldTouch.maxDistance)
+        }
+    }
+
+    /** Touch modes that move a cursor like a laptop trackpad: moving never presses a button. */
+    private isTrackpadTouchMode(): boolean {
+        return this.config.touchMode === "mouseRelative" || this.config.touchMode === "mouseFollow"
+    }
+
+    /**
+     * Trackpad dead zone: the cursor holds still while the finger stays within the tap distance (so both
+     * clicks of a double tap land on the same host pixel), then catches up with the whole movement since
+     * touch-down. Returns the movement to apply now, or null to hold still.
+     */
+    private trackpadMovement(touch: Touch, oldTouch: TrackedTouch, movementX: number, movementY: number): [number, number] | null {
+        if (oldTouch.mouseMoved) {
+            return [movementX, movementY]
+        }
+        if (this.calcTouchOriginDistance(touch, oldTouch) <= TOUCH_AS_CLICK_MAX_DISTANCE) {
+            return null
+        }
+        oldTouch.mouseMoved = true
+        return [touch.clientX - oldTouch.originX, touch.clientY - oldTouch.originY]
+    }
+
+    private moveTrackpadCursor(dx: number, dy: number, rect: DOMRect) {
+        if (dx === 0 && dy === 0) {
+            return
+        }
+        if (this.config.touchMode == "mouseFollow") {
+            this.moveMouseFollowCursor(dx, dy, rect)
+        } else {
+            this.sendMouseMoveClientCoordinates(dx, dy, rect)
         }
     }
 
@@ -670,22 +774,33 @@ export class StreamInput {
             for (const touch of event.changedTouches) {
                 if (this.primaryTouch == null) {
                     this.primaryTouch = touch.identifier
+                    this.primaryTouchStartSeq++
+                    this.gestureMaxDistance = 0
                     this.touchMouseAction = "default"
                 }
             }
 
             const primaryTouch = this.primaryTouch != null && this.touchTracker.get(this.primaryTouch)
 
-            // Detect dragging in mouse relative (double-tap)
-            if (this.config.touchMode == "mouseRelative" && primaryTouch && this.nextTouchDoubleTap) {
-                if (primaryTouch.mouseClicked == null) {
-                    this.sendMouseButton(true, StreamMouseButton.LEFT)
-                    primaryTouch.mouseClicked = StreamMouseButton.LEFT
+            // Trackpad modes: double-tap and hold presses the left button for dragging
+            if (this.isTrackpadTouchMode() && primaryTouch && this.nextTouchDoubleTap) {
+                if (this.config.touchMode == "mouseFollow") {
+                    if (this.lastTapCursor) {
+                        this.mouseFollowClientX = this.lastTapCursor.x
+                        this.mouseFollowClientY = this.lastTapCursor.y
+                    }
+                    this.beginMouseFollowDrag(rect, primaryTouch)
+                } else {
+                    if (primaryTouch.mouseClicked == null) {
+                        this.sendMouseButton(true, StreamMouseButton.LEFT)
+                        primaryTouch.mouseClicked = StreamMouseButton.LEFT
+                    }
+                    this.touchMouseAction = "drag"
                 }
-
-                this.touchMouseAction = "drag"
+                primaryTouch.doubleTapDrag = true
 
                 this.nextTouchDoubleTap = false
+                this.lastTapCursor = null
             }
 
             // Detect scrolling
@@ -757,26 +872,11 @@ export class StreamInput {
                 if (this.touchMouseAction == "default") {
                     const touchOriginDistance = this.calcTouchOriginDistance(touch, oldTouch)
 
-                    if (this.config.touchMode == "mouseFollow") {
-                        if (movementX !== 0 || movementY !== 0) {
-                            this.moveMouseFollowCursor(movementX, movementY, rect)
-                        }
-
-                        if (touchOriginDistance > TOUCH_AS_CLICK_MAX_DISTANCE) {
-                            const touchTime = this.calcTouchTime(oldTouch)
-                            if (touchTime >= TOUCH_AS_CLICK_MAX_TIME_MS) {
-                                this.beginMouseFollowDrag(rect, oldTouch)
-                            } else {
-                                oldTouch.mouseMoved = true
-                            }
-                        }
-                    }
-                    // Normal mouse relative movement
-                    else if (this.config.touchMode == "mouseRelative") {
-                        this.sendMouseMoveClientCoordinates(movementX, movementY, rect)
-
-                        if (touchOriginDistance > TOUCH_AS_CLICK_MAX_DISTANCE) {
-                            oldTouch.mouseMoved = true
+                    // Trackpad movement (on-screen follow cursor or relative mouse)
+                    if (this.isTrackpadTouchMode()) {
+                        const movement = this.trackpadMovement(touch, oldTouch, movementX, movementY)
+                        if (movement) {
+                            this.moveTrackpadCursor(movement[0], movement[1], rect)
                         }
                     }
                     // Point and Drag
@@ -795,12 +895,19 @@ export class StreamInput {
                         this.touchMouseAction = "drag"
                     }
                 } else if (this.touchMouseAction == "drag") {
-                    if (this.config.touchMode == "mouseFollow") {
-                        this.moveMouseFollowCursor(movementX, movementY, rect)
+                    if (this.isTrackpadTouchMode()) {
+                        const movement = this.trackpadMovement(touch, oldTouch, movementX, movementY)
+                        if (movement) {
+                            this.moveTrackpadCursor(movement[0], movement[1], rect)
+                        }
                     } else {
                         this.sendMouseMoveClientCoordinates(movementX, movementY, rect)
                     }
                 } else if (this.touchMouseAction == "scroll") {
+                    // Two-finger tap (right click) must not scroll: wait until the finger leaves the tap distance
+                    if (Math.max(oldTouch.maxDistance, this.calcTouchOriginDistance(touch, oldTouch)) <= TOUCH_AS_CLICK_MAX_DISTANCE) {
+                        continue
+                    }
                     // inverting horizontal scroll
                     if (this.config.mouseScrollMode == "highres") {
                         this.sendMouseWheelHighRes(-movementX * TOUCH_HIGH_RES_SCROLL_MULTIPLIER, movementY * TOUCH_HIGH_RES_SCROLL_MULTIPLIER)
@@ -846,27 +953,48 @@ export class StreamInput {
 
                 if (oldTouch) {
                     const touchTime = this.calcTouchTime(oldTouch)
-                    const touchOriginDistance = this.calcTouchOriginDistance(touch, oldTouch)
+                    const maxDistance = Math.max(oldTouch.maxDistance, this.calcTouchOriginDistance(touch, oldTouch))
 
-                    const maybeDoubleTap = touchTime < DOUBLE_TAP_FIRST_TAP_MAX_TIME_MS
+                    // A tap never left the click distance and never became a drag, scroll or keyboard gesture
+                    const wasTap = maxDistance <= TOUCH_AS_CLICK_MAX_DISTANCE && this.touchMouseAction == "default"
+                    // Every left-click tap may be the first half of a double tap, so both taps share the same timing
+                    const maybeDoubleTap =
+                        wasTap && this.isTrackpadTouchMode() && touchTime <= TOUCH_AS_CLICK_MAX_TIME_MS
 
                     if (this.config.touchMode == "pointAndDrag" && !oldTouch.mouseMoved) {
                         this.sendMousePositionClientCoordinates(touch.clientX, touch.clientY, rect, true)
-                    } else if (this.config.touchMode == "mouseFollow" && !oldTouch.mouseMoved) {
+                    } else if (this.config.touchMode == "mouseFollow" && !oldTouch.mouseMoved && !oldTouch.doubleTapDrag) {
                         this.ensureMouseFollowCursor(rect)
                         this.sendMousePositionClientCoordinates(this.mouseFollowClientX, this.mouseFollowClientY, rect, true)
                     }
 
-                    const doClick = (maybeDoubleTap: boolean) => {
-                        // See if we should make a click
-                        if (
-                            touchOriginDistance < TOUCH_AS_CLICK_MAX_DISTANCE &&
-                            // mouse relative:
-                            // - when having moved the mouse we shouldn't allow a click
-                            // - when it's maybe a double click we shouldn't do a click
-                            !(this.config.mouseMode == "relative" && !oldTouch.mouseMoved) &&
-                            !maybeDoubleTap
-                        ) {
+                    // Two-finger tap: right click
+                    if (this.touchMouseAction == "scroll") {
+                        if (this.gestureMaxDistance <= TOUCH_AS_CLICK_MAX_DISTANCE && touchTime <= TOUCH_AS_CLICK_MAX_TIME_MS) {
+                            this.sendMouseButton(true, StreamMouseButton.RIGHT)
+                            this.sendMouseButton(false, StreamMouseButton.RIGHT)
+                        }
+                        this.nextTouchDoubleTap = false
+                        continue
+                    }
+
+                    if (oldTouch.doubleTapDrag) {
+                        if (oldTouch.mouseClicked != null) {
+                            this.sendMouseButton(false, oldTouch.mouseClicked)
+                            oldTouch.mouseClicked = null
+                        }
+                        // Quick still second tap: the held button was the first click, send the second one.
+                        // Holding still and lifting late stays a single click.
+                        if (maxDistance <= TOUCH_AS_CLICK_MAX_DISTANCE && touchTime <= TOUCH_AS_CLICK_MAX_TIME_MS) {
+                            this.sendMouseButton(true, StreamMouseButton.LEFT)
+                            this.sendMouseButton(false, StreamMouseButton.LEFT)
+                        }
+                        this.nextTouchDoubleTap = false
+                        continue
+                    }
+
+                    const doClick = (deferForDoubleTap: boolean) => {
+                        if (wasTap && !deferForDoubleTap) {
                             // Should we right or left click?
                             let mouseButton
                             if (touchTime > TOUCH_AS_CLICK_MAX_TIME_MS) {
@@ -882,6 +1010,7 @@ export class StreamInput {
                         // Reset mouse click to neutral
                         if (oldTouch.mouseClicked != null) {
                             this.sendMouseButton(false, oldTouch.mouseClicked)
+                            oldTouch.mouseClicked = null
                         }
                     }
 
@@ -889,19 +1018,22 @@ export class StreamInput {
 
                     if (maybeDoubleTap) {
                         this.nextTouchDoubleTap = true
+                        this.lastTapCursor = this.config.touchMode == "mouseFollow"
+                            ? { x: this.mouseFollowClientX, y: this.mouseFollowClientY }
+                            : null
+                        const touchStartSeq = this.primaryTouchStartSeq
 
-                        // Schedule the click if it's not a double tap
+                        // Click later unless a second touch starts in time (double tap / double-tap drag)
                         setTimeout(() => {
-                            if (this.primaryTouch == null) {
-                                // no click present -> no double click -> We need to do the actual click
+                            if (this.primaryTouch == null && this.primaryTouchStartSeq == touchStartSeq) {
                                 doClick(false)
-
-                                // it cannot be a double tap
                                 this.nextTouchDoubleTap = false
+                                this.lastTapCursor = null
                             }
                         }, DOUBLE_TAP_SECOND_TAP_MAX_TIME_MS)
                     } else {
                         this.nextTouchDoubleTap = false
+                        this.lastTapCursor = null
                     }
                 }
             }

@@ -33,8 +33,6 @@ log = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 

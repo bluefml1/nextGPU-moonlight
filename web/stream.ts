@@ -50,10 +50,8 @@ import {
     streamLoadingTitle,
 } from "./stream_label.js"
 
-/** Matches stream index.ts — host bitrate POST feedback from streamer. */
-const MOONLIGHT_BITRATE_LOG_PREFIX = "[Moonlight][Bitrate]"
-
 const STARTUP_ATTEMPT_LIMIT_MS = 20_000
+const RESTART_SETTLE_MS = 1_000
 const STARTUP_MAX_ATTEMPTS = 3
 const STARTUP_RETRY_PAUSE_MS = 2_500
 const STARTUP_CLOSE_LIMIT_MS = 3_000
@@ -583,6 +581,7 @@ class ViewerApp implements Component {
     private startupAttempt = 1
     private startupInProgress = false
     private attemptDeadline = 0
+    private restartInFlight = false
     /** The attempt limit restarts when the streamer launches, so session prep (bounded by its stall limit) is not counted. */
     private attemptTimerFromLaunch = false
     /** Shown percent when the current attempt started; the attempt's own 0..100 maps into base..99. */
@@ -635,7 +634,6 @@ class ViewerApp implements Component {
     private overlayBitrateRange: HTMLInputElement | null = null
     private realtimeBitrateHud: RealtimeBitrateHud | null = null
     private statsControlsGroup: HTMLDivElement | null = null
-    private bitrateToastStack: HTMLDivElement | null = null
     private fullscreenToggleButtonManualPosition = false
     private fullscreenToggleButtonDragging = false
     private overlayHudToolbar: HTMLDivElement | null = null
@@ -1098,7 +1096,7 @@ class ViewerApp implements Component {
 
     private async applyOverlayBitrate(mbps: number): Promise<void> {
         const hud = this.realtimeBitrateHud
-        if (!hud) return
+        if (!hud || this.restartInFlight || this.startupInProgress) return
         this.clearBitrateApplyDismissTimer()
         if (this.overlayBitrateApplyBtn) {
             this.overlayBitrateApplyBtn.hidden = true
@@ -1114,11 +1112,9 @@ class ViewerApp implements Component {
             this.overlayBitrateApplyBtn.disabled = true
         }
         try {
-            // TEMP: disabled restartStreamWithNewSettings to test realtime bitrate only.
-            // TODO: restore full restart when ready.
-            // await this.restartStreamWithNewSettings(settings)
-            this.stream?.requestVideoBitrateMbps(snapped, "overlaySlider", { immediate: true })
-            hud.setCommitted(snapped)
+            if (await this.restartStreamWithNewSettings(settings)) {
+                hud.setCommitted(snapped)
+            }
         } finally {
             hud.setApplyBusy(false)
             if (this.overlayBitrateApplyBtn) {
@@ -2217,8 +2213,25 @@ class ViewerApp implements Component {
         return this.hostId
     }
 
-    /** Graceful restart: stop current stream, then start again with new settings (no page refresh). */
-    async restartStreamWithNewSettings(settings: Settings): Promise<void> {
+    /**
+     * Graceful restart: stop current stream, then start again with new settings (no page refresh).
+     * Returns false when ignored because a startup or another restart is still running.
+     */
+    async restartStreamWithNewSettings(settings: Settings): Promise<boolean> {
+        if (this.restartInFlight || this.startupInProgress) {
+            console.info("[Stream]: restart ignored, a stream start is already in progress")
+            return false
+        }
+        this.restartInFlight = true
+        try {
+            await this.restartStreamNow(settings)
+        } finally {
+            this.restartInFlight = false
+        }
+        return true
+    }
+
+    private async restartStreamNow(settings: Settings): Promise<void> {
         this.cancelStartupTracking()
         this.startupAttemptId++
         const stream = this.stream
@@ -2237,12 +2250,15 @@ class ViewerApp implements Component {
             }
             this.adaptiveLog("reset adaptive mouse state (stream restart)")
             this.syncSoftwareCursorVisibility()
+            this.beginStartupOverlays()
             this.stream = null
             stream.unmount(this.div)
             await Promise.race([
                 stream.close(),
                 new Promise<void>((resolve) => setTimeout(resolve, STARTUP_CLOSE_LIMIT_MS)),
             ])
+            // Give the host time to end the old session before the new StartStream.
+            await new Promise<void>((resolve) => setTimeout(resolve, RESTART_SETTLE_MS))
         }
         this.settings = settings
         const browserWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0)
@@ -2272,6 +2288,7 @@ class ViewerApp implements Component {
             this.latestConnectionState = "Connected"
             this.sidebar.onCapabilitiesChange(data.capabilities)
             this.virtualControllerOverlay.onStreamConnected()
+            this.enableRealtimeBitrateHud()
         } else if (data.type === "generalChannelReady") {
             this.enableRealtimeBitrateHud()
         } else if (data.type == "hostCursorHidden") {
@@ -2347,12 +2364,7 @@ class ViewerApp implements Component {
                     }
                 }
             } else if (data.additional?.type === "informError") {
-                const line = data.line
-                if (line.includes(MOONLIGHT_BITRATE_LOG_PREFIX)) {
-                    console.warn(line)
-                } else {
-                    showErrorPopup(line)
-                }
+                showErrorPopup(data.line)
             } else if (
                 streamLogMatches(message, "log.wsClosed") ||
                 streamLogMatches(message, "log.wsOrWebrtcError")
@@ -2388,23 +2400,7 @@ class ViewerApp implements Component {
             this.updateFileTransferProgressCircle(data.percent, data.loaded, data.total, data.source)
         } else if (data.type == "fileTransferProgressEnd") {
             this.hideFileTransferProgressCircleImmediate()
-        } else if (data.type === "bitrateRequestApplied") {
-            if (data.source === "overlaySlider" || data.source === "preset") {
-                this.showBitrateSentMiniToast(data.mbps, data.source)
-            }
-        } else if (data.type === "bitrateHostApplied") {
-            if (this.shouldShowBitrateHudToast(data.source)) {
-                this.showBitrateHostAppliedMiniToast(data.mbps)
-            }
-        } else if (data.type === "bitrateHostRejected") {
-            if (this.shouldShowBitrateHudToast(data.source)) {
-                this.showBitrateHostRejectedMiniToast(data.mbps, data.reason)
-            }
         }
-    }
-
-    private shouldShowBitrateHudToast(source: "overlaySlider" | "preset" | "settings" | "slider" | undefined): boolean {
-        return source === "overlaySlider" || source === "preset" || source === undefined
     }
 
     private enableRealtimeBitrateHud(): void {
@@ -3321,9 +3317,6 @@ class ViewerApp implements Component {
         if (this.statsControlsGroup?.parentElement) {
             this.statsControlsGroup.parentElement.removeChild(this.statsControlsGroup)
         }
-        if (this.bitrateToastStack?.parentElement) {
-            this.bitrateToastStack.parentElement.removeChild(this.bitrateToastStack)
-        }
         this.settingsQuickButton = null
         this.mobileFabMenu = null
         this.fullscreenToggleButton = null
@@ -3338,7 +3331,6 @@ class ViewerApp implements Component {
         this.overlayBitrateRange = null
         this.realtimeBitrateHud = null
         this.statsControlsGroup = null
-        this.bitrateToastStack = null
         this.fullscreenToggleButtonManualPosition = false
         this.fullscreenToggleButtonDragging = false
         if (this.keyWatchdogInterval != null) {
@@ -3563,66 +3555,6 @@ class ViewerApp implements Component {
         return "bad"
     }
 
-    private showBitrateToast(text: string, variant: "sent" | "applied" | "rejected") {
-        let stack = this.bitrateToastStack
-        if (!stack || !stack.parentElement) {
-            stack = document.createElement("div")
-            stack.className = "ml-bitrate-toast-stack"
-            stack.setAttribute("aria-live", "polite")
-            document.body.appendChild(stack)
-            this.bitrateToastStack = stack
-        }
-        const toast = document.createElement("div")
-        const variantClass =
-            variant === "applied"
-                ? "ml-bitrate-toast--applied"
-                : variant === "rejected"
-                  ? "ml-bitrate-toast--rejected"
-                  : "ml-bitrate-toast--sent"
-        toast.className = `ml-bitrate-toast ${variantClass}`
-        toast.textContent = text
-        stack.appendChild(toast)
-        const dismissMs = variant === "sent" ? 2800 : 3200
-        window.setTimeout(() => {
-            toast.remove()
-            if (stack && stack.childElementCount === 0 && stack.parentElement) {
-                stack.parentElement.removeChild(stack)
-                if (this.bitrateToastStack === stack) {
-                    this.bitrateToastStack = null
-                }
-            }
-        }, dismissMs)
-    }
-
-    private showBitrateSentMiniToast(mbps: number, source: "overlaySlider" | "preset") {
-        const viaKey = source === "preset" ? "toast.via.preset" : "toast.via.slider"
-        this.showBitrateToast(
-            streamT("toast.bitrate.sent", {
-                mbps: formatStreamBitrateMbpsDisplay(mbps),
-                via: streamT(viaKey),
-            }),
-            "sent",
-        )
-    }
-
-    private showBitrateHostAppliedMiniToast(mbps: number) {
-        this.showBitrateToast(
-            streamT("toast.bitrate.applied", { mbps: formatStreamBitrateMbpsDisplay(mbps) }),
-            "applied",
-        )
-    }
-
-    private showBitrateHostRejectedMiniToast(mbps: number, reason: string) {
-        const shortReason = reason.length > 48 ? `${reason.slice(0, 45)}…` : reason
-        this.showBitrateToast(
-            streamT("toast.bitrate.rejected", {
-                mbps: formatStreamBitrateMbpsDisplay(mbps),
-                reason: shortReason,
-            }),
-            "rejected",
-        )
-    }
-
     private renderStatsOverlay(statsData: StreamStatsData) {
         const latency = this.getConnectionLatencyMs(statsData)
         const fps = typeof statsData.transport.webrtcFps === "number" ? statsData.transport.webrtcFps : statsData.videoFps
@@ -3651,7 +3583,7 @@ class ViewerApp implements Component {
         const bitrate = this.computeBitrateMbps(statsData)
         const formattedBitrate = this.formatWithUnit(bitrate, "Mbps", 2)
         const rawTargetMbps =
-            this.stream?.getRequestedVideoBitrateMbps() ?? getSettingsForApp(this.getAppId())?.bitrate
+            this.stream?.getSessionBitrateMbps() ?? getSettingsForApp(this.getAppId())?.bitrate
         const bitrateTone = this.toneForBitrateVsTarget(bitrate, rawTargetMbps)
         const targetBitrateRow =
             rawTargetMbps != null && Number.isFinite(rawTargetMbps)
@@ -4039,16 +3971,11 @@ class SettingsPanelModal implements Component, Modal<null> {
 
         // Stream settings UI (per-app)
         this.settingsComponent = new StreamSettingsComponent(getSettingsForApp(this.app.getAppId()) ?? undefined)
-        let prevBitrateForRealtime: number | undefined
         this.settingsComponent.addChangeListener(() => {
             const s = this.settingsComponent.getStreamSettings()
             setSettingsForApp(this.app.getAppId(), s)
             setPageStyle(s.pageStyle)
             this.app.refreshStreamOverlayBitrate()
-            if (prevBitrateForRealtime !== s.bitrate) {
-                prevBitrateForRealtime = s.bitrate
-                this.app.getStream()?.requestVideoBitrateMbps(s.bitrate, "settings")
-            }
         })
 
         // Body: sidebar + content area with 4 panels (Video includes speed test)

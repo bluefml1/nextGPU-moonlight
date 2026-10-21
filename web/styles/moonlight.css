@@ -2674,63 +2674,6 @@ canvas.video-stream {
     background: color-mix(in srgb, var(--accent-cyan-2, #00d4ff) 18%, rgba(0, 0, 0, 0.45));
 }
 
-.ml-bitrate-toast-stack {
-    position: fixed;
-    right: max(10px, env(safe-area-inset-right, 0px));
-    bottom: max(72px, env(safe-area-inset-bottom, 0px));
-    z-index: 100085;
-    display: flex;
-    flex-direction: column-reverse;
-    gap: 6px;
-    align-items: flex-end;
-    pointer-events: none;
-    max-width: min(300px, calc(100vw - 20px));
-    box-sizing: border-box;
-}
-
-.ml-bitrate-toast {
-    pointer-events: none;
-    padding: 8px 12px;
-    border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.22);
-    background: rgba(0, 0, 0, 0.88);
-    color: rgba(240, 245, 255, 0.95);
-    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1.35;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
-    animation: ml-bitrate-toast-in 0.18s ease-out;
-}
-
-.ml-bitrate-toast--applied {
-    border-color: rgba(72, 199, 116, 0.55);
-    color: rgba(210, 255, 225, 0.98);
-}
-
-.ml-bitrate-toast--rejected {
-    border-color: rgba(255, 120, 100, 0.55);
-    color: rgba(255, 220, 210, 0.98);
-}
-
-@keyframes ml-bitrate-toast-in {
-    from {
-        opacity: 0;
-        transform: translateY(6px);
-    }
-
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .ml-bitrate-toast {
-        animation: none;
-    }
-}
-
 .video-stats-summary {
     display: grid;
     grid-template-columns: 1fr;

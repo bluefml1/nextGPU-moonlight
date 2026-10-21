@@ -39,6 +39,9 @@ const SESSION_PREP_WAIT: Duration = Duration::from_secs(15);
 /// Well below Cloudflare's 100 s idle limit for proxied WebSockets.
 const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Below the browser's 8 s no-progress limit for the step before "Launching streamer".
+const PREVIOUS_STREAMER_STOP_WAIT: Duration = Duration::from_secs(5);
+
 use crate::{
     api::{cancel_session, start_session},
     app::{
@@ -224,7 +227,14 @@ pub async fn start_host(
         )
         .await;
 
-        if let Some(script_path) = start_session::resolve_start_session_script(web_app.config()) {
+        // startSession.ps1 recreates the Windows user, so it must never run while the renter's
+        // session is live (in-page restart for a bitrate change, page refresh).
+        let host_session_live = web_app.stream_sessions().host_session_live(host_id).await;
+        if host_session_live {
+            info!("[StartSession]: host {host_id:?} session live, skipping prep");
+        } else if let Some(script_path) =
+            start_session::resolve_start_session_script(web_app.config())
+        {
             let _ = send_ws_message(
                 &mut session,
                 StreamServerMessage::DebugLog {
@@ -266,6 +276,13 @@ pub async fn start_host(
                 return;
             }
         }
+
+        // Only one Sunshine session per host: stop an older streamer (restart, stale tab) first.
+        // Its WebSocket may already be gone, so this goes through the streamer registry.
+        web_app
+            .stream_sessions()
+            .stop_streamers(host_id, PREVIOUS_STREAMER_STOP_WAIT)
+            .await;
 
         // -- Starting stage: launch streamer
         if let Err(Closed) = send_ws_message(
@@ -341,6 +358,11 @@ pub async fn start_host(
         >(span, stdin, stdout, child.stderr.take())
         .await;
 
+        let streamer_registry = web_app.stream_sessions().clone();
+        let (streamer_id, streamer_epoch) = streamer_registry
+            .register_streamer(host_id, ipc_sender.clone())
+            .await;
+
         // Set once the streamer reports ConnectionComplete. From then on the WebRTC peer state
         // decides when the streamer stops (it terminates itself 10 s after the peer is lost),
         // so a WebSocket closed by a proxy must not kill a running stream.
@@ -408,6 +430,9 @@ pub async fn start_host(
                     }
                 }
                 info!("[Ipc]: ipc receiver is closed");
+                streamer_registry
+                    .unregister_streamer(host_id, streamer_id, streamer_epoch)
+                    .await;
 
                 // Wait for the child to shutdown
                 sleep(Duration::from_secs(10)).await;
@@ -501,6 +526,14 @@ pub async fn cancel_host(
     Json(request): Json<PostCancelRequest>,
 ) -> Result<Json<PostCancelResponse>, AppError> {
     let host_id = HostId(request.host_id);
+
+    // The next stream start must run startSession.ps1 again, and running streamers are stopped
+    // even when their WebSocket is already gone.
+    let registry = web_app.stream_sessions();
+    registry.reset_host(host_id).await;
+    registry
+        .stop_streamers(host_id, PREVIOUS_STREAMER_STOP_WAIT)
+        .await;
 
     // Push SessionCancelled to every open stream tab before tearing down the host session.
     web_app.cancel_stream_sessions(host_id).await;

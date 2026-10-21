@@ -25,10 +25,6 @@ export type ExecutionEnvironment = {
     worker: boolean
 }
 
-export type VideoBitrateChangeSource = "slider" | "preset" | "settings" | "overlaySlider"
-
-const MOONLIGHT_BITRATE_LOG_PREFIX = "[Moonlight][Bitrate]"
-
 export type InfoEvent = CustomEvent<
     { type: "app", app: App } |
     { type: "serverMessage", message: string } |
@@ -39,9 +35,6 @@ export type InfoEvent = CustomEvent<
     { type: "hostCursorShape", frame: HostCursorFrame | null } |
     { type: "fileTransferProgress", percent: number, loaded?: number, total?: number, source?: "file" | "clipboard" } |
     { type: "fileTransferProgressEnd", source?: "file" | "clipboard" } |
-    { type: "bitrateRequestApplied", mbps: number, source: VideoBitrateChangeSource } |
-    { type: "bitrateHostApplied", mbps: number, kbps: number, source?: VideoBitrateChangeSource } |
-    { type: "bitrateHostRejected", mbps: number, kbps: number, reason: string, source?: VideoBitrateChangeSource } |
     { type: "generalChannelReady" } |
     { type: "startupProgress", percent: number, step: StartupStep } |
     { type: "firstVideoFrame" } |
@@ -124,11 +117,6 @@ export class Stream implements Component {
 
     /** Moonlight video path is active (received ConnectionComplete). */
     private streamingVideoActive = false
-    private lastAppliedBitrateMbps: number | null = null
-    private pendingBitrateAckKbps: number | null = null
-    private pendingBitrateAckSource: VideoBitrateChangeSource | null = null
-    private bitrateRequestDebounceTimer: ReturnType<typeof setTimeout> | null = null
-    private readonly bitrateDebounceMs = 320
 
     private api: Api
 
@@ -461,13 +449,6 @@ export class Stream implements Component {
         if (message === "SessionCancelled") {
             this.dispatchInfo({ type: "sessionCancelled" })
             this.streamingVideoActive = false
-            this.lastAppliedBitrateMbps = null
-            this.pendingBitrateAckKbps = null
-            this.pendingBitrateAckSource = null
-            if (this.bitrateRequestDebounceTimer != null) {
-                clearTimeout(this.bitrateRequestDebounceTimer)
-                this.bitrateRequestDebounceTimer = null
-            }
             this.debugLog(streamDebugLine("log.connectionTerminated", { code: "SessionCancelled" }), {
                 type: "fatalDescription",
             })
@@ -560,7 +541,6 @@ export class Stream implements Component {
                 return
             }
             this.streamingVideoActive = true
-            this.lastAppliedBitrateMbps = this.settings.bitrate
             this.emitStartupProgress(95, "firstFrame")
             this.decodersReady = true
             this.maybeEmitFirstVideoFrame()
@@ -568,13 +548,6 @@ export class Stream implements Component {
             const code = message.ConnectionTerminated.error_code
 
             this.streamingVideoActive = false
-            this.lastAppliedBitrateMbps = null
-            this.pendingBitrateAckKbps = null
-            this.pendingBitrateAckSource = null
-            if (this.bitrateRequestDebounceTimer != null) {
-                clearTimeout(this.bitrateRequestDebounceTimer)
-                this.bitrateRequestDebounceTimer = null
-            }
 
             this.debugLog(streamDebugLine("log.connectionTerminated", { code }), { type: "fatalDescription" })
         }
@@ -804,16 +777,6 @@ export class Stream implements Component {
         }
     }
 
-    private clearPendingBitrateAckIfMatches(kbps: number): VideoBitrateChangeSource | undefined {
-        const source =
-            this.pendingBitrateAckKbps === kbps ? (this.pendingBitrateAckSource ?? undefined) : undefined
-        if (this.pendingBitrateAckKbps === kbps) {
-            this.pendingBitrateAckKbps = null
-            this.pendingBitrateAckSource = null
-        }
-        return source
-    }
-
     private handleGeneralMessage(message: GeneralServerMessage) {
         if ("HdrModeUpdate" in message) {
             const hdrUpdate = message.HdrModeUpdate
@@ -831,34 +794,6 @@ export class Stream implements Component {
                 })
                 this.eventTarget.dispatchEvent(event)
             }
-        } else if ("BitrateApplied" in message) {
-            const kbps = message.BitrateApplied.bitrate_kbps
-            const source = this.clearPendingBitrateAckIfMatches(kbps)
-            console.info(`${MOONLIGHT_BITRATE_LOG_PREFIX} applied: ${kbps} kbps (WebRTC general)`)
-            const hostApplied: InfoEvent = new CustomEvent("stream-info", {
-                detail: {
-                    type: "bitrateHostApplied",
-                    mbps: kbps / 1000,
-                    kbps,
-                    source,
-                },
-            })
-            this.eventTarget.dispatchEvent(hostApplied)
-        } else if ("BitrateRejected" in message) {
-            const kbps = message.BitrateRejected.bitrate_kbps
-            const reason = message.BitrateRejected.reason
-            const source = this.clearPendingBitrateAckIfMatches(kbps)
-            console.warn(`${MOONLIGHT_BITRATE_LOG_PREFIX} rejected: ${kbps} kbps (${reason})`)
-            const hostRejected: InfoEvent = new CustomEvent("stream-info", {
-                detail: {
-                    type: "bitrateHostRejected",
-                    mbps: kbps / 1000,
-                    kbps,
-                    reason,
-                    source,
-                },
-            })
-            this.eventTarget.dispatchEvent(hostRejected)
         } else if ("KeyboardLocks" in message) {
             const locks = message.KeyboardLocks
             this.debugLog(
@@ -1479,13 +1414,6 @@ export class Stream implements Component {
             this.dispatchInfo({ type: "transportClosed", reason: "web socket closed" })
         }
         this.streamingVideoActive = false
-        this.lastAppliedBitrateMbps = null
-        this.pendingBitrateAckKbps = null
-        this.pendingBitrateAckSource = null
-        if (this.bitrateRequestDebounceTimer != null) {
-            clearTimeout(this.bitrateRequestDebounceTimer)
-            this.bitrateRequestDebounceTimer = null
-        }
         this.resetKeyboardState("websocket closed")
     }
     private onError(event: Event) {
@@ -1518,13 +1446,6 @@ export class Stream implements Component {
     stop(): Promise<boolean> {
         this.resetKeyboardState("before stream stop")
         this.streamingVideoActive = false
-        this.lastAppliedBitrateMbps = null
-        this.pendingBitrateAckKbps = null
-        this.pendingBitrateAckSource = null
-        if (this.bitrateRequestDebounceTimer != null) {
-            clearTimeout(this.bitrateRequestDebounceTimer)
-            this.bitrateRequestDebounceTimer = null
-        }
         if (!this.sendGeneralMessage("Stop")) {
             return Promise.resolve(false)
         }
@@ -1586,67 +1507,9 @@ export class Stream implements Component {
         return this.stats
     }
 
-    /** Last video bitrate (Mbps) applied to the host via SetVideoBitrate, or initial session bitrate before first change. */
-    getRequestedVideoBitrateMbps(): number {
-        return this.lastAppliedBitrateMbps ?? this.settings.bitrate
-    }
-
-    /**
-     * Send realtime bitrate to the host (debounced for slider-like sources).
-     * `mbps` is converted to kbps for the wire and sent on the WebRTC `general` data channel when available.
-     */
-    requestVideoBitrateMbps(mbps: number, source: VideoBitrateChangeSource, opts?: { immediate?: boolean }): void {
-        const immediate = opts?.immediate === true
-        const bitrateKbps = Math.round(mbps * 1000)
-        if (!Number.isFinite(bitrateKbps) || bitrateKbps < 500) {
-            return
-        }
-
-        const fromMbps = this.lastAppliedBitrateMbps ?? this.settings.bitrate
-        const doSend = () => {
-            const appliedMbps = bitrateKbps / 1000
-            console.info(
-                `${MOONLIGHT_BITRATE_LOG_PREFIX} request: from=${fromMbps} to=${appliedMbps} Mbps (${bitrateKbps} kbps wire) source=${source}`
-            )
-            if (!this.sendGeneralMessage({ SetVideoBitrate: { bitrate_kbps: bitrateKbps } })) {
-                console.info(
-                    `${MOONLIGHT_BITRATE_LOG_PREFIX} request: WebRTC general channel unavailable; skip send to=${appliedMbps} Mbps source=${source}`
-                )
-                return
-            }
-            this.pendingBitrateAckKbps = bitrateKbps
-            this.pendingBitrateAckSource = source
-            this.lastAppliedBitrateMbps = appliedMbps
-            const applied: InfoEvent = new CustomEvent("stream-info", {
-                detail: { type: "bitrateRequestApplied", mbps: appliedMbps, source },
-            })
-            this.eventTarget.dispatchEvent(applied)
-        }
-
-        if (immediate || source === "preset") {
-            if (this.bitrateRequestDebounceTimer != null) {
-                clearTimeout(this.bitrateRequestDebounceTimer)
-                this.bitrateRequestDebounceTimer = null
-            }
-            doSend()
-            return
-        }
-
-        if (this.bitrateRequestDebounceTimer != null) {
-            clearTimeout(this.bitrateRequestDebounceTimer)
-        }
-        this.bitrateRequestDebounceTimer = setTimeout(() => {
-            this.bitrateRequestDebounceTimer = null
-            doSend()
-        }, this.bitrateDebounceMs)
-    }
-
-    /** Update last-known bitrate for UI/logging when settings change locally (e.g. overlay slider value). */
-    noteLocalBitrateMbps(mbps: number): void {
-        const kbps = Math.round(mbps * 1000)
-        if (Number.isFinite(kbps) && kbps >= 500) {
-            this.lastAppliedBitrateMbps = kbps / 1000
-        }
+    /** Video bitrate (Mbps) this session was started with; it stays fixed until the stream restarts. */
+    getSessionBitrateMbps(): number {
+        return this.settings.bitrate
     }
 
     getStreamerSize(): [number, number] {

@@ -3461,7 +3461,6 @@ dependencies = [
  "openssl-src",
  "openssl-sys",
  "pem",
- "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

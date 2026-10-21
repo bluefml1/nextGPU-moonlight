@@ -506,10 +506,6 @@ pub enum StreamServerMessage {
 pub enum GeneralServerMessage {
     ConnectionStatusUpdate { status: ConnectionStatus },
     HdrModeUpdate { enabled: bool },
-    /// Sunshine ml-stream-bitrate POST succeeded for the requested target.
-    BitrateApplied { bitrate_kbps: u32 },
-    /// Sunshine ml-stream-bitrate could not be applied (`reason` is a short code or message).
-    BitrateRejected { bitrate_kbps: u32, reason: String },
     /// Host Caps Lock / Num Lock state (Windows `GetKeyState`).
     KeyboardLocks { caps_lock: bool, num_lock: bool },
 }
@@ -518,8 +514,6 @@ pub enum GeneralServerMessage {
 #[ts(export, export_to = EXPORT_PATH)]
 pub enum GeneralClientMessage {
     Stop,
-    /// Realtime target encode bitrate while on WebRTC (sent on the `general` data channel).
-    SetVideoBitrate { bitrate_kbps: u32 },
     /// Request current host Caps Lock / Num Lock state.
     QueryKeyboardLocks,
 }

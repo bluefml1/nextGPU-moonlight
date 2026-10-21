@@ -13,9 +13,9 @@ import {
 
 export type Settings = {
     sidebarEdge: SidebarEdge,
-    /** When true (default), show the floating realtime bitrate control next to stats while streaming. */
+    /** When true (default), show the floating bitrate control next to stats while streaming. */
     showStreamBitrateHud: boolean
-    /** Video target bitrate in **Mbps** (host wire format uses kbps; see `Stream` / `SetVideoBitrate`). */
+    /** Video target bitrate in **Mbps**, fixed for the session; changing it restarts the stream. */
     bitrate: number
     packetSize: number
     videoFrameQueueSize: number

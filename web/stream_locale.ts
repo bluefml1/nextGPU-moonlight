@@ -80,12 +80,6 @@ const CATALOG: Record<StreamLocale, Record<string, string>> = {
         "upload.title": "Upload Status",
         "upload.done": "Upload \"{file}\" complete — check the file on the desktop",
 
-        "toast.bitrate.sent": "Bitrate {mbps} — sent ({via})",
-        "toast.bitrate.applied": "Bitrate {mbps} — applied",
-        "toast.bitrate.rejected": "Bitrate {mbps} — not applied ({reason})",
-        "toast.via.preset": "Preset",
-        "toast.via.slider": "Slider",
-
         "hud.quality": "Quality",
         "hud.stats": "Stats",
 
@@ -238,12 +232,6 @@ const CATALOG: Record<StreamLocale, Record<string, string>> = {
 
         "upload.title": "Trạng thái tải lên",
         "upload.done": "Đã tải lên \"{file}\" — kiểm tra tệp trên màn hình Desktop",
-
-        "toast.bitrate.sent": "Bitrate {mbps} — đã gửi ({via})",
-        "toast.bitrate.applied": "Bitrate {mbps} — đã áp dụng",
-        "toast.bitrate.rejected": "Bitrate {mbps} — chưa áp dụng ({reason})",
-        "toast.via.preset": "Cài đặt sẵn",
-        "toast.via.slider": "Thanh trượt",
 
         "hud.quality": "Chất lượng",
         "hud.stats": "Thống kê",
