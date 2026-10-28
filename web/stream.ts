@@ -64,6 +64,7 @@ const STARTUP_STEP_STALL_MS: Record<StartupStep, number | null> = {
     connect: 5_000,
     appCheck: 8_000,
     prep: 16_000,
+    clean: 16_000,
     launchStreamer: 8_000,
     negotiate: 8_000,
     startStream: 8_000,
@@ -77,6 +78,7 @@ const STARTUP_STEP_LABEL_KEY: Record<StartupStep, string> = {
     connect: "loading.step.connecting",
     appCheck: "loading.step.checkingMachine",
     prep: "loading.step.preparingSession",
+    clean: "loading.step.cleaningSession",
     launchStreamer: "loading.step.launchingStreamer",
     negotiate: "loading.step.negotiating",
     startStream: "loading.step.launchingApp",
@@ -92,6 +94,7 @@ function startupNextMilestone(step: StartupStep, realPercent: number): number {
         case "connect": return 5
         case "appCheck": return 15
         case "prep": return 22
+        case "clean": return 22
         case "launchStreamer": return 32
         case "negotiate": return Math.min(realPercent + 3, 45)
         case "startStream": return 50
@@ -1652,9 +1655,10 @@ class ViewerApp implements Component {
         if (!this.startupInProgress) return
         const now = performance.now()
         this.lastProgressAt = now
+        const stepChanged = step !== this.currentStep
         this.currentStep = step
         if (!this.attemptTimerFromLaunch) {
-            if (step === "prep") {
+            if (step === "prep" || step === "clean") {
                 this.attemptDeadline = Number.POSITIVE_INFINITY
             } else if (step !== "connect" && step !== "appCheck") {
                 this.attemptTimerFromLaunch = true
@@ -1668,6 +1672,9 @@ class ViewerApp implements Component {
         const mapped = this.mapAttemptPercent(this.attemptRealPercent)
         if (mapped > this.shownPercent) {
             this.shownPercent = mapped
+            this.shownLabel = streamT(STARTUP_STEP_LABEL_KEY[step])
+        } else if (stepChanged) {
+            // Creep can already be past this step's percent (e.g. "clean" at 18% after a slow "prep").
             this.shownLabel = streamT(STARTUP_STEP_LABEL_KEY[step])
         }
         MoonlightLoadingScreen.setProgress(this.shownPercent, this.shownLabel)
@@ -2191,8 +2198,12 @@ class ViewerApp implements Component {
         this.cancelStartupTracking()
         const stream = this.stream
         if (stream) {
-            const success = await stream.stop()
-            if (!success) console.debug("Failed to close stream correctly")
+            try {
+                const success = await stream.stop()
+                if (!success) console.debug("Failed to close stream correctly")
+            } catch (err) {
+                console.debug("Failed to close stream correctly", err)
+            }
         }
         window.close()
     }

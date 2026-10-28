@@ -15,7 +15,7 @@ import { StreamStats } from "./stats.js"
 import { Transport, TransportShutdown } from "./transport/index.js"
 import { WebSocketTransport } from "./transport/web_socket.js"
 import { WebRTCIceMode, WebRTCTransport } from "./transport/webrtc.js"
-import { allVideoCodecs, andVideoCodecs, createSupportedVideoFormatsBits, emptyVideoCodecs, getSelectedVideoCodec, hasAnyCodec, VideoCodecSupport } from "./video.js"
+import { allVideoCodecs, andVideoCodecs, createSupportedVideoFormatsBits, emptyVideoCodecs, getSelectedVideoCodec, hasAnyCodec, preferH265OverAv1, VideoCodecSupport } from "./video.js"
 import { FIRST_VIDEO_FRAME_EVENT } from "./video/first_frame.js"
 import { VideoRenderer } from "./video/index.js"
 import { buildVideoPipeline, VideoPipelineOptions } from "./video/pipeline.js"
@@ -48,6 +48,7 @@ export type StartupStep =
     "connect" |
     "appCheck" |
     "prep" |
+    "clean" |
     "launchStreamer" |
     "negotiate" |
     "startStream" |
@@ -99,14 +100,18 @@ function getVideoCodecHint(settings: Settings): VideoCodecSupport {
         videoCodecHint.H265_MAIN10 = true
         videoCodecHint.H265_REXT8_444 = true
         videoCodecHint.H265_REXT10_444 = true
+        videoCodecHint.AV1_MAIN8 = true
     } else if (settings.videoCodec == "av1") {
-        videoCodecHint.AV1 = true
         videoCodecHint.AV1_MAIN8 = true
         videoCodecHint.AV1_MAIN10 = true
-        videoCodecHint.AV1_REXT8_444 = true
-        videoCodecHint.AV1_REXT10_444 = true
     } else if (settings.videoCodec == "auto") {
         videoCodecHint = allVideoCodecs()
+    }
+    // Moonlight picks AV1 Main10 whenever both sides offer it, even for SDR, and the
+    // browser's WebRTC AV1 decoder drops 10-bit frames, so only offer it for HDR.
+    if (!settings.hdr) {
+        videoCodecHint.AV1_MAIN10 = false
+        videoCodecHint.AV1_HIGH10_444 = false
     }
     return videoCodecHint
 }
@@ -414,6 +419,9 @@ export class Stream implements Component {
     private trackStartupDebugLog(message: string) {
         if (message === "Preparing nextGPU session...") {
             this.emitStartupProgress(15, "prep")
+        } else if (message === "Cleaning nextGPU session...") {
+            // Repeats every few seconds while the host resets the rental user; each one counts as progress.
+            this.emitStartupProgress(18, "clean")
         } else if (message === "Launching streamer") {
             this.emitStartupProgress(22, "launchStreamer")
         } else if (message === "Completed Stage: Launch Streamer") {
@@ -1292,7 +1300,7 @@ export class Stream implements Component {
             return null
         }
 
-        return pipelineCodecSupport
+        return preferH265OverAv1(pipelineCodecSupport)
     }
     private async createAudioPlayer(): Promise<boolean> {
         if (this.audioPlayer) {

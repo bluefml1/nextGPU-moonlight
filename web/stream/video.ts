@@ -111,6 +111,26 @@ export function hasAnyCodec(codecs: VideoCodecSupport): boolean {
     return false
 }
 
+/**
+ * Moonlight negotiates AV1 before H265 whenever both are offered, so AV1 has to be
+ * withheld while H265 is usable for it to act as a fallback only.
+ */
+export function preferH265OverAv1(codecs: VideoCodecSupport): VideoCodecSupport {
+    const hasH265 = codecs.H265 === true || codecs.H265_MAIN10 === true ||
+        codecs.H265_REXT8_444 === true || codecs.H265_REXT10_444 === true
+    if (!hasH265) {
+        return codecs
+    }
+
+    return {
+        ...codecs,
+        AV1_MAIN8: false,
+        AV1_MAIN10: false,
+        AV1_HIGH8_444: false,
+        AV1_HIGH10_444: false
+    }
+}
+
 export function createSupportedVideoFormatsBits(support: VideoCodecSupport): number {
     let mask = 0
 

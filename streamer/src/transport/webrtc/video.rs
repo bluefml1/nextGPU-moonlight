@@ -43,7 +43,6 @@ use crate::transport::{
         WebRtcInner,
         sender::{SequencedTrackLocalStaticRTP, TrackLocalSender},
         video::{
-            annexb::AnnexBSplitter,
             h264::{payloader::H264Payloader, reader::H264Reader},
             h265::{payloader::H265Payloader, reader::H265Reader},
         },
@@ -51,6 +50,7 @@ use crate::transport::{
 };
 
 mod annexb;
+mod av1;
 mod h264;
 mod h265;
 
@@ -64,7 +64,6 @@ enum VideoCodec {
         payloader: H265Payloader,
     },
     Av1 {
-        annex_b: AnnexBSplitter<Cursor<Vec<u8>>>,
         payloader: Av1Payloader,
     },
 }
@@ -236,7 +235,6 @@ impl WebRtcVideo {
             | VideoFormat::Av1Main10
             | VideoFormat::Av1High8_444
             | VideoFormat::Av1High10_444 => Some(VideoCodec::Av1 {
-                annex_b: AnnexBSplitter::new(Cursor::new(Vec::new()), 0),
                 payloader: Default::default(),
             }),
         };
@@ -342,15 +340,13 @@ impl WebRtcVideo {
                 .await;
             }
             // -- AV1
-            Some(VideoCodec::Av1 { annex_b, payloader }) => {
-                annex_b.reset(Cursor::new(full_frame));
-
-                while let Ok(Some(annex_b_payload)) = annex_b.next() {
-                    let data =
-                        trim_bytes_to_range(annex_b_payload.full, annex_b_payload.payload_range);
-
-                    self.samples.push(data);
+            Some(VideoCodec::Av1 { payloader }) => {
+                if !av1::obu_stream_is_valid(&full_frame) {
+                    warn!("Dropping malformed AV1 frame ({} bytes)", full_frame.len());
+                    return DecodeResult::NeedIdr;
                 }
+
+                self.samples.push(BytesMut::from(&full_frame[..]));
 
                 send_single_frame(
                     &mut self.samples,

@@ -1749,33 +1749,40 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
     private label: string
     private channel: RTCDataChannel | null
     private boundOnMessage: (event: MessageEvent) => void
+    private boundOnOpen: () => void
 
     constructor(label: string, channel: RTCDataChannel | null) {
         this.label = label
         this.channel = channel
         this.boundOnMessage = this.onMessage.bind(this)
+        this.boundOnOpen = this.tryDequeueSendQueue.bind(this)
 
         this.channel?.addEventListener("message", this.boundOnMessage)
+        this.channel?.addEventListener("open", this.boundOnOpen)
     }
 
     // Replace the underlying channel with a new one (e.g., from remote peer)
     // This is used when we receive a data channel from the server that should
     // replace our locally created one for receiving messages
     replaceChannel(newChannel: RTCDataChannel): void {
-        // Remove listener from old channel
+        // Remove listeners from old channel
         this.channel?.removeEventListener("message", this.boundOnMessage)
-        // Add listener to new channel
+        this.channel?.removeEventListener("open", this.boundOnOpen)
+        // Add listeners to new channel
         this.channel = newChannel
         this.channel.addEventListener("message", this.boundOnMessage)
+        this.channel.addEventListener("open", this.boundOnOpen)
+
+        if (this.channel.readyState == "open") {
+            this.tryDequeueSendQueue()
+        }
     }
 
+    // Server-created channels start without an RTCDataChannel, so messages are
+    // queued until the remote channel arrives and opens.
     private sendQueue: Array<ArrayBuffer> = []
     send(message: ArrayBuffer): void {
-        if (!this.channel) {
-            throw `Failed to send message on channel ${this.label}`
-        }
-
-        if (this.channel.readyState != "open") {
+        if (!this.channel || this.channel.readyState != "open") {
             this.sendQueue.push(message)
         } else {
             this.tryDequeueSendQueue()
@@ -1783,8 +1790,11 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
         }
     }
     private tryDequeueSendQueue() {
+        if (!this.channel || this.channel.readyState != "open") {
+            return
+        }
         for (const message of this.sendQueue) {
-            this.channel?.send(message)
+            this.channel.send(message)
         }
         this.sendQueue.length = 0
     }

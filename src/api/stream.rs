@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use actix_web::{
@@ -29,12 +29,19 @@ use tokio::{
     io::AsyncWriteExt,
     process::Command,
     spawn,
+    sync::watch,
     time::{interval, sleep, timeout},
 };
 use tracing::{Level, instrument, span};
 
 /// How long one stream start waits for session prep; the prep itself keeps running past this.
 const SESSION_PREP_WAIT: Duration = Duration::from_secs(15);
+
+/// Progress cadence during a rental user reset; well below the browser's 16 s prep stall limit.
+const PREP_PROGRESS_INTERVAL: Duration = Duration::from_secs(4);
+
+/// Mapped to the "clean" startup step in `web/stream/index.ts`.
+const RENTAL_RESET_PROGRESS_MESSAGE: &str = "Cleaning nextGPU session...";
 
 /// Well below Cloudflare's 100 s idle limit for proxied WebSockets.
 const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -43,7 +50,10 @@ const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const PREVIOUS_STREAMER_STOP_WAIT: Duration = Duration::from_secs(5);
 
 use crate::{
-    api::{cancel_session, start_session},
+    api::{
+        cancel_session,
+        start_session::{self, PrepStatus, PrepWait},
+    },
     app::{
         App, AppError,
         host::{AppId, HostId},
@@ -244,23 +254,13 @@ pub async fn start_host(
             )
             .await;
 
-            let prep = start_session::ensure_prep(
+            let prep_error = match start_session::ensure_prep(
                 host_id,
                 script_path,
                 web_app.domain_txt_path().cloned(),
-            );
-            let prep_error = match timeout(SESSION_PREP_WAIT, prep).await {
-                Ok(Ok(())) => None,
-                Ok(Err(err)) => {
-                    warn!("[StartSession]: prep failed for host {host_id:?}: {err}");
-                    Some(format!("Session prep failed: {err}"))
-                }
-                Err(_) => {
-                    warn!(
-                        "[StartSession]: prep for host {host_id:?} still running after {SESSION_PREP_WAIT:?}, it keeps running for the next attempt"
-                    );
-                    Some("Session prep timed out".to_string())
-                }
+            ) {
+                PrepWait::Ready => None,
+                PrepWait::Pending(receiver) => wait_for_prep(host_id, receiver, &mut session).await,
             };
 
             if let Some(message) = prep_error {
@@ -508,6 +508,65 @@ pub async fn start_host(
     Ok(response)
 }
 
+/// Follow a session prep run and report progress to the browser.
+///
+/// While the RentalUserReset task runs, a progress line goes out every few seconds so the
+/// browser's prep stall timer and Cloudflare's idle limit don't end the attempt.
+/// Returns the fatal message to show, or `None` when the host is ready.
+async fn wait_for_prep(
+    host_id: HostId,
+    mut receiver: watch::Receiver<PrepStatus>,
+    session: &mut Session,
+) -> Option<String> {
+    let started = Instant::now();
+    loop {
+        let status = receiver.borrow_and_update().clone();
+        match status {
+            PrepStatus::Done(Ok(())) => return None,
+            PrepStatus::Done(Err(err)) => {
+                warn!("[StartSession]: prep failed for host {host_id:?}: {err}");
+                return Some(format!("Session prep failed: {err}"));
+            }
+            PrepStatus::Running => {
+                if started.elapsed() >= SESSION_PREP_WAIT {
+                    warn!(
+                        "[StartSession]: prep for host {host_id:?} still running after {SESSION_PREP_WAIT:?}, it keeps running for the next attempt"
+                    );
+                    return Some("Session prep timed out".to_string());
+                }
+            }
+            PrepStatus::Cleaning { since } => {
+                // The prep task enforces RENTAL_RESET_WAIT itself; the margin covers its final startSession run.
+                if since.elapsed() >= start_session::RENTAL_RESET_WAIT + SESSION_PREP_WAIT {
+                    warn!("[StartSession]: rental user reset for host {host_id:?} did not report back");
+                    return Some("Session prep timed out".to_string());
+                }
+                let sent = send_ws_message(
+                    session,
+                    StreamServerMessage::DebugLog {
+                        message: RENTAL_RESET_PROGRESS_MESSAGE.to_string(),
+                        ty: None,
+                    },
+                )
+                .await;
+                if sent.is_err() {
+                    info!("[StartSession]: web socket closed during rental user reset for host {host_id:?}, reset keeps running");
+                    return Some("Session prep interrupted".to_string());
+                }
+            }
+        }
+
+        let sender_gone = matches!(
+            timeout(PREP_PROGRESS_INTERVAL, receiver.changed()).await,
+            Ok(Err(_))
+        );
+        if sender_gone && !matches!(*receiver.borrow(), PrepStatus::Done(_)) {
+            start_session::abandon_prep(host_id);
+            return Some("Session prep failed: session prep stopped unexpectedly".to_string());
+        }
+    }
+}
+
 async fn send_ws_message(sender: &mut Session, message: StreamServerMessage) -> Result<(), Closed> {
     let Some(json) = serialize_json(&message) else {
         return Ok(());
@@ -531,6 +590,7 @@ pub async fn cancel_host(
     // even when their WebSocket is already gone.
     let registry = web_app.stream_sessions();
     registry.reset_host(host_id).await;
+    start_session::forget_prep(host_id);
     registry
         .stop_streamers(host_id, PREVIOUS_STREAMER_STOP_WAIT)
         .await;
