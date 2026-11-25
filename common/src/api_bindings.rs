@@ -379,6 +379,9 @@ pub enum StreamClientMessage {
         app_id: u32,
         video_frame_queue_size: usize,
         audio_sample_queue_size: usize,
+        /// When true, streamer adds recvonly audio before first SDP for client mic uplink.
+        #[serde(default)]
+        client_mic_enabled: bool,
     },
     WebRtc(StreamSignalingMessage),
     SetTransport(TransportType),
@@ -389,6 +392,8 @@ pub enum StreamClientMessage {
         width: u32,
         height: u32,
         play_audio_local: bool,
+        #[serde(default)]
+        client_mic_enabled: bool,
         video_supported_formats: u32,
         video_colorspace: StreamColorspace,
         video_color_range_full: bool,

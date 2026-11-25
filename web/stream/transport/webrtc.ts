@@ -78,9 +78,298 @@ export class WebRTCTransport implements Transport {
     onIceRestartRequested: (() => void) | null = null
     private connectedOnce = false
     private readonly lockIceAfterConnected = false
+    /** Raw getUserMedia track (AEC/NS applyConstraints target). */
+    private clientMicRawTrack: MediaStreamTrack | null = null
+    private clientMicRawStream: MediaStream | null = null
+    /** Processed track (GainNode → destination) used for replaceTrack uplink. */
+    private clientMicTrack: MediaStreamTrack | null = null
+    private clientMicSender: RTCRtpSender | null = null
+    /** Default muted: HUD shows crossed-out mic until user unmutes. */
+    private clientMicMuted = true
+    private clientMicAudioCtx: AudioContext | null = null
+    private clientMicGain: GainNode | null = null
+    private clientMicEchoCancellation = false
+    private clientMicNoiseSuppression = false
+    /** 100–200 → GainNode 1.0–2.0. Browser autoGainControl stays false. */
+    private clientMicGainPercent = 100
 
     constructor(logger?: Logger) {
         this.logger = logger ?? null
+    }
+
+    getClientMicDsp(): {
+        echoCancellation: boolean
+        noiseSuppression: boolean
+        gainPercent: number
+    } {
+        return {
+            echoCancellation: this.clientMicEchoCancellation,
+            noiseSuppression: this.clientMicNoiseSuppression,
+            gainPercent: this.clientMicGainPercent,
+        }
+    }
+
+    async setClientMicDsp(partial: {
+        echoCancellation?: boolean
+        noiseSuppression?: boolean
+        gainPercent?: number
+    }): Promise<void> {
+        if (partial.echoCancellation !== undefined) {
+            this.clientMicEchoCancellation = !!partial.echoCancellation
+        }
+        if (partial.noiseSuppression !== undefined) {
+            this.clientMicNoiseSuppression = !!partial.noiseSuppression
+        }
+        if (partial.gainPercent !== undefined) {
+            const p = Math.max(100, Math.min(200, Math.round(partial.gainPercent)))
+            this.clientMicGainPercent = p
+            if (this.clientMicGain) {
+                this.clientMicGain.gain.value = p / 100
+            }
+        }
+        const raw = this.clientMicRawTrack
+        if (!raw) {
+            return
+        }
+        try {
+            await raw.applyConstraints({
+                echoCancellation: this.clientMicEchoCancellation,
+                noiseSuppression: this.clientMicNoiseSuppression,
+                // Controllable gain is the GainNode slider; keep browser AGC off.
+                autoGainControl: false,
+            })
+        } catch (err) {
+            this.logger?.debug(`[ClientMic] applyConstraints failed (kept prior DSP): ${err}`)
+        }
+    }
+
+    private setupClientMicGainPipeline(rawTrack: MediaStreamTrack): MediaStreamTrack {
+        this.teardownClientMicGainPipeline()
+        const AudioCtx =
+            window.AudioContext ||
+            (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+        if (!AudioCtx) {
+            return rawTrack
+        }
+        const ctx = new AudioCtx()
+        const source = ctx.createMediaStreamSource(new MediaStream([rawTrack]))
+        const gain = ctx.createGain()
+        gain.gain.value = this.clientMicGainPercent / 100
+        const dest = ctx.createMediaStreamDestination()
+        source.connect(gain)
+        gain.connect(dest)
+        const processed = dest.stream.getAudioTracks()[0]
+        if (!processed) {
+            void ctx.close().catch(() => undefined)
+            return rawTrack
+        }
+        this.clientMicAudioCtx = ctx
+        this.clientMicGain = gain
+        if (ctx.state === "suspended") {
+            void ctx.resume().catch(() => undefined)
+        }
+        return processed
+    }
+
+    private teardownClientMicGainPipeline(): void {
+        this.clientMicGain = null
+        if (this.clientMicAudioCtx) {
+            void this.clientMicAudioCtx.close().catch(() => undefined)
+            this.clientMicAudioCtx = null
+        }
+    }
+
+    /**
+     * Capture mic early (getUserMedia) but do NOT addTransceiver before SDP.
+     * Attaching a local sendonly m-line before the streamer's recvonly offer causes
+     * glare / broken renegotiation so video never delivers firstFrame.
+     * The track is bound in handleRemoteDescription when answering an offer.
+     */
+    async enableClientMicrophone(): Promise<boolean> {
+        if (!this.peer) {
+            return false
+        }
+        if (this.clientMicTrack) {
+            return true
+        }
+        if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+            return false
+        }
+        try {
+            // Hard cap so a stuck permission prompt cannot delay WebRTC connect forever.
+            const gumTimeoutMs = 10000
+            const stream = await Promise.race([
+                // Raw-ish capture: AEC/NS/AGC make voice sound robotic / hard for ASR.
+                navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        channelCount: { ideal: 1 },
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false,
+                    },
+                    video: false,
+                }),
+                new Promise<never>((_, reject) => {
+                    window.setTimeout(
+                        () => reject(new Error(`getUserMedia timed out after ${gumTimeoutMs}ms`)),
+                        gumTimeoutMs,
+                    )
+                }),
+            ])
+            const rawTrack = stream.getAudioTracks()[0]
+            if (!rawTrack) {
+                stream.getTracks().forEach((t) => t.stop())
+                return false
+            }
+            this.clientMicRawStream = stream
+            this.clientMicRawTrack = rawTrack
+            const uplink = this.setupClientMicGainPipeline(rawTrack)
+            this.clientMicTrack = uplink
+            this.clientMicSender = null
+            rawTrack.enabled = !this.clientMicMuted
+            uplink.enabled = !this.clientMicMuted
+            return true
+        } catch (err) {
+            this.logger?.debug(`[ClientMic] capture failed: ${err}`)
+            return false
+        }
+    }
+
+    private countAudioMLines(sdp: string | undefined | null): number {
+        if (!sdp) {
+            return 0
+        }
+        return sdp.split(/\r?\n/).filter((l) => l.startsWith("m=audio")).length
+    }
+
+    /**
+     * Pick the host mic uplink transceiver (2nd audio m-line, recvonly → local sendonly).
+     * Never the game-audio m-line (first audio). Requires >= 2 audio transceivers.
+     */
+    private findClientMicTransceiver(): RTCRtpTransceiver | null {
+        if (!this.peer) {
+            return null
+        }
+        const audioAll = this.peer.getTransceivers().filter(
+            (t) => t.receiver?.track?.kind === "audio",
+        )
+        // One audio m-line is always game audio — never hijack it for mic uplink.
+        if (audioAll.length < 2) {
+            return null
+        }
+
+        const audioNoSender = audioAll.filter((t) => !t.sender.track)
+        if (audioNoSender.length === 0) {
+            return null
+        }
+
+        const isMicSlot = (t: RTCRtpTransceiver) => {
+            const dir = t.direction
+            const cur = t.currentDirection
+            return (
+                dir === "sendonly" ||
+                dir === "inactive" ||
+                cur === "sendonly" ||
+                cur === "inactive" ||
+                // Fresh mic m-line from host recvonly offer before answer settles.
+                (dir === "recvonly" && cur == null)
+            )
+        }
+
+        const preferred = [...audioNoSender].reverse().find(isMicSlot)
+        if (preferred) {
+            return preferred
+        }
+
+        // Fallback: last audio without a sender (newer mid = mic), never the first audio.
+        const last = audioNoSender[audioNoSender.length - 1]
+        const firstAudio = audioAll[0]
+        if (last && last !== firstAudio) {
+            return last
+        }
+        return null
+    }
+
+    /**
+     * Bind mic BEFORE answering a mic renegotiation offer (audioMLineCount >= 2)
+     * so SDP commits a=sendonly on the mic m-line only — never on game audio.
+     */
+    private async prepareClientMicrophoneForAnswer(
+        _phase: string,
+        remoteSdp?: string | null,
+    ): Promise<void> {
+        if (!this.peer || !this.clientMicTrack || this.clientMicSender) {
+            return
+        }
+        if (this.countAudioMLines(remoteSdp) < 2) {
+            return
+        }
+
+        const track = this.clientMicTrack
+        track.enabled = !this.clientMicMuted
+        if (this.clientMicRawTrack) {
+            this.clientMicRawTrack.enabled = !this.clientMicMuted
+        }
+
+        const preferred = this.findClientMicTransceiver()
+        if (!preferred) {
+            return
+        }
+
+        try {
+            preferred.direction = "sendonly"
+            await preferred.sender.replaceTrack(track)
+            this.clientMicSender = preferred.sender
+        } catch (err) {
+            this.logger?.debug(`[ClientMic] attach failed: ${err}`)
+        }
+    }
+
+    setClientMicrophoneMuted(muted: boolean): void {
+        this.clientMicMuted = muted
+        if (this.clientMicTrack) {
+            this.clientMicTrack.enabled = !muted
+        }
+        if (this.clientMicRawTrack) {
+            this.clientMicRawTrack.enabled = !muted
+        }
+    }
+
+    isClientMicrophoneMuted(): boolean {
+        return this.clientMicMuted
+    }
+
+    hasClientMicrophone(): boolean {
+        return this.clientMicTrack != null
+    }
+
+    private stopClientMicrophone(): void {
+        this.teardownClientMicGainPipeline()
+        if (this.clientMicTrack && this.clientMicTrack !== this.clientMicRawTrack) {
+            try {
+                this.clientMicTrack.stop()
+            } catch {
+                // ignore
+            }
+        }
+        if (this.clientMicRawTrack) {
+            try {
+                this.clientMicRawTrack.stop()
+            } catch {
+                // ignore
+            }
+        }
+        this.clientMicRawStream?.getTracks().forEach((t) => {
+            try {
+                t.stop()
+            } catch {
+                // ignore
+            }
+        })
+        this.clientMicTrack = null
+        this.clientMicRawTrack = null
+        this.clientMicRawStream = null
+        this.clientMicSender = null
     }
 
     private normalizeIceServerUrls(urls: string | string[]): string[] {
@@ -180,7 +469,6 @@ export class WebRTCTransport implements Transport {
         this.lastPathScoreLogAt = 0
 
         if (baseConfig.iceServers) {
-            const before = baseConfig.iceServers.length
             const normalized = baseConfig.iceServers
                 .map((server) => ({
                     ...server,
@@ -192,7 +480,6 @@ export class WebRTCTransport implements Transport {
                     server.urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"))
                 )
                 : normalized
-            this.logger?.debug(`Normalized ICE servers (${this.iceMode}): ${before} -> ${baseConfig.iceServers.length}`)
         }
 
         baseConfig.iceTransportPolicy = this.iceMode == "relay-only" ? "relay" : "all"
@@ -613,8 +900,6 @@ export class WebRTCTransport implements Transport {
 
     private remoteDescription: RTCSessionDescriptionInit | null = null
     private async handleRemoteDescription(sdp: RTCSessionDescriptionInit | null) {
-        this.logger?.debug(`Received remote description: ${sdp?.type}`)
-
         const remoteDescription = sdp
         this.remoteDescription = remoteDescription
         if (!this.peer) {
@@ -632,9 +917,7 @@ export class WebRTCTransport implements Transport {
                     remoteDescription.type == "offer" &&
                     this.peer.signalingState != "stable"
                 ) {
-                    this.logger?.debug(
-                        `Offer glare detected (state=${this.peer.signalingState}), rolling back local description`
-                    )
+                    this.logger?.debug("[Connect] glare rollback")
                     await this.peer.setLocalDescription({ type: "rollback" })
                 }
 
@@ -648,12 +931,19 @@ export class WebRTCTransport implements Transport {
 
                 await this.peer.setRemoteDescription(sanitizedRemoteDescription)
                 await this.tryDequeueIceCandidates()
+                this.logger?.debug(`[Connect] remote ${remoteDescription.type} OK`)
 
                 if (remoteDescription.type == "offer") {
+                    // Only bind on mic renegotiation (2+ audio m-lines). Never touch game-audio mid.
+                    await this.prepareClientMicrophoneForAnswer(
+                        "pre-answer",
+                        remoteDescription.sdp,
+                    )
+
                     await this.peer.setLocalDescription()
                     const localDescription = this.peer.localDescription
                     if (!localDescription) {
-                        this.logger?.debug("Peer didn't have a localDescription whilst receiving an offer and trying to answer")
+                        this.logger?.debug("[Connect] answer failed")
                         return
                     }
 
@@ -661,7 +951,7 @@ export class WebRTCTransport implements Transport {
                         ? this.enforceRelayInSdp(localDescription.sdp ?? "")
                         : this.deprioritizeRelayInSdp(localDescription.sdp ?? "")
 
-                    this.logger?.debug(`Responding to offer description (${this.iceMode}): ${localDescription.type}`)
+                    this.logger?.debug(`[Connect] answer (${this.iceMode})`)
                     this.sendMessage({
                         Description: {
                             ty: localDescription.type,
@@ -670,7 +960,7 @@ export class WebRTCTransport implements Transport {
                     })
                 }
             } catch (err) {
-                this.logger?.debug(`handleRemoteDescription failed: ${err}`)
+                this.logger?.debug(`[Connect] signaling failed: ${err}`)
                 // On error, clear negotiation flag so we can recover
                 this.isNegotiating = false
             }
@@ -714,7 +1004,6 @@ export class WebRTCTransport implements Transport {
                 for (const wake of this.srflxWaiters.splice(0)) {
                     wake()
                 }
-                this.logger?.debug(`Observed srflx candidate in ${this.iceMode}: ${candidateLine}`)
             }
 
             if (candidate.candidate && this.iceMode == "prefer-direct") {
@@ -735,7 +1024,6 @@ export class WebRTCTransport implements Transport {
             }
 
             this.emittedIceCandidateCount += 1
-            this.logger?.debug(`Sending ICE candidate (${this.iceMode}): ${candidate.candidate}`)
 
             if (this.iceMode == "prefer-direct" && candidateType == "relay") {
                 if (Date.now() < this.relayBlockUntilMs) {
@@ -835,10 +1123,8 @@ export class WebRTCTransport implements Transport {
         if (this.lockIceAfterConnected && this.connectedOnce) {
             return
         }
-        this.logger?.debug(`Received ice candidate: ${candidate.candidate}`)
         const candidateLine = (candidate.candidate ?? "").toLowerCase()
         if (candidateLine.includes(" tcp ")) {
-            this.logger?.debug("Ignoring remote TCP ICE candidate")
             return
         }
         if (this.iceMode == "prefer-direct" && candidateLine.includes(" typ relay ")) {
@@ -959,7 +1245,7 @@ export class WebRTCTransport implements Transport {
             }
         }
 
-        this.logger?.debug(`Changing Peer State to ${this.peer.connectionState}`, {
+        this.logger?.debug(`[Connect] peer ${this.peer.connectionState}`, {
             type: type ?? undefined
         })
     }
@@ -1052,13 +1338,14 @@ export class WebRTCTransport implements Transport {
             const pathScore = this.computePathScore(details)
             if (Date.now() - this.lastPathScoreLogAt >= this.pathScoreLogCooldownMs) {
                 this.lastPathScoreLogAt = Date.now()
-                this.logger?.debug(`ICE path score: ${JSON.stringify(pathScore)}`)
+                this.logger?.debug(
+                    `[Connect] ICE path ${pathScore.pairType} score=${pathScore.diagnosticScore}`,
+                )
             }
             this.maybeEscapeHatchRelayUnblock(pathScore, details)
             this.maybeApplyRelaySuppressionBias(details, pathScore)
-            this.logger?.debug(`Selected ICE candidate pair: ${JSON.stringify(details)}`)
-        } catch (err) {
-            this.logger?.debug(`Error while collecting ICE candidate stats: ${err}`)
+        } catch {
+            // ignore stats collection errors
         }
     }
 
@@ -1336,7 +1623,7 @@ export class WebRTCTransport implements Transport {
             this.logger?.debug("OnIceConnectionStateChange without a peer")
             return
         }
-        this.logger?.debug(`Changing Peer Ice State to ${this.peer.iceConnectionState}`)
+        this.logger?.debug(`[Connect] ice ${this.peer.iceConnectionState}`)
         if (this.peer.iceConnectionState == "connected" || this.peer.iceConnectionState == "completed") {
             this.restartAttempts = 0
             if (this.relayRaceStartedAtMs == 0) {
@@ -1432,7 +1719,7 @@ export class WebRTCTransport implements Transport {
             receiver.playoutDelayHint = 0
         }
 
-        this.logger?.debug(`Adding receiver: ${track.kind}, ${track.id}, ${track.label}`)
+        this.logger?.debug(`[Connect] track ${track.kind}`)
 
         if (track.kind == "video") {
             if ("contentHint" in track) {
@@ -1544,6 +1831,7 @@ export class WebRTCTransport implements Transport {
     onclose: ((shutdown: TransportShutdown) => void) | null = null
     async close(): Promise<void> {
         this.logger?.debug("Closing WebRTC Peer")
+        this.stopClientMicrophone()
         for (const wake of this.srflxWaiters.splice(0)) {
             wake()
         }

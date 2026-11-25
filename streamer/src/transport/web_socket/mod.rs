@@ -281,6 +281,7 @@ impl TransportSender for WebSocketTransportSender {
                 width,
                 height,
                 play_audio_local,
+                client_mic_enabled,
                 video_supported_formats,
                 video_colorspace,
                 video_color_range_full,
@@ -304,6 +305,7 @@ impl TransportSender for WebSocketTransportSender {
                             video_color_range_full,
                             video_colorspace: video_colorspace.into(),
                             play_audio_local,
+                            client_mic_enabled,
                             hdr,
                         },
                     })

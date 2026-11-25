@@ -1,7 +1,10 @@
 use std::{
     future::ready,
     pin::Pin,
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
     time::{Duration, Instant},
 };
 
@@ -16,7 +19,7 @@ use common::{
     config::{PortRange, WebRtcConfig},
     ipc::{ServerIpcMessage, StreamerIpcMessage},
 };
-use log::{debug, error, trace, warn};
+use log::{debug, error, info, trace, warn};
 use moonlight_common::stream::{
     audio::{AudioConfig, OpusMultistreamConfig},
     video::{DecodeResult, SupportedVideoFormats, VideoDecodeUnit, VideoSetup},
@@ -47,6 +50,7 @@ use webrtc::{
         configuration::RTCConfiguration,
         peer_connection_state::RTCPeerConnectionState,
         sdp::{sdp_type::RTCSdpType, session_description::RTCSessionDescription},
+        signaling_state::RTCSignalingState,
     },
 };
 
@@ -67,6 +71,7 @@ use crate::{
 };
 
 mod audio;
+mod client_mic;
 mod sender;
 mod video;
 
@@ -78,6 +83,9 @@ struct WebRtcInner {
     cursor_channel: Mutex<Option<Arc<RTCDataChannel>>>,
     video: Mutex<WebRtcVideo>,
     audio: Mutex<WebRtcAudio>,
+    client_mic: Arc<client_mic::ClientMicController>,
+    /// Mic recvonly m-line is added only after connect (StartStream), never in the first offer.
+    client_mic_transceiver_added: AtomicBool,
     // Timeout / Terminate
     pub timeout_terminate_request: Mutex<Option<Instant>>,
 }
@@ -86,6 +94,7 @@ pub async fn new(
     config: &WebRtcConfig,
     video_frame_queue_size: usize,
     audio_sample_queue_size: usize,
+    _client_mic_enabled: bool,
 ) -> Result<(WebRTCTransportSender, WebRTCTransportEvents), anyhow::Error> {
     // -- Configure WebRTC
     let rtc_config = RTCConfiguration {
@@ -154,6 +163,8 @@ pub async fn new(
     let cursor_channel = peer.create_data_channel("cursor", None).await?;
 
     let runtime = Handle::current();
+    let client_mic = Arc::new(client_mic::ClientMicController::new());
+
     let this_owned = Arc::new(WebRtcInner {
         peer: peer.clone(),
         event_sender,
@@ -170,6 +181,8 @@ pub async fn new(
             Arc::downgrade(&peer),
             audio_sample_queue_size,
         )),
+        client_mic: client_mic.clone(),
+        client_mic_transceiver_added: AtomicBool::new(false),
         timeout_terminate_request: Mutex::new(None),
     });
 
@@ -179,6 +192,9 @@ pub async fn new(
         this.clone().on_data_channel(general_channel).await;
         this.on_data_channel(cursor_channel).await;
     }
+
+    // Do NOT add client-mic transceiver here. An early audio m-line in the first
+    // SyncReady offer breaks ICE/connect. Mic is added on StartStream after connect.
 
     let this = Arc::downgrade(&this_owned);
 
@@ -211,6 +227,17 @@ pub async fn new(
             this.on_data_channel(channel).await;
         },
     ));
+
+    // -- Inbound client microphone (Opus)
+    {
+        let mic = client_mic.clone();
+        peer.on_track(Box::new(move |track, receiver, transceiver| {
+            let mic = mic.clone();
+            Box::pin(async move {
+                mic.on_track(track, receiver, transceiver).await;
+            })
+        }));
+    }
 
     drop(peer);
 
@@ -281,11 +308,114 @@ fn create_channel_message_handler(
 }
 
 impl WebRtcInner {
+    async fn send_client_debug(&self, message: impl Into<String>) {
+        let message = message.into();
+        info!("{message}");
+        if let Err(err) = self
+            .event_sender
+            .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
+                StreamServerMessage::DebugLog {
+                    message,
+                    ty: None,
+                },
+            )))
+            .await
+        {
+            warn!("[Connect] failed to forward debug log to client: {err:?}");
+        }
+    }
+
+    /// Returns true if the transceiver was newly added.
+    async fn ensure_client_mic_transceiver(&self) -> Result<bool, webrtc::Error> {
+        if self.client_mic_transceiver_added.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        client_mic::add_recvonly_audio_transceiver(&self.peer).await?;
+        self.client_mic_transceiver_added
+            .store(true, Ordering::SeqCst);
+        Ok(true)
+    }
+
+    async fn wait_for_signaling_stable(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let state = self.peer.signaling_state();
+            if state == RTCSignalingState::Stable {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                warn!(
+                    "[Connect] wait_for_signaling_stable timeout last_state={state}"
+                );
+                return false;
+            }
+            sleep(Duration::from_millis(40)).await;
+        }
+    }
+
+    /// Video (and usually game audio) renegotiate first — identical to mic-off.
+    /// Only then add mic so firstFrame is not blocked by an uplink audio m-line.
+    fn spawn_client_mic_after_av_stable(self: &Arc<Self>) {
+        if !self.client_mic.is_enabled() {
+            return;
+        }
+        if self.client_mic_transceiver_added.load(Ordering::SeqCst) {
+            return;
+        }
+        let this = Arc::clone(self);
+        spawn(async move {
+            // Wait out video (+ optional game-audio) offers/answers.
+            for _attempt in 0..50 {
+                if !this
+                    .wait_for_signaling_stable(Duration::from_secs(2))
+                    .await
+                {
+                    warn!("[ClientMic] timed out waiting for signaling stable before mic add");
+                    return;
+                }
+                // Brief settle so a follow-up audio setup offer can start.
+                sleep(Duration::from_millis(250)).await;
+                if this.peer.signaling_state() == RTCSignalingState::Stable {
+                    break;
+                }
+            }
+            // Let firstFrame path settle before mic renegotiation (fail-soft for stream perf).
+            sleep(Duration::from_millis(500)).await;
+            if this.peer.signaling_state() != RTCSignalingState::Stable {
+                if !this
+                    .wait_for_signaling_stable(Duration::from_secs(2))
+                    .await
+                {
+                    warn!("[ClientMic] abort mic add; signaling not stable after firstFrame delay");
+                    return;
+                }
+            }
+            if !this.client_mic.is_enabled() {
+                return;
+            }
+            match this.ensure_client_mic_transceiver().await {
+                Ok(true) => {
+                    if !this.send_offer().await {
+                        warn!("[ClientMic] mic renegotiation offer failed");
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    warn!("[ClientMic] failed to add recvonly transceiver: {err:?}");
+                }
+            }
+        });
+    }
+
     // -- Handle Connection State
-    async fn on_ice_connection_state_change(self: &Arc<Self>, _state: RTCIceConnectionState) {}
+    async fn on_ice_connection_state_change(self: &Arc<Self>, state: RTCIceConnectionState) {
+        info!("[Connect] ice_connection_state={state}");
+    }
     async fn on_peer_connection_state_change(self: Arc<Self>, state: RTCPeerConnectionState) {
+        info!("[Connect] peer_connection_state={state}");
         #[allow(clippy::collapsible_if)]
         if matches!(state, RTCPeerConnectionState::Closed) {
+            self.client_mic.stop().await;
             if let Err(err) = self.event_sender.send(TransportEvent::Closed).await {
                 warn!("Failed to send peer closed event to stream: {err:?}");
                 self.request_terminate().await;
@@ -294,6 +424,7 @@ impl WebRtcInner {
             state,
             RTCPeerConnectionState::Failed | RTCPeerConnectionState::Disconnected
         ) {
+            self.client_mic.stop().await;
             self.request_terminate().await;
         } else {
             self.clear_terminate_request().await;
@@ -372,10 +503,9 @@ impl WebRtcInner {
             return false;
         }
 
-        debug!(
-            "[Signaling] Sending Local Description as Offer: {:?}",
-            local_description.sdp
-        );
+        self.send_client_debug("[Connect] local offer")
+            .await;
+        debug!("[Signaling] Sending Local Description as Offer");
 
         if let Err(err) = self
             .event_sender
@@ -404,6 +534,7 @@ impl WebRtcInner {
                 width,
                 height,
                 play_audio_local,
+                client_mic_enabled,
                 video_supported_formats,
                 video_colorspace,
                 video_color_range_full,
@@ -417,6 +548,10 @@ impl WebRtcInner {
                     let mut video = self.video.lock().await;
                     video.set_codecs(video_supported_formats).await;
                 }
+
+                self.client_mic.set_enabled(client_mic_enabled).await;
+                self.send_client_debug("[Connect] StartStream")
+                .await;
 
                 // TODO: check peer for supported formats via sdp
 
@@ -433,6 +568,7 @@ impl WebRtcInner {
                             video_color_range_full,
                             video_colorspace: video_colorspace.into(),
                             play_audio_local,
+                            client_mic_enabled,
                             hdr,
                         },
                     })
@@ -442,7 +578,8 @@ impl WebRtcInner {
                 }
             }
             StreamClientMessage::WebRtc(StreamSignalingMessage::Description(description)) => {
-                debug!("[Signaling] Received Remote Description: {:?}", description);
+                self.send_client_debug(format!("[Connect] remote {:?}", description.ty))
+                    .await;
 
                 let description = match &description.ty {
                     RtcSdpType::Offer => RTCSessionDescription::offer(description.sdp),
@@ -467,11 +604,14 @@ impl WebRtcInner {
                 if remote_ty == RTCSdpType::Offer {
                     // Send an offer if we got an offer because we want to make the offer
                     // This makes negotiation more stable and consistant
+                    self.send_client_debug("[Connect] glare → local offer").await;
                     self.send_offer().await;
+                } else if let Err(err) = self.peer.set_remote_description(description).await {
+                    error!("[Signaling]: failed to set remote description: {err:?}");
+                    self.send_client_debug("[Connect] remote description failed")
+                        .await;
                 } else {
-                    if let Err(err) = self.peer.set_remote_description(description).await {
-                        error!("[Signaling]: failed to set remote description: {err:?}");
-                    }
+                    self.send_client_debug("[Connect] remote answer OK").await;
                 }
             }
             StreamClientMessage::WebRtc(StreamSignalingMessage::AddIceCandidate(description)) => {
@@ -491,7 +631,7 @@ impl WebRtcInner {
                 }
             }
             StreamClientMessage::WebRtc(StreamSignalingMessage::SyncReady) => {
-                debug!("[Signaling] Received sync-ready from browser, starting synchronized negotiation");
+                self.send_client_debug("[Connect] SyncReady").await;
                 self.send_sync_start().await;
                 self.send_offer().await;
             }
@@ -700,12 +840,25 @@ pub struct WebRTCTransportSender {
 #[async_trait]
 impl TransportSender for WebRTCTransportSender {
     async fn setup_video(&self, setup: VideoSetup) -> i32 {
-        let mut video = self.inner.video.lock().await;
-        if video.setup(&self.inner, setup).await {
-            0
-        } else {
-            -1
+        self.inner
+            .send_client_debug("[Connect] setup_video begin")
+            .await;
+        let ok = {
+            let mut video = self.inner.video.lock().await;
+            video.setup(&self.inner, setup).await
+        };
+        if !ok {
+            self.inner
+                .send_client_debug("[Connect] setup_video FAILED")
+                .await;
+            return -1;
         }
+        self.inner
+            .send_client_debug("[Connect] setup_video OK")
+            .await;
+        // Kick mic only after video offer is out — task waits for stable A/V first.
+        self.inner.spawn_client_mic_after_av_stable();
+        0
     }
     async fn send_video_unit<'a>(
         &'a self,

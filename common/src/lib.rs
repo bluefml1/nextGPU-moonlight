@@ -18,6 +18,8 @@ pub struct StreamSettings {
     pub width: u32,
     pub height: u32,
     pub play_audio_local: bool,
+    #[serde(default)]
+    pub client_mic_enabled: bool,
     pub video_supported_formats: SupportedVideoFormats,
     pub video_colorspace: ColorSpace,
     pub video_color_range_full: bool,

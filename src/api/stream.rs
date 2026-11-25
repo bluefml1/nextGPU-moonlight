@@ -107,6 +107,7 @@ pub async fn start_host(
             app_id,
             video_frame_queue_size,
             audio_sample_queue_size,
+            client_mic_enabled,
         } = message
         else {
             let _ = session.close(None).await;
@@ -465,6 +466,7 @@ pub async fn start_host(
                 app_id: app_id.0,
                 video_frame_queue_size,
                 audio_sample_queue_size,
+                client_mic_enabled,
             })
             .await;
 

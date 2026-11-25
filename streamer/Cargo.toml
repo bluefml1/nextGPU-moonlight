@@ -33,8 +33,11 @@ log = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
+opus = "0.3"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+cpal = "0.15"
 
 [lints]
 workspace = true

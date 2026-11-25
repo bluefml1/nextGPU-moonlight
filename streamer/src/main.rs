@@ -122,6 +122,7 @@ async fn main() {
         app_id,
         video_frame_queue_size,
         audio_sample_queue_size,
+        client_mic_enabled,
     ) = loop {
         match ipc_receiver.recv().await {
             Some(ServerIpcMessage::Init {
@@ -135,6 +136,7 @@ async fn main() {
                 app_id,
                 video_frame_queue_size,
                 audio_sample_queue_size,
+                client_mic_enabled,
             }) => {
                 break (
                     config,
@@ -147,6 +149,7 @@ async fn main() {
                     app_id,
                     video_frame_queue_size,
                     audio_sample_queue_size,
+                    client_mic_enabled,
                 );
             }
             _ => continue,
@@ -227,6 +230,7 @@ async fn main() {
         config,
         video_frame_queue_size,
         audio_sample_queue_size,
+        client_mic_enabled,
     )
     .await
     .expect("failed to create connection");
@@ -268,6 +272,8 @@ struct StreamConnection {
     // Video
     pub video_frame_queue_size: usize,
     pub audio_sample_queue_size: usize,
+    /// From browser Init — add recvonly mic transceiver before first SDP when true.
+    pub client_mic_enabled: bool,
     pub stream_setup: Mutex<StreamSetup>,
     // Stream
     pub stream: RwLock<Option<MoonlightStream>>,
@@ -290,6 +296,7 @@ impl StreamConnection {
         config: StreamerConfig,
         video_frame_queue_size: usize,
         audio_sample_queue_size: usize,
+        client_mic_enabled: bool,
     ) -> Result<Arc<Self>, anyhow::Error> {
         let (cursor_shape_tx, mut cursor_shape_rx) = mpsc::channel::<HostCursorShape>(64);
 
@@ -305,6 +312,7 @@ impl StreamConnection {
             }),
             video_frame_queue_size,
             audio_sample_queue_size,
+            client_mic_enabled,
             stream: RwLock::new(None),
             active_gamepads: RwLock::new(ActiveGamepads::empty()),
             pressed_keys: Mutex::new(HashSet::new()),
@@ -741,12 +749,16 @@ impl StreamConnection {
 
                 match transport_type {
                     TransportType::WebRTC => {
-                        info!("Trying WebRTC transport");
+                        info!(
+                            "Trying WebRTC transport (client_mic_enabled={})",
+                            self.client_mic_enabled
+                        );
 
                         let (sender, events) = match webrtc::new(
                             &self.config.webrtc,
                             self.video_frame_queue_size,
                             self.audio_sample_queue_size,
+                            self.client_mic_enabled,
                         )
                         .await
                         {

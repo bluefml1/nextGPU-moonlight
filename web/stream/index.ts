@@ -166,6 +166,9 @@ export class Stream implements Component {
     private firstFrameEmitted = false
     private closed = false
     private readonly firstFrameHandler = () => {
+        if (!this.firstFrameSeen) {
+            this.debugLog("[Connect] firstFrame seen from renderer")
+        }
         this.firstFrameSeen = true
         this.maybeEmitFirstVideoFrame()
     }
@@ -207,12 +210,15 @@ export class Stream implements Component {
         this.ws.addEventListener("close", this.onWsClose.bind(this))
         this.ws.addEventListener("message", this.onRawWsMessage.bind(this))
 
+        this.debugLog("[Connect] sending Init")
         this.sendWsMessage({
             Init: {
                 host_id: this.hostId,
                 app_id: this.appId,
                 video_frame_queue_size: this.settings.videoFrameQueueSize,
                 audio_sample_queue_size: this.settings.audioSampleQueueSize,
+                // Always enable client mic uplink for every stream session.
+                client_mic_enabled: true,
             }
         })
 
@@ -400,7 +406,18 @@ export class Stream implements Component {
             text.includes("connection status") ||
             text.includes("trạng thái kết nối") ||
             text.includes("connection complete") ||
-            text.includes("kết nối hoàn tất")
+            text.includes("kết nối hoàn tất") ||
+            text.includes("[clientmic]") ||
+            text.includes("voice") ||
+            text.includes("[connect]") ||
+            text.includes("[startup]") ||
+            text.includes("microphone") ||
+            text.includes("firstframe") ||
+            text.includes("first frame") ||
+            text.includes("webrtc") ||
+            text.includes("signaling") ||
+            text.includes("transceiver") ||
+            text.includes("getusermedia")
         )
     }
 
@@ -445,6 +462,7 @@ export class Stream implements Component {
     private maybeEmitFirstVideoFrame() {
         if (this.closed || this.firstFrameEmitted || !this.firstFrameSeen || !this.decodersReady) return
         this.firstFrameEmitted = true
+        this.debugLog("[Connect] firstFrame emitted (decoders ready)")
         this.dispatchInfo({ type: "firstVideoFrame" })
     }
 
@@ -465,9 +483,19 @@ export class Stream implements Component {
 
         if ("DebugLog" in message) {
             const debugLog = message.DebugLog
-
-            this.trackStartupDebugLog(debugLog.message)
-            this.debugLog(debugLog.message, {
+            const msg = debugLog.message ?? ""
+            // Drop host dumps that include SDP / ICE URLs / candidate lines.
+            if (
+                msg.includes("m=[") ||
+                msg.includes("a=send") ||
+                msg.includes("a=recv") ||
+                /\bcandidate:/i.test(msg) ||
+                /\b(stun|turn|turns):/i.test(msg)
+            ) {
+                return
+            }
+            this.trackStartupDebugLog(msg)
+            this.debugLog(msg, {
                 type: debugLog.ty ?? undefined
             })
         } else if ("UpdateApp" in message) {
@@ -565,20 +593,7 @@ export class Stream implements Component {
 
             this.iceServers = this.normalizeIceServersForUdpP2P(iceServers)
 
-            this.debugLog(`window.isSecureContext: ${window.isSecureContext}`)
-            const prettyIceUrls: string[] = []
-            for (const server of this.iceServers) {
-                const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
-                for (const url of urls) {
-                    if (typeof url == "string") {
-                        prettyIceUrls.push(url)
-                    }
-                }
-            }
-            this.debugLog(`Using WebRTC Ice Servers: ${createPrettyList(
-                prettyIceUrls
-            )}`)
-
+            this.debugLog("[Connect] setup OK")
             this.emitStartupProgress(35, "negotiate")
             await this.startConnection()
         }
@@ -587,8 +602,6 @@ export class Stream implements Component {
             const webrtcMessage = message.WebRtc
             if (this.transport instanceof WebRTCTransport) {
                 this.transport.onReceiveMessage(webrtcMessage)
-            } else {
-                this.debugLog(`Received WebRTC message but transport is currently ${this.transport?.implementationName}`)
             }
         }
     }
@@ -641,7 +654,7 @@ export class Stream implements Component {
     }
 
     async startConnection() {
-        this.debugLog(`Using transport: ${this.settings.dataTransport}`)
+        this.debugLog(`[Connect] transport=${this.settings.dataTransport}`)
         this.resetKeyboardState("before connection start")
 
         if (this.settings.dataTransport == "auto") {
@@ -671,6 +684,41 @@ export class Stream implements Component {
     private resetKeyboardState(reason: string) {
         this.debugLog(`[Keyboard] Resetting keyboard state (${reason})`)
         this.input.onInputContextLost()
+    }
+
+    setClientMicrophoneMuted(muted: boolean): void {
+        if (this.transport instanceof WebRTCTransport) {
+            this.transport.setClientMicrophoneMuted(muted)
+        }
+    }
+
+    hasClientMicrophone(): boolean {
+        return this.transport instanceof WebRTCTransport && this.transport.hasClientMicrophone()
+    }
+
+    isClientMicrophoneMuted(): boolean {
+        return this.transport instanceof WebRTCTransport && this.transport.isClientMicrophoneMuted()
+    }
+
+    getClientMicDsp(): {
+        echoCancellation: boolean
+        noiseSuppression: boolean
+        gainPercent: number
+    } {
+        if (this.transport instanceof WebRTCTransport) {
+            return this.transport.getClientMicDsp()
+        }
+        return { echoCancellation: false, noiseSuppression: false, gainPercent: 100 }
+    }
+
+    async setClientMicDsp(partial: {
+        echoCancellation?: boolean
+        noiseSuppression?: boolean
+        gainPercent?: number
+    }): Promise<void> {
+        if (this.transport instanceof WebRTCTransport) {
+            await this.transport.setClientMicDsp(partial)
+        }
     }
 
     private setTransport(transport: Transport) {
@@ -1026,9 +1074,11 @@ export class Stream implements Component {
         const transport = new WebRTCTransport(this.logger)
         transport.onsendmessage = (message) => this.sendWsMessage({ WebRtc: message })
 
-        transport.initPeer({
+        this.debugLog(`[Connect] start (${mode})`)
+        await transport.initPeer({
             iceServers: this.iceServers ?? [],
         }, mode)
+        // Mic capture waits until after WebRTC connects — must not touch SDP/ICE.
         this.setTransport(transport)
 
         const connected = await new Promise<boolean>((resolve) => {
@@ -1042,15 +1092,17 @@ export class Stream implements Component {
             }
 
             const timer = window.setTimeout(() => {
-                this.debugLog(`WebRTC ${mode} attempt timed out after ${timeoutMs}ms`)
+                this.debugLog(`[Connect] timeout (${mode})`)
                 complete(false)
             }, timeoutMs)
 
             transport.onconnect = () => {
+                this.debugLog(`[Connect] connected (${mode})`)
                 clearTimeout(timer)
                 complete(true)
             }
             transport.onclose = () => {
+                this.debugLog(`[Connect] closed before connect (${mode})`)
                 clearTimeout(timer)
                 this.resetKeyboardState("transport closed during negotiation")
                 complete(false)
@@ -1058,6 +1110,7 @@ export class Stream implements Component {
         })
 
         if (!connected) {
+            this.debugLog(`[Connect] failed (${mode})`)
             await transport.close()
         }
 
@@ -1065,14 +1118,14 @@ export class Stream implements Component {
     }
 
     private async tryWebRTCTransport(): Promise<TransportShutdown> {
-        this.debugLog("Trying WebRTC transport")
+        this.debugLog("[Connect] WebRTC")
 
         this.sendWsMessage({
             SetTransport: "WebRTC"
         })
 
         if (!this.iceServers) {
-            this.debugLog(`Failed to try WebRTC Transport: no ice servers available`)
+            this.debugLog("[Connect] no ICE config")
             return "failednoconnect"
         }
 
@@ -1080,40 +1133,48 @@ export class Stream implements Component {
         let result = false
 
         if (this.transportHint == "relay") {
-            this.debugLog("Previous attempt needed relay, skipping direct WebRTC attempts")
+            this.debugLog("[Connect] skip direct (use relay)")
         } else {
             // Staggered direct retries before relay fallback increases UDP P2P success under CGNAT.
             this.reachedTransport = "direct"
             this.emitStartupProgress(37, "negotiate")
-            const directAttempt = await this.connectWebRTCWithMode("prefer-direct", 3200)
+            const directAttempt = await this.connectWebRTCWithMode("prefer-direct", 10000)
             transport = directAttempt.transport
             result = directAttempt.connected
 
             if (!result && !this.closed) {
-                this.debugLog("Direct WebRTC attempt failed, retrying direct once with refreshed NAT warmup")
+                this.debugLog("[Connect] retry direct")
                 this.emitStartupProgress(40, "negotiate")
-                const secondDirectAttempt = await this.connectWebRTCWithMode("prefer-direct", 2600)
+                const secondDirectAttempt = await this.connectWebRTCWithMode("prefer-direct", 10000)
                 transport = secondDirectAttempt.transport
                 result = secondDirectAttempt.connected
             }
         }
 
         if (!result && !this.closed) {
-            this.debugLog("Direct WebRTC retries failed, retrying with relay-only fallback window")
+            this.debugLog("[Connect] fallback relay")
             this.reachedTransport = "relay"
             this.emitStartupProgress(43, "negotiate")
-            const relayAttempt = await this.connectWebRTCWithMode("relay-only", 6000)
+            const relayAttempt = await this.connectWebRTCWithMode("relay-only", 10000)
             transport = relayAttempt.transport
             result = relayAttempt.connected
         }
 
-        this.debugLog(`WebRTC negotiation success: ${result}`)
+        this.debugLog(`[Connect] done ok=${result}`)
 
         if (!result || !transport) {
             return "failednoconnect"
         }
         const connectedTransport = transport
         this.emitStartupProgress(45, "startStream")
+
+        // Always try mic after ICE connect; never fail the stream if gum/attach fails.
+        this.settings.clientMicEnabled = true
+        try {
+            await connectedTransport.enableClientMicrophone()
+        } catch {
+            // fail-soft: continue without uplink
+        }
 
         // Print pipe support
         const pipesInfo = await gatherPipeInfo()
@@ -1363,12 +1424,14 @@ export class Stream implements Component {
                 width: this.streamerSize[0],
                 height: this.streamerSize[1],
                 play_audio_local: this.settings.playAudioLocal,
+                client_mic_enabled: true,
                 video_supported_formats: createSupportedVideoFormatsBits(videoCodecSupport),
                 video_colorspace: "Rec709",
                 video_color_range_full: false,
                 hdr: this.settings.hdr ?? false,
             }
         }
+        this.debugLog("[Connect] StartStream")
         this.debugLog(`Starting stream with info: ${JSON.stringify(message)}`)
         this.debugLog(`Stream video codec info: ${JSON.stringify(videoCodecSupport)}`)
 

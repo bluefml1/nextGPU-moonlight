@@ -3225,6 +3225,12 @@ canvas.video-stream {
     flex: 0 0 auto;
 }
 
+.video-overlay-hud-tray__toolbar .video-overlay-hud-tray__mic {
+    order: 11;
+    flex: 0 0 auto;
+    position: relative;
+}
+
 .video-overlay-hud-tray__toolbar .video-overlay-bitrate-apply {
     order: 12;
     flex: 0 0 auto;
@@ -3352,6 +3358,256 @@ canvas.video-stream {
 
 .video-overlay-hud-tray__tool-btn:hover {
     background: rgba(255, 255, 255, 0.14);
+}
+
+.video-overlay-hud-tray__tool-btn--mic {
+    width: 30px;
+    min-width: 30px;
+    max-width: 30px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+}
+
+.video-overlay-hud-tray__mic-icon {
+    width: 16px;
+    height: 16px;
+    display: block;
+    color: #fff;
+}
+
+.video-overlay-hud-tray__mic-slash {
+    display: none;
+}
+
+.video-overlay-hud-tray__mic--muted .video-overlay-hud-tray__mic-slash,
+.video-overlay-hud-tray__tool-btn--mic-muted .video-overlay-hud-tray__mic-slash {
+    display: block;
+}
+
+.video-overlay-hud-tray__mic--muted .video-overlay-hud-tray__tool-btn--mic,
+.video-overlay-hud-tray__tool-btn--mic-muted {
+    opacity: 0.72;
+}
+
+.video-overlay-hud-tray__mic--unavailable .video-overlay-hud-tray__tool-btn--mic {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.video-overlay-hud-tray__mic-panel {
+    position: absolute;
+    left: 50%;
+    z-index: 40;
+    min-width: 220px;
+    max-width: min(280px, calc(100vw - 16px));
+    padding: 12px 12px 14px;
+    box-sizing: border-box;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(10, 14, 22, 0.96);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+    color: rgba(240, 245, 255, 0.96);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.35;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    pointer-events: auto;
+}
+
+/* Default / preferred: under the mic so top-of-screen HUDs stay visible */
+.video-overlay-hud-tray__mic--panel-below .video-overlay-hud-tray__mic-panel {
+    top: calc(100% + 10px);
+    bottom: auto;
+    transform: translateX(-50%);
+}
+
+.video-overlay-hud-tray__mic--panel-above .video-overlay-hud-tray__mic-panel {
+    bottom: calc(100% + 10px);
+    top: auto;
+    transform: translateX(-50%);
+}
+
+.video-overlay-hud-tray__mic--panel-align-start .video-overlay-hud-tray__mic-panel {
+    left: 0;
+    transform: none;
+}
+
+.video-overlay-hud-tray__mic--panel-align-end .video-overlay-hud-tray__mic-panel {
+    left: auto;
+    right: 0;
+    transform: none;
+}
+
+.video-overlay-hud-tray__mic-panel[hidden] {
+    display: none !important;
+}
+
+.video-overlay-hud-tray__mic-panel-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.video-overlay-hud-tray__mic-check {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    pointer-events: none;
+}
+
+.video-overlay-hud-tray__mic-check-ui {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    box-sizing: border-box;
+    border-radius: 4px;
+    border: 1.5px solid rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.06);
+    position: relative;
+    transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.video-overlay-hud-tray__mic-check-ui::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 1px;
+    width: 5px;
+    height: 9px;
+    border: solid #0b1220;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg) scale(0);
+    transform-origin: center;
+    transition: transform 0.12s ease;
+}
+
+.video-overlay-hud-tray__mic-check:checked + .video-overlay-hud-tray__mic-check-ui {
+    background: #8ec5ff;
+    border-color: #8ec5ff;
+}
+
+.video-overlay-hud-tray__mic-check:checked + .video-overlay-hud-tray__mic-check-ui::after {
+    transform: rotate(45deg) scale(1);
+}
+
+.video-overlay-hud-tray__mic-check:focus-visible + .video-overlay-hud-tray__mic-check-ui {
+    outline: 2px solid rgba(142, 197, 255, 0.7);
+    outline-offset: 2px;
+}
+
+.video-overlay-hud-tray__mic-panel-row:hover .video-overlay-hud-tray__mic-check-ui {
+    border-color: rgba(255, 255, 255, 0.55);
+}
+
+.video-overlay-hud-tray__mic-check-label {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.video-overlay-hud-tray__mic-panel-row--gain {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    cursor: default;
+    padding-top: 2px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    margin-top: 2px;
+}
+
+.video-overlay-hud-tray__mic-gain-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.video-overlay-hud-tray__mic-gain-value {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: rgba(190, 220, 255, 0.95);
+}
+
+.video-overlay-hud-tray__mic-gain-track {
+    position: relative;
+    height: 18px;
+    display: flex;
+    align-items: center;
+}
+
+.video-overlay-hud-tray__mic-gain-track::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.14);
+    pointer-events: none;
+}
+
+.video-overlay-hud-tray__mic-gain-fill {
+    position: absolute;
+    left: 0;
+    height: 4px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #6aa8ef, #b7dbff);
+    pointer-events: none;
+    width: 0%;
+}
+
+.video-overlay-hud-tray__mic-gain-range {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    margin: 0;
+    appearance: none;
+    -webkit-appearance: none;
+    background: transparent;
+    height: 18px;
+    cursor: pointer;
+}
+
+.video-overlay-hud-tray__mic-gain-range::-webkit-slider-runnable-track {
+    height: 4px;
+    background: transparent;
+    border: none;
+}
+
+.video-overlay-hud-tray__mic-gain-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border-radius: 50%;
+    border: 2px solid #0b1220;
+    background: #e8f3ff;
+    box-shadow: 0 0 0 1px rgba(142, 197, 255, 0.55);
+}
+
+.video-overlay-hud-tray__mic-gain-range::-moz-range-track {
+    height: 4px;
+    background: transparent;
+    border: none;
+}
+
+.video-overlay-hud-tray__mic-gain-range::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid #0b1220;
+    background: #e8f3ff;
+    box-shadow: 0 0 0 1px rgba(142, 197, 255, 0.55);
 }
 
 .video-overlay-hud-tray .video-fullscreen-toggle-btn {

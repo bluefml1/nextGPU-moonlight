@@ -30,6 +30,8 @@ export type Settings = {
     canvasRenderer: boolean
     canvasVsync: boolean
     playAudioLocal: boolean
+    /** When true, capture the browser mic and send Opus uplink to the host (WebRTC). */
+    clientMicEnabled: boolean
     audioSampleQueueSize: number
     mouseScrollMode: MouseScrollMode
     controllerConfig: ControllerConfig
@@ -125,6 +127,8 @@ export function getLocalStreamSettings(): Settings | null {
         if (settings.showStreamBitrateHud === undefined) {
             settings.showStreamBitrateHud = defaultSettings().showStreamBitrateHud
         }
+        // Always-on mic at stream start; keep persisted setting aligned.
+        settings.clientMicEnabled = true
         normalizeStorageBitrateToMbps(settings)
     }
 
@@ -173,6 +177,7 @@ export class StreamSettingsComponent implements Component {
 
     private audioHeader: HTMLHeadingElement = document.createElement("h2")
     private playAudioLocal: InputComponent
+    private clientMicEnabled: InputComponent
     private audioSampleQueueSize: InputComponent
 
     private mouseHeader: HTMLHeadingElement = document.createElement("h2")
@@ -383,6 +388,12 @@ export class StreamSettingsComponent implements Component {
         this.playAudioLocal.addChangeListener(this.onSettingsChange.bind(this))
         this.playAudioLocal.mount(this.audioSection)
 
+        this.clientMicEnabled = new InputComponent("clientMicEnabled", "checkbox", "Send Microphone to Host", {
+            checked: settings?.clientMicEnabled ?? defaultSettings_.clientMicEnabled
+        })
+        this.clientMicEnabled.addChangeListener(this.onSettingsChange.bind(this))
+        this.clientMicEnabled.mount(this.audioSection)
+
         // Audio Sample Queue Size
         this.audioSampleQueueSize = new InputComponent("audioSampleQueueSize", "number", "Audio Sample Queue Size", {
             defaultValue: defaultSettings_.audioSampleQueueSize.toString(),
@@ -534,6 +545,7 @@ export class StreamSettingsComponent implements Component {
             canvasRenderer: s.canvasRenderer,
             canvasVsync: s.canvasVsync,
             playAudioLocal: s.playAudioLocal,
+            clientMicEnabled: s.clientMicEnabled,
             audioSampleQueueSize: s.audioSampleQueueSize,
             dataTransport: s.dataTransport,
             hdr: s.hdr,
@@ -613,6 +625,7 @@ export class StreamSettingsComponent implements Component {
         settings.canvasVsync = this.canvasVsync.isChecked()
 
         settings.playAudioLocal = this.playAudioLocal.isChecked()
+        settings.clientMicEnabled = this.clientMicEnabled.isChecked()
         settings.audioSampleQueueSize = parseInt(this.audioSampleQueueSize.getValue())
 
         settings.mouseScrollMode = this.mouseScrollMode.getValue() as any

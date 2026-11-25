@@ -643,6 +643,11 @@ class ViewerApp implements Component {
     private overlayHudStatsSlot: HTMLDivElement | null = null
     private hudTrayQualityRestoreBtn: HTMLButtonElement | null = null
     private hudTrayStatsRestoreBtn: HTMLButtonElement | null = null
+    private hudTrayMicBtn: HTMLButtonElement | null = null
+    private hudTrayMicWrap: HTMLElement | null = null
+    private hudTrayMicPanel: HTMLElement | null = null
+    private hudTrayMicHideTimer: number | null = null
+    private hudTrayMicLongPressTimer: number | null = null
     private overlayHudDragHandle: HTMLDivElement | null = null
     private hudTrayDragPointerId: number | null = null
     private hudTrayDragCaptureEl: HTMLElement | null = null
@@ -1352,6 +1357,211 @@ class ViewerApp implements Component {
         statsBtn.textContent = streamT("hud.stats")
         statsBtn.addEventListener("click", () => this.reopenStreamStatsFromTray())
 
+        const micWrap = document.createElement("div")
+        micWrap.className = "video-overlay-hud-tray__mic"
+        const micBtn = document.createElement("button")
+        micBtn.type = "button"
+        micBtn.className = "video-overlay-hud-tray__tool-btn video-overlay-hud-tray__tool-btn--mic"
+        micBtn.innerHTML =
+            '<svg class="video-overlay-hud-tray__mic-icon" viewBox="0 0 24 24" aria-hidden="true">' +
+            '<path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>' +
+            '<line class="video-overlay-hud-tray__mic-slash" x1="4" y1="4" x2="20" y2="20" ' +
+            'stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>' +
+            "</svg>"
+
+        const micPanel = document.createElement("div")
+        micPanel.className = "video-overlay-hud-tray__mic-panel"
+        micPanel.hidden = true
+        micPanel.setAttribute("role", "group")
+        micPanel.setAttribute("aria-label", streamT("hud.micDspTitle"))
+
+        const mkCheck = (id: string, labelKey: string) => {
+            const row = document.createElement("label")
+            row.className = "video-overlay-hud-tray__mic-panel-row"
+            const input = document.createElement("input")
+            input.type = "checkbox"
+            input.className = "video-overlay-hud-tray__mic-check"
+            input.id = id
+            const box = document.createElement("span")
+            box.className = "video-overlay-hud-tray__mic-check-ui"
+            box.setAttribute("aria-hidden", "true")
+            const span = document.createElement("span")
+            span.className = "video-overlay-hud-tray__mic-check-label"
+            span.textContent = streamT(labelKey)
+            row.appendChild(input)
+            row.appendChild(box)
+            row.appendChild(span)
+            return { row, input }
+        }
+        const aec = mkCheck("hud-mic-aec", "hud.micEchoCancellation")
+        const ns = mkCheck("hud-mic-ns", "hud.micNoiseSuppression")
+        const gainRow = document.createElement("div")
+        gainRow.className = "video-overlay-hud-tray__mic-panel-row video-overlay-hud-tray__mic-panel-row--gain"
+        const gainLabel = document.createElement("span")
+        gainLabel.className = "video-overlay-hud-tray__mic-gain-label"
+        const gainValue = document.createElement("span")
+        gainValue.className = "video-overlay-hud-tray__mic-gain-value"
+        gainValue.textContent = "100%"
+        const gainHead = document.createElement("div")
+        gainHead.className = "video-overlay-hud-tray__mic-gain-head"
+        gainLabel.textContent = streamT("hud.micAutoGainControl")
+        gainHead.appendChild(gainLabel)
+        gainHead.appendChild(gainValue)
+        const gainTrack = document.createElement("div")
+        gainTrack.className = "video-overlay-hud-tray__mic-gain-track"
+        const gainFill = document.createElement("div")
+        gainFill.className = "video-overlay-hud-tray__mic-gain-fill"
+        const gainInput = document.createElement("input")
+        gainInput.type = "range"
+        gainInput.className = "video-overlay-hud-tray__mic-gain-range"
+        gainInput.min = "100"
+        gainInput.max = "200"
+        gainInput.step = "5"
+        gainInput.value = "100"
+        gainInput.id = "hud-mic-gain"
+        gainInput.setAttribute("aria-label", streamT("hud.micAutoGainControl"))
+        gainTrack.appendChild(gainFill)
+        gainTrack.appendChild(gainInput)
+        gainRow.appendChild(gainHead)
+        gainRow.appendChild(gainTrack)
+
+        micPanel.appendChild(aec.row)
+        micPanel.appendChild(ns.row)
+        micPanel.appendChild(gainRow)
+
+        const syncGainFill = () => {
+            const min = Number(gainInput.min) || 100
+            const max = Number(gainInput.max) || 200
+            const val = Number(gainInput.value) || min
+            const pct = max <= min ? 0 : ((val - min) / (max - min)) * 100
+            gainFill.style.width = `${pct}%`
+        }
+
+        const positionMicPanel = () => {
+            micWrap.classList.remove(
+                "video-overlay-hud-tray__mic--panel-below",
+                "video-overlay-hud-tray__mic--panel-above",
+                "video-overlay-hud-tray__mic--panel-align-start",
+                "video-overlay-hud-tray__mic--panel-align-end",
+            )
+            // Default: below the tray so top-of-screen HUDs stay readable.
+            micWrap.classList.add("video-overlay-hud-tray__mic--panel-below")
+            const wrapRect = micWrap.getBoundingClientRect()
+            const panelH = Math.max(micPanel.offsetHeight, 120)
+            const panelW = Math.max(micPanel.offsetWidth, 200)
+            const gap = 10
+            const spaceBelow = window.innerHeight - wrapRect.bottom
+            const spaceAbove = wrapRect.top
+            // Prefer below; flip above only when below cannot fit and above has more room.
+            if (spaceBelow < panelH + gap && spaceAbove > spaceBelow && spaceAbove >= panelH + gap) {
+                micWrap.classList.remove("video-overlay-hud-tray__mic--panel-below")
+                micWrap.classList.add("video-overlay-hud-tray__mic--panel-above")
+            }
+            const centerX = wrapRect.left + wrapRect.width / 2
+            if (centerX - panelW / 2 < 8) {
+                micWrap.classList.add("video-overlay-hud-tray__mic--panel-align-start")
+            } else if (centerX + panelW / 2 > window.innerWidth - 8) {
+                micWrap.classList.add("video-overlay-hud-tray__mic--panel-align-end")
+            }
+        }
+
+        const showMicPanel = () => {
+            if (this.hudTrayMicHideTimer != null) {
+                window.clearTimeout(this.hudTrayMicHideTimer)
+                this.hudTrayMicHideTimer = null
+            }
+            const stream = this.getStream()
+            const dsp = stream?.getClientMicDsp?.() ?? {
+                echoCancellation: false,
+                noiseSuppression: false,
+                gainPercent: 100,
+            }
+            aec.input.checked = dsp.echoCancellation
+            ns.input.checked = dsp.noiseSuppression
+            gainInput.value = String(dsp.gainPercent)
+            gainValue.textContent = `${dsp.gainPercent}%`
+            syncGainFill()
+            micPanel.hidden = false
+            micWrap.classList.add("video-overlay-hud-tray__mic--open")
+            requestAnimationFrame(() => positionMicPanel())
+        }
+        const scheduleHideMicPanel = () => {
+            if (this.hudTrayMicHideTimer != null) {
+                window.clearTimeout(this.hudTrayMicHideTimer)
+            }
+            this.hudTrayMicHideTimer = window.setTimeout(() => {
+                micPanel.hidden = true
+                micWrap.classList.remove("video-overlay-hud-tray__mic--open")
+                this.hudTrayMicHideTimer = null
+            }, 220)
+        }
+
+        micWrap.addEventListener("pointerenter", (e) => {
+            if (e.pointerType === "mouse" || e.pointerType === "pen") {
+                showMicPanel()
+            }
+        })
+        micWrap.addEventListener("pointerleave", (e) => {
+            if (e.pointerType === "mouse" || e.pointerType === "pen") {
+                scheduleHideMicPanel()
+            }
+        })
+        let micLongPressOpenedPanel = false
+        micBtn.addEventListener("pointerdown", (e) => {
+            if (e.pointerType !== "touch") return
+            micLongPressOpenedPanel = false
+            if (this.hudTrayMicLongPressTimer != null) {
+                window.clearTimeout(this.hudTrayMicLongPressTimer)
+            }
+            this.hudTrayMicLongPressTimer = window.setTimeout(() => {
+                this.hudTrayMicLongPressTimer = null
+                micLongPressOpenedPanel = true
+                showMicPanel()
+            }, 420)
+        })
+        const clearMicLongPress = () => {
+            if (this.hudTrayMicLongPressTimer != null) {
+                window.clearTimeout(this.hudTrayMicLongPressTimer)
+                this.hudTrayMicLongPressTimer = null
+            }
+        }
+        micBtn.addEventListener("pointerup", clearMicLongPress)
+        micBtn.addEventListener("pointercancel", clearMicLongPress)
+        micBtn.addEventListener("click", () => {
+            if (Date.now() < this.hudTrayDragSuppressClickUntilMs) return
+            if (micLongPressOpenedPanel) {
+                micLongPressOpenedPanel = false
+                return
+            }
+            const stream = this.getStream()
+            if (!stream?.hasClientMicrophone()) {
+                micBtn.title = streamT("hud.micUnavailable")
+                return
+            }
+            const nextMuted = !stream.isClientMicrophoneMuted()
+            stream.setClientMicrophoneMuted(nextMuted)
+            this.syncHudMicButton()
+        })
+        micPanel.addEventListener("click", (e) => e.stopPropagation())
+        micPanel.addEventListener("pointerdown", (e) => e.stopPropagation())
+
+        aec.input.addEventListener("change", () => {
+            void this.getStream()?.setClientMicDsp?.({ echoCancellation: aec.input.checked })
+        })
+        ns.input.addEventListener("change", () => {
+            void this.getStream()?.setClientMicDsp?.({ noiseSuppression: ns.input.checked })
+        })
+        gainInput.addEventListener("input", () => {
+            const pct = Number(gainInput.value) || 100
+            gainValue.textContent = `${pct}%`
+            syncGainFill()
+            void this.getStream()?.setClientMicDsp?.({ gainPercent: pct })
+        })
+        syncGainFill()
+
+        micWrap.appendChild(micBtn)
+        micWrap.appendChild(micPanel)
+
         const button = document.createElement("button")
         button.type = "button"
         button.classList.add("video-fullscreen-toggle-btn")
@@ -1386,6 +1596,7 @@ class ViewerApp implements Component {
         toolbar.appendChild(dragHandle)
         toolbar.appendChild(bitrateHud.root)
         toolbar.appendChild(bitrateApplyBtn)
+        toolbar.appendChild(micWrap)
         toolbar.appendChild(statsBtn)
         toolbar.appendChild(button)
         toolbar.appendChild(qualityBtn)
@@ -1403,13 +1614,35 @@ class ViewerApp implements Component {
         this.overlayHudDragHandle = dragHandle
         this.hudTrayQualityRestoreBtn = qualityBtn
         this.hudTrayStatsRestoreBtn = statsBtn
+        this.hudTrayMicBtn = micBtn
+        this.hudTrayMicWrap = micWrap
+        this.hudTrayMicPanel = micPanel
         this.overlayBitrateRange = bitrateHud.range
         this.realtimeBitrateHud = bitrateHud
         this.fullscreenToggleButton = button
         this.syncHudTrayToolbarButtons()
+        this.syncHudMicButton()
         this.syncFullscreenToggleButtonLabel()
         this.syncFullscreenToggleButtonPosition()
         this.applyStreamHudVisibility()
+    }
+
+    private syncHudMicButton(): void {
+        const btn = this.hudTrayMicBtn
+        if (!btn) return
+        const stream = this.getStream()
+        const hasMic = !!stream?.hasClientMicrophone()
+        btn.disabled = !hasMic
+        const muted = !hasMic || !!stream?.isClientMicrophoneMuted()
+        btn.title = !hasMic
+            ? streamT("hud.micUnavailable")
+            : muted
+                ? streamT("hud.micUnmute")
+                : streamT("hud.micMute")
+        btn.setAttribute("aria-label", btn.title)
+        btn.classList.toggle("video-overlay-hud-tray__tool-btn--mic-muted", muted)
+        this.hudTrayMicWrap?.classList.toggle("video-overlay-hud-tray__mic--muted", muted)
+        this.hudTrayMicWrap?.classList.toggle("video-overlay-hud-tray__mic--unavailable", !hasMic)
     }
 
     private ensureMobileFabMenu() {
@@ -2300,6 +2533,11 @@ class ViewerApp implements Component {
             this.sidebar.onCapabilitiesChange(data.capabilities)
             this.virtualControllerOverlay.onStreamConnected()
             this.enableRealtimeBitrateHud()
+            this.syncHudMicButton()
+            // Mic capture finishes shortly after ICE; refresh crossed-out / available state.
+            window.setTimeout(() => this.syncHudMicButton(), 500)
+            window.setTimeout(() => this.syncHudMicButton(), 2000)
+            window.setTimeout(() => this.syncHudMicButton(), 5000)
         } else if (data.type === "generalChannelReady") {
             this.enableRealtimeBitrateHud()
         } else if (data.type == "hostCursorHidden") {
@@ -3338,6 +3576,17 @@ class ViewerApp implements Component {
         this.overlayHudStatsSlot = null
         this.hudTrayQualityRestoreBtn = null
         this.hudTrayStatsRestoreBtn = null
+        this.hudTrayMicBtn = null
+        this.hudTrayMicWrap = null
+        this.hudTrayMicPanel = null
+        if (this.hudTrayMicHideTimer != null) {
+            window.clearTimeout(this.hudTrayMicHideTimer)
+            this.hudTrayMicHideTimer = null
+        }
+        if (this.hudTrayMicLongPressTimer != null) {
+            window.clearTimeout(this.hudTrayMicLongPressTimer)
+            this.hudTrayMicLongPressTimer = null
+        }
         this.overlayHudDragHandle = null
         this.overlayBitrateRange = null
         this.realtimeBitrateHud = null

@@ -83,6 +83,13 @@ const CATALOG: Record<StreamLocale, Record<string, string>> = {
 
         "hud.quality": "Quality",
         "hud.stats": "Stats",
+        "hud.micMute": "Mute mic",
+        "hud.micUnmute": "Unmute mic",
+        "hud.micUnavailable": "Microphone not active",
+        "hud.micDspTitle": "Microphone options",
+        "hud.micEchoCancellation": "Echo cancellation",
+        "hud.micNoiseSuppression": "Noise suppression",
+        "hud.micAutoGainControl": "Auto gain control",
 
         "bitrateHud.aria.group": "Stream bitrate",
         "bitrateHud.aria.range": "Stream bitrate while streaming",
@@ -237,6 +244,13 @@ const CATALOG: Record<StreamLocale, Record<string, string>> = {
 
         "hud.quality": "Chất lượng",
         "hud.stats": "Thống kê",
+        "hud.micMute": "Tắt mic",
+        "hud.micUnmute": "Bật mic",
+        "hud.micUnavailable": "Mic không hoạt động",
+        "hud.micDspTitle": "Tùy chọn mic",
+        "hud.micEchoCancellation": "Khử tiếng vọng",
+        "hud.micNoiseSuppression": "Khử nhiễu",
+        "hud.micAutoGainControl": "Tự động chỉnh gain",
 
         "bitrateHud.aria.group": "Bitrate stream",
         "bitrateHud.aria.range": "Bitrate stream khi đang phát",

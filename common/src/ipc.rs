@@ -39,6 +39,8 @@ pub enum ServerIpcMessage {
         app_id: u32,
         video_frame_queue_size: usize,
         audio_sample_queue_size: usize,
+        #[serde(default)]
+        client_mic_enabled: bool,
     },
     WebSocket(StreamClientMessage),
     WebSocketTransport(Bytes),
